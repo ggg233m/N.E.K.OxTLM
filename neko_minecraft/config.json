@@ -1,0 +1,6 @@
+{
+  "ws_url": "ws://localhost:48920",
+  "heartbeat_interval": 30,
+  "reconnect_interval": 5,
+  "max_reconnect_interval": 60
+}

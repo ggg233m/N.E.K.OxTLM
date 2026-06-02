@@ -1,0 +1,64 @@
+[plugin]
+id = "neko_minecraft"
+name = "N.E.K.O Minecraft x 车万女仆"
+description = "将 N.E.K.O AI 连接到 Minecraft 中的车万女仆（TouhouLittleMaid），允许 AI 控制女仆并感知游戏事件"
+short_description = "控制车万女仆：跟随、坐下、切换工作模式、攻击目标、装备物品、执行指令、触发技能"
+keywords = [
+    "minecraft", "touhou-little-maid", "bridge", "game",
+    "女仆", "跟随", "驻守", "坐下", "站起", "工作", "模式", "任务",
+    "攻击", "打怪", "装备", "物品", "指令", "技能", "日程",
+    "切换", "执行", "农耕", "甘蔗", "待机", "喂食", "剪羊毛", "插火把",
+    "苦力怕", "僵尸", "骷髅",
+    "follow", "sit", "attack", "equip", "skill", "command", "task", "schedule",
+    "maid", "farm", "idle", "feed", "shear", "torch", "creeper", "zombie", "skeleton"
+]
+version = "1.0.0"
+entry = "neko_minecraft_loader:NekoMinecraftPlugin"
+
+[plugin.author]
+name = "N.E.K.O Community"
+
+[plugin.sdk]
+recommended = ">=0.1.0,<0.2.0"
+supported = ">=0.1.0,<0.3.0"
+
+[plugin.i18n]
+default_locale = "zh-CN"
+locales_dir = "i18n"
+
+[plugin_runtime]
+enabled = true
+auto_start = false
+
+[plugin.store]
+enabled = true
+
+[plugin.ui]
+enabled = true
+
+[[plugin.ui.panel]]
+id = "main"
+title = "Minecraft Bridge"
+entry = "ui/panel.tsx"
+context = "dashboard"
+permissions = ["state:read", "action:call", "config:read"]
+
+[[plugin.entries]]
+id = "refresh_maid_status"
+name = "Refresh Maid Status"
+description = "Fetch current maid status from Minecraft"
+kind = "action"
+
+[[plugin.entries]]
+id = "assign_maid"
+name = "Assign Maid"
+description = "Assign a specific maid by ID for the AI to control"
+kind = "action"
+
+[minecraft_bridge]
+ws_url = "ws://127.0.0.1:48920"
+heartbeat_interval = 30
+reconnect_interval = 5
+max_reconnect_interval = 60
+assigned_maid_id = ""
+assigned_maid_name = ""

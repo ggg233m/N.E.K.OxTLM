@@ -1,0 +1,1 @@
+$env:JAVA_HOME = "C:\Users\35269\AppData\Roaming\.minecraft\runtime\java-runtime-delta"; cd h:\AI\mc-touhu-neko\minecraft-mod; .\gradlew.bat build 2>&1
