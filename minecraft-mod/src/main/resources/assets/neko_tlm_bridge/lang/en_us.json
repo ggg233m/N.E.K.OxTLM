@@ -4,8 +4,6 @@
   "neko_tlm_bridge.config.websocket.port.tooltip": "WebSocket port number for N.E.K.O plugin connection",
   "neko_tlm_bridge.config.bridge.nekoModeEnabled": "N.E.K.O Mode",
   "neko_tlm_bridge.config.bridge.nekoModeEnabled.tooltip": "When enabled, maid AI conversations will be driven by N.E.K.O",
-  "neko_tlm_bridge.config.bridge.ignoreTlmBuiltinContext": "Ignore TLM Builtin Context",
-  "neko_tlm_bridge.config.bridge.ignoreTlmBuiltinContext.tooltip": "When enabled, TLM's built-in AI context will be ignored to prevent conflicts with N.E.K.O",
   "neko_tlm_bridge.config.bridge.eventPushEnabled": "Event Push",
   "neko_tlm_bridge.config.bridge.eventPushEnabled.tooltip": "When enabled, game events will be pushed to N.E.K.O via WebSocket",
   "neko_tlm_bridge.config.bridge.commandExecutionEnabled": "Command Execution",

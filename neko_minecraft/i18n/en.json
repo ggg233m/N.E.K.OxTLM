@@ -4,6 +4,8 @@
   "connection.title": "Connection Status",
   "connection.connected": "Connected",
   "connection.disconnected": "Disconnected",
+  "connection.pluginNotEnabled": "Plugin Not Enabled",
+  "connection.pluginNotEnabledHint": "The plugin has not started yet. Please enable this plugin in N.E.K.O, then click the refresh button to reload.",
   "connection.wsUrl": "WebSocket URL",
   "command.title": "Command Execution",
   "command.enabled": "Command execution enabled — AI can request Minecraft commands, player confirmation required in-game",

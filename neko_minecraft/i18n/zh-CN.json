@@ -4,6 +4,8 @@
   "connection.title": "连接状态",
   "connection.connected": "已连接",
   "connection.disconnected": "未连接",
+  "connection.pluginNotEnabled": "插件未启用",
+  "connection.pluginNotEnabledHint": "插件尚未启动，请先在 N.E.K.O 中启用此插件，然后点击刷新按钮重新加载。",
   "connection.wsUrl": "WebSocket 地址",
   "command.title": "指令执行",
   "command.enabled": "指令执行已启用 — AI 可以请求执行 Minecraft 指令，玩家需在游戏内确认",

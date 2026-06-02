@@ -59,6 +59,20 @@ export default function Panel(props: PluginSurfaceProps<State>) {
   const assignedMaid = maids.find((m) => m.id === assignedId)
   const selectedMaid = maids.find((m) => m.id === selectedMaidId)
 
+  if (state == null) {
+    return (
+      <Page title={t("panel.title")} subtitle={t("panel.subtitle")}>
+        <Card title={t("connection.title")}>
+          <Stack>
+            <StatusBadge tone="error">{t("connection.pluginNotEnabled")}</StatusBadge>
+            <Text>{t("connection.pluginNotEnabledHint")}</Text>
+            <RefreshButton />
+          </Stack>
+        </Card>
+      </Page>
+    )
+  }
+
   return (
     <Page title={t("panel.title")} subtitle={t("panel.subtitle")}>
       <Card title={t("connection.title")}>
@@ -72,6 +86,7 @@ export default function Panel(props: PluginSurfaceProps<State>) {
             ]}
           />
           <Stack direction="horizontal">
+            <RefreshButton />
             {refreshAction && (
               <ActionButton action={refreshAction}>{t("actions.refresh")}</ActionButton>
             )}

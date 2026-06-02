@@ -4,8 +4,6 @@
   "neko_tlm_bridge.config.websocket.port.tooltip": "N.E.K.O 插件连接的 WebSocket 端口号",
   "neko_tlm_bridge.config.bridge.nekoModeEnabled": "N.E.K.O 模式",
   "neko_tlm_bridge.config.bridge.nekoModeEnabled.tooltip": "启用后，女仆的 AI 对话将由 N.E.K.O 驱动",
-  "neko_tlm_bridge.config.bridge.ignoreTlmBuiltinContext": "忽略车万女仆内置上下文",
-  "neko_tlm_bridge.config.bridge.ignoreTlmBuiltinContext.tooltip": "启用后，将忽略车万女仆自带的 AI 上下文，防止与 N.E.K.O 冲突",
   "neko_tlm_bridge.config.bridge.eventPushEnabled": "事件推送",
   "neko_tlm_bridge.config.bridge.eventPushEnabled.tooltip": "启用后，游戏事件将通过 WebSocket 推送给 N.E.K.O",
   "neko_tlm_bridge.config.bridge.commandExecutionEnabled": "指令执行",

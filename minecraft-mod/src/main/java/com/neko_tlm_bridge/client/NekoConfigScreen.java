@@ -14,13 +14,11 @@ public class NekoConfigScreen extends Screen {
     private Button nekoModeButton;
     private EditBox portEditBox;
     private Button eventPushButton;
-    private Button ignoreTlmContextButton;
     private Button commandExecutionButton;
     private Button doneButton;
 
     private boolean nekoModeEnabled;
     private boolean eventPushEnabled;
-    private boolean ignoreTlmBuiltinContext;
     private boolean commandExecutionEnabled;
 
     public NekoConfigScreen(Screen parent) {
@@ -34,7 +32,6 @@ public class NekoConfigScreen extends Screen {
 
         nekoModeEnabled = ModConfig.NEKO_MODE_ENABLED.get();
         eventPushEnabled = ModConfig.EVENT_PUSH_ENABLED.get();
-        ignoreTlmBuiltinContext = ModConfig.IGNORE_TLM_BUILTIN_CONTEXT.get();
         commandExecutionEnabled = ModConfig.COMMAND_EXECUTION_ENABLED.get();
 
         int centerX = this.width / 2;
@@ -63,22 +60,13 @@ public class NekoConfigScreen extends Screen {
         ).bounds(centerX - 100, 110, 200, 20).build();
         this.addRenderableWidget(eventPushButton);
 
-        ignoreTlmContextButton = Button.builder(
-                toggleText("neko_tlm_bridge.config.bridge.ignoreTlmBuiltinContext", ignoreTlmBuiltinContext),
-                button -> {
-                    ignoreTlmBuiltinContext = !ignoreTlmBuiltinContext;
-                    button.setMessage(toggleText("neko_tlm_bridge.config.bridge.ignoreTlmBuiltinContext", ignoreTlmBuiltinContext));
-                }
-        ).bounds(centerX - 100, 140, 200, 20).build();
-        this.addRenderableWidget(ignoreTlmContextButton);
-
         commandExecutionButton = Button.builder(
                 toggleText("neko_tlm_bridge.config.bridge.commandExecutionEnabled", commandExecutionEnabled),
                 button -> {
                     commandExecutionEnabled = !commandExecutionEnabled;
                     button.setMessage(toggleText("neko_tlm_bridge.config.bridge.commandExecutionEnabled", commandExecutionEnabled));
                 }
-        ).bounds(centerX - 100, 170, 200, 20).build();
+        ).bounds(centerX - 100, 140, 200, 20).build();
         this.addRenderableWidget(commandExecutionButton);
 
         doneButton = Button.builder(
@@ -109,8 +97,8 @@ public class NekoConfigScreen extends Screen {
                     ? Component.translatable("neko_tlm_bridge.config.connection_connected")
                     : Component.translatable("neko_tlm_bridge.config.connection_disconnected");
             int statusColor = connected ? 0x55FF55 : 0xFF5555;
-            guiGraphics.drawString(this.font, statusLabel, centerX - 100, 200, 0xA0A0A0);
-            guiGraphics.drawString(this.font, statusValue, centerX + 100 - this.font.width(statusValue), 200, statusColor);
+            guiGraphics.drawString(this.font, statusLabel, centerX - 100, 170, 0xA0A0A0);
+            guiGraphics.drawString(this.font, statusValue, centerX + 100 - this.font.width(statusValue), 170, statusColor);
         } else {
             guiGraphics.drawCenteredString(this.font, Component.translatable("neko_tlm_bridge.config.neko_mode_hint"), this.width / 2, 70, 0xA0A0A0);
         }
@@ -131,7 +119,6 @@ public class NekoConfigScreen extends Screen {
         boolean visible = nekoModeEnabled;
         portEditBox.visible = visible;
         eventPushButton.visible = visible;
-        ignoreTlmContextButton.visible = visible;
         commandExecutionButton.visible = visible;
         if (!visible) {
             portEditBox.setFocused(false);
@@ -148,7 +135,6 @@ public class NekoConfigScreen extends Screen {
         } catch (NumberFormatException ignored) {
         }
         ModConfig.EVENT_PUSH_ENABLED.set(eventPushEnabled);
-        ModConfig.IGNORE_TLM_BUILTIN_CONTEXT.set(ignoreTlmBuiltinContext);
         ModConfig.COMMAND_EXECUTION_ENABLED.set(commandExecutionEnabled);
         ModConfig.SPEC.save();
     }
