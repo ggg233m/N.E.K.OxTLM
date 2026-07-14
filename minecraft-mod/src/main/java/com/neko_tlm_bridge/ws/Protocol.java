@@ -12,6 +12,10 @@ public final class Protocol {
     public static final String TYPE_SET_MONITORED_MAID = "set_monitored_maid";
     public static final String TYPE_SET_PLAN = "set_plan";
     public static final String TYPE_GET_PLAN = "get_plan";
+    public static final String TYPE_START_MAID_ACTION = "start_maid_action";
+    public static final String TYPE_CANCEL_MAID_ACTION = "cancel_maid_action";
+    public static final String TYPE_GET_MAID_ACTION_STATUS = "get_maid_action_status";
+    public static final String TYPE_LIST_ACTIVE_MAID_ACTIONS = "list_active_maid_actions";
     public static final String TYPE_PING = "ping";
 
     public static final String TYPE_MAID_STATUS = "maid_status";
@@ -29,6 +33,12 @@ public final class Protocol {
     public static final String TYPE_CONFIG_UPDATE = "config_update";
     public static final String TYPE_PLAN_RESULT = "plan_result";
     public static final String TYPE_PLAN_UPDATE = "plan_update";
+    public static final String TYPE_MAID_ACTION_START_RESULT = "maid_action_start_result";
+    public static final String TYPE_MAID_ACTION_CANCEL_RESULT = "maid_action_cancel_result";
+    public static final String TYPE_MAID_ACTION_STATUS = "maid_action_status";
+    public static final String TYPE_MAID_ACTION_LIST = "maid_action_list";
+    public static final String TYPE_MAID_ACTION_PROGRESS = "maid_action_progress";
+    public static final String TYPE_MAID_ACTION_FINISHED = "maid_action_finished";
 
     // New event types for companion awareness
     public static final String EVENT_MAID_HURT = "maid_hurt";

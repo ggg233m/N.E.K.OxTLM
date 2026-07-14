@@ -1,0 +1,21 @@
+package com.neko_tlm_bridge.tlm.agent;
+
+public enum ActionEndReason {
+    COMPLETED,
+    REQUESTED,
+    USER_OVERRIDE,
+    SAFETY_PREEMPTED,
+    SUPERSEDED,
+    TIMEOUT,
+    VALIDATION_FAILED,
+    PATH_NOT_FOUND,
+    STUCK,
+    TARGET_CHANGED,
+    BLOCK_PROTECTED,
+    TOOL_NOT_FOUND,
+    HAND_CONFLICT,
+    ENTITY_UNLOADED,
+    ENTITY_DEAD,
+    SERVER_STATE_LOST,
+    INTERNAL_ERROR
+}
