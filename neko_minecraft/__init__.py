@@ -17,6 +17,7 @@ from . import events as _events
 from . import plan as _plan
 from . import diagnostics as _diagnostics
 from .awareness import AwarenessManager
+from .maid_agent import MaidActionService
 from . import tools as _tools
 from .playmate import PlaymateContextManager, MinecraftPushRouter
 from .playmate.debug_log import PlaymateDebugLogger
@@ -25,7 +26,8 @@ from .tool_defs import (
     MC_MAID_STATUS, MC_SWITCH_FOLLOW, MC_SWITCH_SIT,
     MC_SWITCH_TASK, MC_SWITCH_SCHEDULE, MC_EQUIP_ITEM,
     MC_SEND_CHAT, MC_GAME_CONTEXT, MC_USE_SKILL, MC_EXECUTE_COMMAND,
-    MC_SET_PLAN,
+    MC_SET_PLAN, MC_START_MAID_ACTION, MC_CANCEL_MAID_ACTION,
+    MC_GET_MAID_ACTION_STATUS, MC_LIST_ACTIVE_MAID_ACTIONS,
 )
 
 # respond 事件的 coalesce_key 映射：相同 key 的新推送覆盖旧的未消费推送
@@ -121,6 +123,7 @@ class NekoMinecraftPlugin(NekoPluginBase):
         self.logger = ctx.logger
         self._bridge = None
         self._poll_task = None
+        self._instruction_task = None
         self._maid_status_refresh_task = None
         self._request_futures = {}
         self._maid_status_cache = {}
@@ -161,6 +164,7 @@ class NekoMinecraftPlugin(NekoPluginBase):
         self._minecraft_push = MinecraftPushRouter(self)
         self._playmate = PlaymateContextManager(self)
         self._awareness = AwarenessManager(self)
+        self._maid_action_service = MaidActionService(self)
 
     async def _load_config(self):
         await _config.load_config(self)
@@ -186,6 +190,9 @@ class NekoMinecraftPlugin(NekoPluginBase):
         self._maid_status_cache = {}
         self._last_diagnostic = None
         self._instructions_injected = False
+        if self._instruction_task and not self._instruction_task.done():
+            self._instruction_task.cancel()
+        self._instruction_task = None
         old_bridge = self._bridge
         self._bridge = None
         if old_bridge:
@@ -278,6 +285,12 @@ class NekoMinecraftPlugin(NekoPluginBase):
                 await self._maid_status_refresh_task
             except asyncio.CancelledError:
                 pass
+        if self._instruction_task and not self._instruction_task.done():
+            self._instruction_task.cancel()
+            try:
+                await self._instruction_task
+            except asyncio.CancelledError:
+                pass
         self._awareness.stop()
         if self._bridge:
             self._bridge.stop()
@@ -293,10 +306,12 @@ class NekoMinecraftPlugin(NekoPluginBase):
                     if is_connected and not was_connected:
                         await self._on_bridge_reconnect()
                     was_connected = is_connected
-                    if is_connected and not self._instructions_injected:
-                        await self._inject_instructions()
                     for data in self._bridge.drain():
                         await self._handle_message(data)
+                    if (is_connected and not self._instructions_injected and
+                            (self._instruction_task is None or self._instruction_task.done())):
+                        # 注入过程会发送请求；后台运行才能让本轮询循环继续分发响应。
+                        self._instruction_task = asyncio.create_task(self._inject_instructions())
                 await asyncio.sleep(0.1)
             except asyncio.CancelledError:
                 break
@@ -326,6 +341,22 @@ class NekoMinecraftPlugin(NekoPluginBase):
             self._playmate.activity._candidate_count = 0
         # 重置指令注入标志，重连后重新注入
         self._instructions_injected = False
+        if self._instruction_task and not self._instruction_task.done():
+            self._instruction_task.cancel()
+        self._instruction_task = None
+        # 对账依赖轮询循环继续消费响应，不能在此同步等待。
+        asyncio.create_task(self._reconcile_maid_actions())
+
+    async def _reconcile_maid_actions(self):
+        try:
+            result = await self._maid_action_service.reconcile()
+            if not result.get("success", False):
+                self.logger.warning(f"[MaidAgent] Reconcile deferred: {result}")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # 重连后的首次对账失败不影响桥接；下次重连或显式查询仍可恢复。
+            self.logger.warning(f"[MaidAgent] Reconcile failed: {exc}")
 
     async def _inject_instructions(self):
         self._instructions_injected = True
@@ -376,13 +407,17 @@ class NekoMinecraftPlugin(NekoPluginBase):
         self.logger.info("[TLM] Injected AI calling instructions into LLM context")
 
     async def _handle_message(self, data):
+        if await self._maid_action_service.handle_message(data):
+            return
         msg_type = data.get("type", "")
         request_id = data.get("request_id")
         if msg_type == "pong":
             return
         if msg_type in ("maid_status", "game_context", "command_result",
                         "chat_result", "skill_result", "command_execution_result",
-                        "attack_target_result", "error"):
+                        "attack_target_result", "maid_action_start_result",
+                        "maid_action_cancel_result", "maid_action_status",
+                        "maid_action_list", "error"):
             if request_id and request_id in self._request_futures:
                 self._request_futures[request_id].set_result(data)
                 del self._request_futures[request_id]
@@ -844,6 +879,30 @@ class NekoMinecraftPlugin(NekoPluginBase):
     @llm_tool(**MC_GAME_CONTEXT)
     async def mc_game_context(self, category=None, **_):
         return await _tools.do_game_context(self, category=category)
+
+    @llm_tool(**MC_START_MAID_ACTION)
+    async def mc_start_maid_action(self, *, kind="", args=None, action_id="",
+                                   timeout_ms=60000, replace_existing=True, **_):
+        return await _tools.do_start_maid_action(
+            self,
+            kind=kind,
+            args=args,
+            action_id=action_id,
+            timeout_ms=timeout_ms,
+            replace_existing=replace_existing,
+        )
+
+    @llm_tool(**MC_CANCEL_MAID_ACTION)
+    async def mc_cancel_maid_action(self, *, action_id="", **_):
+        return await _tools.do_cancel_maid_action(self, action_id=action_id)
+
+    @llm_tool(**MC_GET_MAID_ACTION_STATUS)
+    async def mc_get_maid_action_status(self, *, action_id="", **_):
+        return await _tools.do_get_maid_action_status(self, action_id=action_id)
+
+    @llm_tool(**MC_LIST_ACTIVE_MAID_ACTIONS)
+    async def mc_list_active_maid_actions(self, **_):
+        return await _tools.do_list_active_maid_actions(self)
 
     @llm_tool(**MC_USE_SKILL)
     async def use_skill(self, *, skill_name="", **_):
