@@ -57,6 +57,18 @@ class MaidActionToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("INVALID_ACTION_ARGUMENTS", result["error"])
         self.assertEqual([], plugin.requests)
 
+    async def test_start_generates_action_id(self):
+        plugin = FakePlugin({
+            "type": "maid_action_start_result",
+            "data": {"accepted": True, "generation": 1, "status": "RUNNING"},
+        })
+        await tools.do_start_maid_action(
+            plugin,
+            kind="navigate",
+            args={"target": {"x": 1, "y": 64, "z": 1}},
+        )
+        self.assertTrue(plugin.requests[0]["data"]["action_id"])
+
     async def test_cancel_without_id_uses_latest_active(self):
         plugin = FakePlugin({
             "type": "maid_action_cancel_result",

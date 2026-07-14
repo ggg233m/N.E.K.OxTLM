@@ -29,6 +29,8 @@ class MaidActionService:
             return True
         if msg_type == "maid_action_finished" or record.status in TERMINAL_STATUSES:
             await self.feedback.finished(record)
+        elif bool(payload.get("requires_decision", False)):
+            await self.feedback.decision_required(record)
         else:
             await self.feedback.progress(record)
         return True
@@ -56,8 +58,13 @@ class MaidActionService:
 
     async def reconcile(self) -> Dict[str, Any]:
         """Adopt server actions and recover terminal states after a reconnect."""
+        maid_id = ""
+        resolver = getattr(self.plugin, "_resolve_maid_id", None)
+        if callable(resolver):
+            maid_id = str(resolver() or "")
+        list_data = {"maid_id": maid_id} if maid_id else {}
         response = await self.plugin._send_request(
-            {"type": "list_active_maid_actions", "data": {}}, timeout=5
+            {"type": "list_active_maid_actions", "data": list_data}, timeout=5
         )
         if response.get("type") == "error":
             return {"success": False, "error": response.get("data", {})}
@@ -78,6 +85,7 @@ class MaidActionService:
 
         recovered = []
         lost = []
+        unresolved = []
         local_active = list(self.tracker.active())
         for record in local_active:
             if record.action_id in server_ids:
@@ -94,10 +102,13 @@ class MaidActionService:
                     if updated.terminal:
                         await self.feedback.finished(updated)
                 continue
-            lost_record, accepted = self.tracker.mark_server_state_lost(record)
-            if accepted:
-                lost.append(record.action_id)
-                await self.feedback.finished(lost_record)
+            if self._is_not_found(status_response):
+                lost_record, accepted = self.tracker.mark_server_state_lost(record)
+                if accepted:
+                    lost.append(record.action_id)
+                    await self.feedback.finished(lost_record)
+            else:
+                unresolved.append(record.action_id)
 
         return {
             "success": True,
@@ -105,6 +116,7 @@ class MaidActionService:
             "adopted": adopted,
             "recovered": recovered,
             "lost": lost,
+            "unresolved": unresolved,
         }
 
     @staticmethod
@@ -119,3 +131,12 @@ class MaidActionService:
             if isinstance(items, list):
                 return [item for item in items if isinstance(item, dict)]
         return []
+
+    @staticmethod
+    def _is_not_found(message: Dict[str, Any]) -> bool:
+        payload = MaidActionService._payload(message)
+        code = str(payload.get("error_code") or payload.get("code") or "").upper()
+        if code in {"ACTION_NOT_FOUND", "NOT_FOUND", "UNKNOWN_ACTION"}:
+            return True
+        text = str(payload.get("message") or payload.get("error") or "").lower()
+        return "not found" in text or "unknown action" in text

@@ -20,6 +20,7 @@ class ActionFeedbackHandler:
         self._clock = clock or time.monotonic
         self._last_progress: Dict[str, tuple] = {}
         self._finished = set()
+        self._decisions = set()
 
     async def progress(self, record: ActionRecord) -> bool:
         key = self._key(record)
@@ -39,6 +40,26 @@ class ActionFeedbackHandler:
             },
             aggregate=True,
             coalesce_key=f"mc_maid_action_progress:{record.maid_id or record.action_id}",
+        )
+        return True
+
+    async def decision_required(self, record: ActionRecord) -> bool:
+        key = f"{self._key(record)}:{record.sequence}"
+        if key in self._decisions:
+            return False
+        self._decisions.add(key)
+        await self._plugin._push_minecraft_context(
+            self._progress_text(record)
+            + " 服务端标记此阶段需要新的决策，请结合动作状态决定重试、取消或改换目标。",
+            ai_behavior="respond",
+            priority=4,
+            metadata={
+                "description": "Minecraft 女仆 Agent 动作需要决策",
+                "action_id": record.action_id,
+                "generation": record.generation,
+            },
+            aggregate=False,
+            coalesce_key=None,
         )
         return True
 

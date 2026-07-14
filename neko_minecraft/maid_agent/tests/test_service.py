@@ -20,6 +20,9 @@ class FakePlugin:
     async def _push_minecraft_context(self, text, **kwargs):
         self.pushes.append((text, kwargs))
 
+    def _resolve_maid_id(self, maid_id=None):
+        return maid_id or "m"
+
 
 class Clock:
     def __init__(self):
@@ -87,6 +90,19 @@ class MaidActionServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, len(plugin.pushes))
         self.assertEqual("respond", plugin.pushes[0][1]["ai_behavior"])
 
+    async def test_decision_required_uses_respond(self):
+        plugin = FakePlugin()
+        service = MaidActionService(plugin)
+        await service.handle_message({
+            "type": "maid_action_progress",
+            "data": {
+                "action_id": "a", "maid_id": "m", "generation": 1,
+                "sequence": 4, "kind": "harvest_blocks", "status": "RUNNING",
+                "stage": "WAITING_FOR_TOOL", "requires_decision": True,
+            },
+        })
+        self.assertEqual("respond", plugin.pushes[0][1]["ai_behavior"])
+
     async def test_reconcile_adopts_server_action_and_marks_missing_local_lost(self):
         plugin = FakePlugin(responses=[
             {
@@ -109,6 +125,21 @@ class MaidActionServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("FAILED", service.tracker.get("local").status)
         self.assertEqual("SERVER_STATE_LOST", service.tracker.get("local").end_reason)
         self.assertEqual("respond", plugin.pushes[0][1]["ai_behavior"])
+
+    async def test_reconcile_keeps_local_action_on_transient_status_error(self):
+        plugin = FakePlugin(responses=[
+            {"type": "maid_action_list", "data": {"actions": []}},
+            {"type": "error", "data": {"message": "Request timed out"}},
+        ])
+        service = MaidActionService(plugin)
+        service.tracker.apply({
+            "action_id": "local", "maid_id": "m", "generation": 1,
+            "sequence": 3, "kind": "navigate", "status": "RUNNING",
+        })
+        result = await service.reconcile()
+        self.assertEqual(["local"], result["unresolved"])
+        self.assertEqual("RUNNING", service.tracker.get("local").status)
+        self.assertEqual([], plugin.pushes)
 
 
 if __name__ == "__main__":
