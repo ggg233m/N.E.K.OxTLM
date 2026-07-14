@@ -5,7 +5,7 @@ import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.item.ItemStack;
-import net.neoforged.neoforge.items.ItemStackHandler;
+import net.neoforged.neoforge.items.IItemHandlerModifiable;
 
 import java.util.Objects;
 
@@ -49,7 +49,7 @@ public final class HandLease {
      */
     public static HandLease equipFromBackpack(EntityMaid maid, int sourceSlot) {
         Objects.requireNonNull(maid, "maid");
-        ItemStackHandler inventory = maid.getAvailableBackpackInv();
+        IItemHandlerModifiable inventory = maid.getAvailableBackpackInv();
         if (sourceSlot < 0 || sourceSlot >= inventory.getSlots()) {
             throw new IllegalArgumentException("Invalid maid backpack slot: " + sourceSlot);
         }
@@ -109,7 +109,7 @@ public final class HandLease {
             return LeaseHealth.HEALTHY;
         }
 
-        ItemStackHandler inventory = maid.getAvailableBackpackInv();
+        IItemHandlerModifiable inventory = maid.getAvailableBackpackInv();
         if (sourceSlot >= inventory.getSlots()
                 || !expectedSource.matches(inventory.getStackInSlot(sourceSlot))) {
             return LeaseHealth.SOURCE_CONFLICT;
@@ -135,7 +135,7 @@ public final class HandLease {
             return ReleaseResult.RESTORED;
         }
 
-        ItemStackHandler inventory = maid.getAvailableBackpackInv();
+        IItemHandlerModifiable inventory = maid.getAvailableBackpackInv();
         ItemStack currentTool = maid.getMainHandItem();
         ItemStack originalHand = inventory.getStackInSlot(sourceSlot);
         inventory.setStackInSlot(sourceSlot, currentTool);
