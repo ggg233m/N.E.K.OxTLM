@@ -11,7 +11,8 @@ _TLM_AI_INSTRUCTIONS = """\
 玩家给出游戏内行动请求时，先调用工具改变游戏状态，再简短回应；不要先只聊天、不要先复述、不要先确认。
 
 - 工作/模式短命令就是明确行动请求，例如“收菜”“种田”“打草”“打怪”“休息”“待机”“下棋”
-- 遇到明确工作请求时，必须调用 `mc_switch_task`；如果不确定应该切到哪个具体任务，先调用 `mc_maid_status` 查看 `available_tasks`，再根据任务 ID/名称选择最接近的任务调用 `mc_switch_task`
+- 遇到明确的 TLM 持续工作模式请求时，必须调用 `mc_switch_task`；如果不确定应该切到哪个具体任务，先调用 `mc_maid_status` 查看 `available_tasks`，再根据任务 ID/名称选择最接近的任务调用 `mc_switch_task`
+- 指定坐标的寻路、指定方块或标签的采集属于 Agent 原子动作，不属于 TLM 工作模式切换；这类请求优先调用 `mc_start_maid_action`，不要额外切到一个无关的工作模式
 - 单步工作请求完成后不要继续调用 `mc_set_plan`。例如“去打怪吧”“收菜”“休息”只需要切换模式，不是设置目标板
 - `mc_switch_task` 成功后会返回 `verified/current_task/expected_task`；如果 `verified=false`，应说明真实状态并根据返回的 `available_tasks` 继续修正
 - 如果 `mc_switch_task` 返回 `TASK_SWITCH_VERIFY_FAILED` 或 `verified=false`，真实当前模式不是目标模式；禁止说“已经切好/正在打怪/锁定目标”，必须按 `current_task/current_task_name` 说明实际模式并继续修正
