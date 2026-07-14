@@ -1,0 +1,115 @@
+import unittest
+
+from _bootstrap import bootstrap
+
+bootstrap()
+
+from neko_minecraft.maid_agent.service import MaidActionService
+
+
+class FakePlugin:
+    def __init__(self, responses=None):
+        self.responses = list(responses or [])
+        self.requests = []
+        self.pushes = []
+
+    async def _send_request(self, request, timeout=30):
+        self.requests.append((request, timeout))
+        return self.responses.pop(0)
+
+    async def _push_minecraft_context(self, text, **kwargs):
+        self.pushes.append((text, kwargs))
+
+
+class Clock:
+    def __init__(self):
+        self.value = 0.0
+
+    def __call__(self):
+        return self.value
+
+
+class MaidActionServiceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_progress_is_throttled_but_stage_change_is_immediate(self):
+        plugin = FakePlugin()
+        clock = Clock()
+        service = MaidActionService(plugin, clock=clock)
+        base = {
+            "action_id": "a", "maid_id": "m", "generation": 1,
+            "kind": "navigate", "status": "RUNNING",
+        }
+        await service.handle_message({
+            "type": "maid_action_progress",
+            "data": {**base, "sequence": 1, "stage": "MOVING", "progress": 0.1},
+        })
+        clock.value = 0.5
+        await service.handle_message({
+            "type": "maid_action_progress",
+            "data": {**base, "sequence": 2, "stage": "MOVING", "progress": 0.2},
+        })
+        await service.handle_message({
+            "type": "maid_action_progress",
+            "data": {**base, "sequence": 3, "stage": "ARRIVING", "progress": 0.9},
+        })
+        self.assertEqual(2, len(plugin.pushes))
+        self.assertTrue(all(push[1]["ai_behavior"] == "read" for push in plugin.pushes))
+
+    async def test_stale_finished_event_is_ignored(self):
+        plugin = FakePlugin()
+        service = MaidActionService(plugin)
+        service.tracker.apply({
+            "action_id": "a", "maid_id": "m", "generation": 2,
+            "sequence": 1, "status": "RUNNING",
+        })
+        handled = await service.handle_message({
+            "type": "maid_action_finished",
+            "data": {
+                "action_id": "a", "maid_id": "m", "generation": 1,
+                "sequence": 99, "status": "SUCCEEDED",
+            },
+        })
+        self.assertTrue(handled)
+        self.assertEqual([], plugin.pushes)
+
+    async def test_finished_uses_respond_once(self):
+        plugin = FakePlugin()
+        service = MaidActionService(plugin)
+        message = {
+            "type": "maid_action_finished",
+            "data": {
+                "action_id": "a", "maid_id": "m", "generation": 1,
+                "sequence": 4, "kind": "navigate", "status": "SUCCEEDED",
+                "stage": "ARRIVED", "end_reason": "COMPLETED",
+            },
+        }
+        await service.handle_message(message)
+        await service.handle_message(message)
+        self.assertEqual(1, len(plugin.pushes))
+        self.assertEqual("respond", plugin.pushes[0][1]["ai_behavior"])
+
+    async def test_reconcile_adopts_server_action_and_marks_missing_local_lost(self):
+        plugin = FakePlugin(responses=[
+            {
+                "type": "maid_action_list",
+                "data": {"actions": [{
+                    "action_id": "server", "maid_id": "m", "generation": 4,
+                    "sequence": 2, "kind": "navigate", "status": "RUNNING",
+                }]},
+            },
+            {"type": "error", "data": {"message": "not found"}},
+        ])
+        service = MaidActionService(plugin)
+        service.tracker.apply({
+            "action_id": "local", "maid_id": "m", "generation": 1,
+            "sequence": 3, "kind": "harvest_blocks", "status": "RUNNING",
+        })
+        result = await service.reconcile()
+        self.assertEqual(["server"], result["adopted"])
+        self.assertEqual(["local"], result["lost"])
+        self.assertEqual("FAILED", service.tracker.get("local").status)
+        self.assertEqual("SERVER_STATE_LOST", service.tracker.get("local").end_reason)
+        self.assertEqual("respond", plugin.pushes[0][1]["ai_behavior"])
+
+
+if __name__ == "__main__":
+    unittest.main()
