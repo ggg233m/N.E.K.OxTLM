@@ -181,6 +181,83 @@ MC_GAME_CONTEXT = {
     },
 }
 
+MC_START_MAID_ACTION = {
+    "name": "mc_start_maid_action",
+    "description": (
+        "让已绑定女仆开始一个服务端自主动作。navigate 会主动寻路到指定坐标；"
+        "harvest_blocks 会前往目标方块或搜索附近指定方块并采集。"
+        "工具只返回是否接受，动作完成或失败会异步通知。新动作默认会覆盖旧动作。"
+        "明确要求去某坐标、主动挖掘或采集时应调用本工具，不要用 mc_switch_task 假装挖矿。"
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "kind": {
+                "type": "string",
+                "enum": ["navigate", "harvest_blocks"],
+                "description": "navigate=主动寻路，harvest_blocks=主动采集方块",
+            },
+            "args": {
+                "type": "object",
+                "description": (
+                    "navigate: {target:{x,y,z}, speed?, stop_distance?}；"
+                    "harvest_blocks: target_pos 与 selector 二选一，selector 形如"
+                    "{type:'block'|'tag', id:'minecraft:stone'}，并可传 search_radius、"
+                    "max_blocks、tool_policy(require_correct|allow_wrong)、speed"
+                ),
+                "additionalProperties": True,
+            },
+            "action_id": {
+                "type": "string",
+                "description": "可选幂等 UUID；省略时插件自动生成",
+            },
+            "timeout_ms": {
+                "type": "integer",
+                "minimum": 1000,
+                "maximum": 120000,
+                "description": "服务端动作超时，默认 60000 毫秒",
+            },
+            "replace_existing": {
+                "type": "boolean",
+                "description": "是否安全终止并覆盖女仆当前动作，默认 true",
+            },
+        },
+        "required": ["kind", "args"],
+    },
+}
+
+MC_CANCEL_MAID_ACTION = {
+    "name": "mc_cancel_maid_action",
+    "description": (
+        "取消正在执行的女仆 Agent 动作。可传 action_id；省略时取消已绑定女仆最近的进行中动作。"
+        "玩家说停下寻路、停止挖掘或取消刚才动作时必须调用本工具。"
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "action_id": {"type": "string", "description": "要取消的动作 UUID；可省略"},
+        },
+    },
+}
+
+MC_GET_MAID_ACTION_STATUS = {
+    "name": "mc_get_maid_action_status",
+    "description": "按 action_id 查询女仆 Agent 动作的服务端真实状态、阶段和终止原因。",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "action_id": {"type": "string", "description": "动作 UUID"},
+        },
+        "required": ["action_id"],
+    },
+}
+
+MC_LIST_ACTIVE_MAID_ACTIONS = {
+    "name": "mc_list_active_maid_actions",
+    "description": "列出已绑定女仆当前仍在服务端执行或清理中的 Agent 动作。",
+    "parameters": {"type": "object", "properties": {}},
+}
+
 MC_USE_SKILL = {
     "name": "mc_use_skill",
     "description": (

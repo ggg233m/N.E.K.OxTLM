@@ -1,9 +1,12 @@
-"""LLM 工具业务逻辑 — 10个 do_* 函数，实现女仆状态查询、行为控制、聊天、技能等工具的具体逻辑"""
+"""LLM 工具业务逻辑 — 女仆状态、行为、聊天与 Agent 动作工具。"""
+
+import uuid
 
 from plugin.sdk.plugin import Ok, Err
 
 from . import task_resolver
 from . import plan as _plan
+from .maid_agent import ActionValidationError, MaidActionService
 
 
 _ITEM_ALIASES = {
@@ -484,6 +487,138 @@ async def do_game_context(plugin, category=None):
     if result.get("type") == "error":
         return {"output": result.get("data", {}), "is_error": True, "error": "REQUEST_FAILED"}
     return result.get("data", {})
+
+
+def _maid_action_service(plugin):
+    service = getattr(plugin, "_maid_action_service", None)
+    if service is None:
+        service = MaidActionService(plugin)
+        plugin._maid_action_service = service
+    return service
+
+
+def _action_error(code, message, **details):
+    return {
+        "output": {"success": False, "error": message, **details},
+        "is_error": True,
+        "error": code,
+    }
+
+
+async def do_start_maid_action(
+    plugin,
+    *,
+    kind="",
+    args=None,
+    action_id="",
+    timeout_ms=60000,
+    replace_existing=True,
+    maid_id=None,
+):
+    """Validate and start a server-authoritative maid action."""
+    if not plugin.connected:
+        return _action_error("NOT_CONNECTED", "Not connected to Minecraft")
+    resolved_id = plugin._resolve_maid_id(maid_id)
+    if not resolved_id:
+        return _action_error("NO_MAID_ASSIGNED", "No maid assigned")
+    service = _maid_action_service(plugin)
+    try:
+        normalized_args = service.registry.normalize(kind, args or {})
+        timeout_ms = int(timeout_ms)
+    except (ActionValidationError, TypeError, ValueError) as exc:
+        return _action_error("INVALID_ACTION_ARGUMENTS", str(exc))
+    if timeout_ms < 1000 or timeout_ms > 120000:
+        return _action_error(
+            "INVALID_ACTION_ARGUMENTS", "timeout_ms must be between 1000 and 120000"
+        )
+    action_id = str(action_id or uuid.uuid4())
+    request = {
+        "type": "start_maid_action",
+        "data": {
+            "action_id": action_id,
+            "maid_id": resolved_id,
+            "kind": str(kind).strip().lower(),
+            "timeout_ms": timeout_ms,
+            "replace_existing": bool(replace_existing),
+            "args": normalized_args,
+        },
+    }
+    result = await plugin._send_request(request)
+    if result.get("type") == "error":
+        return _action_error("REQUEST_FAILED", str(result.get("data", {})), action_id=action_id)
+    records = service.observe_response(result)
+    result_data = dict(result.get("data", {}) or {})
+    accepted = result_data.get("accepted", result_data.get("success", True))
+    if not accepted:
+        return _action_error(
+            str(result_data.get("error_code") or "ACTION_REJECTED"),
+            str(result_data.get("error") or result_data.get("message") or "Action rejected"),
+            action_id=action_id,
+            response=result_data,
+        )
+    record = records[0].as_dict() if records else {}
+    return Ok({"accepted": True, "action_id": action_id, **result_data, **record})
+
+
+async def do_cancel_maid_action(plugin, *, action_id="", maid_id=None):
+    if not plugin.connected:
+        return _action_error("NOT_CONNECTED", "Not connected to Minecraft")
+    service = _maid_action_service(plugin)
+    resolved_id = plugin._resolve_maid_id(maid_id)
+    if not action_id:
+        active = service.tracker.latest_active(resolved_id)
+        if active is None:
+            return _action_error("NO_ACTIVE_ACTION", "No active maid action to cancel")
+        action_id = active.action_id
+    data = {"action_id": str(action_id)}
+    if resolved_id:
+        data["maid_id"] = resolved_id
+    result = await plugin._send_request({"type": "cancel_maid_action", "data": data})
+    if result.get("type") == "error":
+        return _action_error("REQUEST_FAILED", str(result.get("data", {})), action_id=action_id)
+    service.observe_response(result)
+    result_data = dict(result.get("data", {}) or {})
+    accepted = result_data.get("accepted", result_data.get("success", True))
+    if not accepted:
+        return _action_error(
+            str(result_data.get("error_code") or "CANCEL_REJECTED"),
+            str(result_data.get("error") or result_data.get("message") or "Cancel rejected"),
+            action_id=action_id,
+            response=result_data,
+        )
+    return Ok({"accepted": True, "action_id": str(action_id), **result_data})
+
+
+async def do_get_maid_action_status(plugin, *, action_id=""):
+    if not plugin.connected:
+        return _action_error("NOT_CONNECTED", "Not connected to Minecraft")
+    if not str(action_id or "").strip():
+        return _action_error("INVALID_ACTION_ARGUMENTS", "action_id is required")
+    service = _maid_action_service(plugin)
+    result = await plugin._send_request({
+        "type": "get_maid_action_status",
+        "data": {"action_id": str(action_id)},
+    })
+    if result.get("type") == "error":
+        return _action_error("REQUEST_FAILED", str(result.get("data", {})), action_id=action_id)
+    records = service.observe_response(result)
+    result_data = dict(result.get("data", {}) or {})
+    return Ok(records[0].as_dict() if records else result_data)
+
+
+async def do_list_active_maid_actions(plugin, *, maid_id=None):
+    if not plugin.connected:
+        return _action_error("NOT_CONNECTED", "Not connected to Minecraft")
+    service = _maid_action_service(plugin)
+    resolved_id = plugin._resolve_maid_id(maid_id)
+    data = {"maid_id": resolved_id} if resolved_id else {}
+    result = await plugin._send_request({"type": "list_active_maid_actions", "data": data})
+    if result.get("type") == "error":
+        return _action_error("REQUEST_FAILED", str(result.get("data", {})))
+    service.observe_response(result)
+    result_data = dict(result.get("data", {}) or {})
+    actions = result_data.get("actions", result_data.get("active_actions", []))
+    return Ok({"actions": actions if isinstance(actions, list) else []})
 
 
 async def do_use_skill(plugin, *, skill_name=""):
