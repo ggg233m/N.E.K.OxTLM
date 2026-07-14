@@ -10,6 +10,7 @@ import com.neko_tlm_bridge.tlm.agent.MaidAction;
 import com.neko_tlm_bridge.tlm.agent.MaidActionContext;
 import com.neko_tlm_bridge.tlm.agent.MaidActionExecution;
 import com.neko_tlm_bridge.tlm.agent.MaidActionKind;
+import com.neko_tlm_bridge.tlm.agent.MaidActionResource;
 import com.neko_tlm_bridge.tlm.agent.MaidActionTickResult;
 import com.github.tartaricacid.touhoulittlemaid.api.task.IMaidTask;
 import com.github.tartaricacid.touhoulittlemaid.entity.task.TaskManager;
@@ -126,7 +127,10 @@ public final class MaidActionStore {
         try {
             action.start(active.context(started));
             active.status = ActionStatus.RUNNING;
-            active.reportProgress("RUNNING", 0.0, new JsonObject());
+            if ("PENDING".equals(active.stage)) {
+                active.stage = "RUNNING";
+            }
+            active.eventsEnabled = true;
             return new StartResult(true, null, active.snapshot());
         } catch (RuntimeException failure) {
             LOGGER.error("Failed to start maid action {}", actionId, failure);
@@ -147,7 +151,7 @@ public final class MaidActionStore {
             return new CancelResult(true, null, active.snapshot());
         }
         active.status = ActionStatus.CANCEL_REQUESTED;
-        active.reportProgress("CANCEL_REQUESTED", active.progress, new JsonObject());
+        active.stage = "CANCEL_REQUESTED";
         return new CancelResult(true, null, active.snapshot());
     }
 
@@ -164,6 +168,17 @@ public final class MaidActionStore {
             }
         }
         return result;
+    }
+
+    public boolean hasActiveResource(UUID maidId, MaidActionResource resource) {
+        ActiveAction active = activeByMaid.get(maidId);
+        return active != null && active.status == ActionStatus.RUNNING
+                && active.action.resources().contains(resource);
+    }
+
+    public Optional<JsonObject> getActiveStatus(UUID maidId) {
+        ActiveAction active = activeByMaid.get(maidId);
+        return active == null ? Optional.empty() : Optional.of(active.snapshot());
     }
 
     public boolean attachHandLease(UUID actionId, long generation, HandLease handLease) {
@@ -308,6 +323,7 @@ public final class MaidActionStore {
         }
 
         active.status = terminalStatus;
+        active.stage = terminalStatus.name();
         active.endReason = reason;
         active.result = result == null ? new JsonObject() : result.deepCopy();
         active.finishedAtMs = System.currentTimeMillis();
@@ -403,6 +419,7 @@ public final class MaidActionStore {
         private final long deadlineGameTime;
         private final MaidBodyLease lease;
         private long lastProgressGameTime;
+        private boolean eventsEnabled;
 
         private ActiveAction(UUID actionId, EntityMaid maid, MaidActionKind kind,
                              MaidAction action, JsonObject args, String requestFingerprint,
@@ -459,6 +476,11 @@ public final class MaidActionStore {
 
         private void emitProgress(boolean stageChanged, String newStage, double newProgress,
                                   JsonObject detail, long gameTime) {
+            if (!eventsEnabled) {
+                this.stage = newStage == null ? this.stage : newStage;
+                this.progress = Math.max(0.0, Math.min(1.0, newProgress));
+                return;
+            }
             if (!stageChanged && gameTime - lastProgressGameTime < PROGRESS_HEARTBEAT_TICKS) {
                 this.progress = Math.max(0.0, Math.min(1.0, newProgress));
                 return;
