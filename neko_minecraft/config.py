@@ -167,6 +167,7 @@ async def save_config(plugin):
 
 def sync_config(plugin, config_data):
     """从 MC 端同步运行时配置到插件实例变量（不涉及 toml 持久化）"""
+    plugin._maid_agent_enabled = config_data.get("maid_agent_enabled", True)
     plugin._command_execution_enabled = config_data.get("command_execution_enabled", False)
     plugin._chat_bubble_enabled = config_data.get("chat_bubble_enabled", True)
     plugin._chat_box_enabled = config_data.get("chat_box_enabled", True)

@@ -130,6 +130,7 @@ class NekoMinecraftPlugin(NekoPluginBase):
         self._max_reconnect_interval = 60
         self._assigned_maid_id = ""
         self._assigned_maid_name = ""
+        self._maid_agent_enabled = True
         self._command_execution_enabled = False
         self._chat_bubble_enabled = True
         self._chat_box_enabled = True
@@ -635,6 +636,7 @@ class NekoMinecraftPlugin(NekoPluginBase):
             "maids": maids,
             "assigned_maid_id": self._assigned_maid_id,
             "assigned_maid_name": self._assigned_maid_name,
+            "maid_agent_enabled": self._maid_agent_enabled,
             "command_execution_enabled": self._command_execution_enabled,
             "companion_mode": self._companion_mode,
             "companion_settings": _config.companion_settings(self),

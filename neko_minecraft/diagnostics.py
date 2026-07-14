@@ -135,6 +135,10 @@ def _append_config_checks(checks, config_result, status_ok):
     if config_result.get("type") == "config":
         data = config_result.get("data", {})
         checks.append(_check("ok", "mod 配置", "已成功读取 Minecraft mod 配置。"))
+        if data.get("maid_agent_enabled", True):
+            checks.append(_check("ok", "女仆 Agent", "导航与采集动作已启用。"))
+        else:
+            checks.append(_check("warning", "女仆 Agent", "导航与采集动作已关闭。", "在 Mod 配置中开启 maidAgentEnabled。"))
         if data.get("chat_bubble_enabled", True) or data.get("chat_box_enabled", True):
             checks.append(_check("ok", "聊天显示", "聊天气泡或聊天框至少启用了一项。"))
         else:
