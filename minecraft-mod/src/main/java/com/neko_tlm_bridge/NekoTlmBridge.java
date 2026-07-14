@@ -1,6 +1,7 @@
 package com.neko_tlm_bridge;
 
 import com.neko_tlm_bridge.config.ModConfig;
+import com.neko_tlm_bridge.config.ClientConfig;
 import com.neko_tlm_bridge.event.GameEventHandler;
 import com.neko_tlm_bridge.tlm.NekoAttackTargetStore;
 import com.neko_tlm_bridge.tlm.NekoWebSocketServerHolder;
@@ -34,6 +35,7 @@ public class NekoTlmBridge {
 
     public NekoTlmBridge(IEventBus modEventBus, ModContainer modContainer) {
         modContainer.registerConfig(Type.COMMON, ModConfig.SPEC);
+        modContainer.registerConfig(Type.CLIENT, ClientConfig.SPEC);
 
         if (FMLEnvironment.dist == Dist.CLIENT) {
             modContainer.registerExtensionPoint(IConfigScreenFactory.class,

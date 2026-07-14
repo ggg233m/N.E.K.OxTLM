@@ -8,6 +8,7 @@ public class ModConfig {
 
     public static final ModConfigSpec.IntValue WEBSOCKET_PORT;
     public static final ModConfigSpec.BooleanValue NEKO_MODE_ENABLED;
+    public static final ModConfigSpec.BooleanValue MAID_AGENT_ENABLED;
 
     public static final ModConfigSpec.BooleanValue EVENT_PUSH_ENABLED;
     public static final ModConfigSpec.BooleanValue COMMAND_EXECUTION_ENABLED;
@@ -35,6 +36,9 @@ public class ModConfig {
         NEKO_MODE_ENABLED = builder
                 .translation("neko_tlm_bridge.config.bridge.nekoModeEnabled")
                 .define("nekoModeEnabled", true);
+        MAID_AGENT_ENABLED = builder
+                .translation("neko_tlm_bridge.config.bridge.maidAgentEnabled")
+                .define("maidAgentEnabled", true);
         EVENT_PUSH_ENABLED = builder
                 .translation("neko_tlm_bridge.config.bridge.eventPushEnabled")
                 .define("eventPushEnabled", true);
