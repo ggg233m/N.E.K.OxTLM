@@ -19,7 +19,7 @@ class MinecraftPushRouter:
         if aggregate is None:
             aggregate = ai_behavior == "read" and priority <= 2
         if aggregate:
-            self._pending_low.append((time.time(), text, priority, metadata or {}))
+            self._pending_low.append((time.time(), text, priority, metadata or {}, coalesce_key))
             self._plugin._playmate_debug.record("push", route="aggregate_pending", ai_behavior=ai_behavior, priority=priority, pending=len(self._pending_low), text=str(text)[:160])
             if self._aggregate_window <= 0:
                 await self._flush_pending()
@@ -60,22 +60,28 @@ class MinecraftPushRouter:
             return
         items = self._pending_low
         self._pending_low = []
-        lines = []
-        for _, text, _, _ in items:
-            for line in str(text).splitlines():
-                line = line.strip()
-                if line:
-                    lines.append(line if line.startswith("-") else f"- {line}")
-        if not lines:
-            return
-        merged = "Minecraft 陪玩上下文：\n" + "\n".join(lines)
-        priority = max((item[2] for item in items), default=1)
-        try:
-            self._direct_push(merged, ai_behavior="read", priority=priority)
-        except Exception as e:
-            # 推送失败时回退 pending，避免数据静默丢失
-            self._plugin._playmate_debug.record("push", route="flush_error", error=str(e), recovered=len(items))
-            self._pending_low = items + self._pending_low
+        # 按 coalesce_key 分组聚合：同类 read 用同一 key，宿主侧 newest-wins 去重旧快照
+        groups = {}
+        for item in items:
+            key = item[4] if len(item) > 4 else None
+            groups.setdefault(key, []).append(item)
+        for key, group_items in groups.items():
+            lines = []
+            for _, text, _, _, _ in group_items:
+                for line in str(text).splitlines():
+                    line = line.strip()
+                    if line:
+                        lines.append(line if line.startswith("-") else f"- {line}")
+            if not lines:
+                continue
+            merged = "Minecraft 陪玩上下文：\n" + "\n".join(lines)
+            priority = max((item[2] for item in group_items), default=1)
+            try:
+                self._direct_push(merged, ai_behavior="read", priority=priority, coalesce_key=key)
+            except Exception as e:
+                # 推送失败时回退 pending，避免数据静默丢失
+                self._plugin._playmate_debug.record("push", route="flush_error", error=str(e), recovered=len(group_items))
+                self._pending_low = group_items + self._pending_low
 
     async def _delayed_flush_with_delay(self, delay):
         await asyncio.sleep(delay)

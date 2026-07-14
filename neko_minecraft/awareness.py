@@ -61,6 +61,7 @@ class AwarenessManager:
                                 ai_behavior="read",
                                 priority=1,
                                 aggregate=True,
+                                coalesce_key="mc_read_awareness",
                             )
 
                         if respond_items:

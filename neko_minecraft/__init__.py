@@ -493,7 +493,7 @@ class NekoMinecraftPlugin(NekoPluginBase):
                 ai_behavior=ai_behavior,
                 priority=priority if ai_behavior == "respond" else 2,
                 aggregate=ai_behavior != "respond",
-                coalesce_key="mc_chess" if ai_behavior == "respond" else None,
+                coalesce_key="mc_chess",
             )
             return
 
