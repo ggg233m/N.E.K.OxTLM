@@ -104,6 +104,24 @@ class MaidActionToolTests(unittest.IsolatedAsyncioTestCase):
         await tools.do_list_active_maid_actions(plugin)
         self.assertEqual("RUNNING", plugin._maid_action_service.tracker.get("b").status)
 
+    async def test_status_not_found_is_a_tool_error(self):
+        plugin = FakePlugin({
+            "type": "maid_action_status",
+            "data": {"found": False, "error_code": "ACTION_NOT_FOUND"},
+        })
+        result = await tools.do_get_maid_action_status(plugin, action_id="missing")
+        self.assertTrue(result["is_error"])
+        self.assertEqual("ACTION_NOT_FOUND", result["error"])
+
+    async def test_list_embedded_error_is_not_hidden_as_empty(self):
+        plugin = FakePlugin({
+            "type": "maid_action_list",
+            "data": {"error": "Server not ready", "error_code": "SERVER_NOT_READY"},
+        })
+        result = await tools.do_list_active_maid_actions(plugin)
+        self.assertTrue(result["is_error"])
+        self.assertEqual("SERVER_NOT_READY", result["error"])
+
 
 if __name__ == "__main__":
     unittest.main()

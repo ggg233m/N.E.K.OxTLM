@@ -1,6 +1,8 @@
 package com.neko_tlm_bridge.network.debug;
 
 import com.github.tartaricacid.touhoulittlemaid.entity.passive.EntityMaid;
+import com.neko_tlm_bridge.tlm.agent.MaidActionResource;
+import com.neko_tlm_bridge.tlm.agent.runtime.MaidActionStore;
 import net.minecraft.network.protocol.common.ClientboundCustomPayloadPacket;
 import net.minecraft.network.protocol.common.custom.PathfindingDebugPayload;
 import net.minecraft.server.level.ServerPlayer;
@@ -30,7 +32,12 @@ public final class MaidPathDebugService {
 
     public static void setSubscribed(ServerPlayer player, boolean enabled) {
         if (enabled) {
-            SUBSCRIBERS.add(player.getUUID());
+            if (SUBSCRIBERS.add(player.getUUID())) {
+                // Force the next action tick to send the current path only when
+                // this connection newly subscribes. Repeated enabled packets
+                // must not bypass the global path update rate limit.
+                SYNC_STATES.clear();
+            }
         } else {
             SUBSCRIBERS.remove(player.getUUID());
         }
@@ -45,6 +52,10 @@ public final class MaidPathDebugService {
     }
 
     public static void publishIfNeeded(EntityMaid maid, long gameTime, boolean force) {
+        if (!MaidActionStore.getInstance().hasActiveResource(maid.getUUID(), MaidActionResource.MOVE)) {
+            clear(maid.getUUID());
+            return;
+        }
         Path path = maid.getNavigation().getPath();
         if (path == null || maid.getNavigation().isDone()) {
             clear(maid.getUUID());

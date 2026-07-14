@@ -56,6 +56,23 @@ class MaidActionServiceTests(unittest.IsolatedAsyncioTestCase):
         })
         self.assertEqual(2, len(plugin.pushes))
         self.assertTrue(all(push[1]["ai_behavior"] == "read" for push in plugin.pushes))
+        self.assertTrue(all("%" not in push[0] for push in plugin.pushes))
+
+    async def test_duplicate_response_is_not_returned_as_a_fresh_snapshot(self):
+        service = MaidActionService(FakePlugin())
+        service.tracker.apply({
+            "action_id": "a", "maid_id": "m", "generation": 1,
+            "sequence": 3, "status": "RUNNING",
+        })
+        observed = service.observe_response({
+            "type": "maid_action_status",
+            "data": {
+                "action_id": "a", "maid_id": "m", "generation": 1,
+                "sequence": 3, "status": "CANCEL_REQUESTED",
+            },
+        })
+        self.assertEqual([], observed)
+        self.assertEqual("RUNNING", service.tracker.get("a").status)
 
     async def test_stale_finished_event_is_ignored(self):
         plugin = FakePlugin()
@@ -140,6 +157,23 @@ class MaidActionServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(["local"], result["unresolved"])
         self.assertEqual("RUNNING", service.tracker.get("local").status)
         self.assertEqual([], plugin.pushes)
+
+    async def test_reconcile_marks_flat_not_found_status_as_lost(self):
+        plugin = FakePlugin(responses=[
+            {"type": "maid_action_list", "data": {"actions": []}},
+            {
+                "type": "maid_action_status",
+                "data": {"found": False, "error_code": "ACTION_NOT_FOUND"},
+            },
+        ])
+        service = MaidActionService(plugin)
+        service.tracker.apply({
+            "action_id": "local", "maid_id": "m", "generation": 1,
+            "sequence": 3, "kind": "navigate", "status": "RUNNING",
+        })
+        result = await service.reconcile()
+        self.assertEqual(["local"], result["lost"])
+        self.assertEqual("SERVER_STATE_LOST", service.tracker.get("local").end_reason)
 
 
 if __name__ == "__main__":

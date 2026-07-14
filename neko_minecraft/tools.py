@@ -518,6 +518,8 @@ async def do_start_maid_action(
     """Validate and start a server-authoritative maid action."""
     if not plugin.connected:
         return _action_error("NOT_CONNECTED", "Not connected to Minecraft")
+    if not getattr(plugin, "_maid_agent_enabled", True):
+        return _action_error("MAID_AGENT_DISABLED", "Maid Agent actions are disabled in Minecraft config")
     resolved_id = plugin._resolve_maid_id(maid_id)
     if not resolved_id:
         return _action_error("NO_MAID_ASSIGNED", "No maid assigned")
@@ -552,7 +554,8 @@ async def do_start_maid_action(
     if not accepted:
         return _action_error(
             str(result_data.get("error_code") or "ACTION_REJECTED"),
-            str(result_data.get("error") or result_data.get("message") or "Action rejected"),
+            str(result_data.get("error") or result_data.get("message")
+                or result_data.get("rejection_reason") or "Action rejected"),
             action_id=action_id,
             response=result_data,
         )
@@ -582,7 +585,8 @@ async def do_cancel_maid_action(plugin, *, action_id="", maid_id=None):
     if not accepted:
         return _action_error(
             str(result_data.get("error_code") or "CANCEL_REJECTED"),
-            str(result_data.get("error") or result_data.get("message") or "Cancel rejected"),
+            str(result_data.get("error") or result_data.get("message")
+                or result_data.get("rejection_reason") or "Cancel rejected"),
             action_id=action_id,
             response=result_data,
         )
@@ -603,7 +607,14 @@ async def do_get_maid_action_status(plugin, *, action_id=""):
         return _action_error("REQUEST_FAILED", str(result.get("data", {})), action_id=action_id)
     records = service.observe_response(result)
     result_data = dict(result.get("data", {}) or {})
-    return Ok(records[0].as_dict() if records else result_data)
+    if result_data.get("found") is False or result_data.get("error"):
+        return _action_error(
+            str(result_data.get("error_code") or "ACTION_NOT_FOUND"),
+            str(result_data.get("error") or "Maid action was not found"),
+            action_id=str(action_id), response=result_data,
+        )
+    record_data = records[0].as_dict() if records else {}
+    return Ok({**result_data, **record_data})
 
 
 async def do_list_active_maid_actions(plugin, *, maid_id=None):
@@ -617,6 +628,11 @@ async def do_list_active_maid_actions(plugin, *, maid_id=None):
         return _action_error("REQUEST_FAILED", str(result.get("data", {})))
     service.observe_response(result)
     result_data = dict(result.get("data", {}) or {})
+    if result_data.get("error"):
+        return _action_error(
+            str(result_data.get("error_code") or "LIST_ACTIONS_FAILED"),
+            str(result_data.get("error")), response=result_data,
+        )
     actions = result_data.get("actions", result_data.get("active_actions", []))
     return Ok({"actions": actions if isinstance(actions, list) else []})
 

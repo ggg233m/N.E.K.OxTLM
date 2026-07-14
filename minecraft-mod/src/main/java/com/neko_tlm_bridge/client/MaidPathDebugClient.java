@@ -5,6 +5,7 @@ import com.neko_tlm_bridge.network.debug.SetMaidPathDebugPayload;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.MultiBufferSource;
 import net.neoforged.neoforge.client.event.RenderLevelStageEvent;
+import net.neoforged.neoforge.client.event.ClientPlayerNetworkEvent;
 import net.neoforged.neoforge.network.PacketDistributor;
 
 /** Client-only path display state. The config screen calls {@link #setEnabled(boolean)}. */
@@ -18,6 +19,12 @@ public final class MaidPathDebugClient {
 
     public static void setEnabled(boolean value) {
         Minecraft minecraft = Minecraft.getInstance();
+        if (!value) {
+            // Vanilla's PathfindingRenderer has no public per-entity clear API.
+            // Clearing DebugRenderer prevents a stale path from flashing when
+            // this option is enabled again after a long pause.
+            minecraft.debugRenderer.clear();
+        }
         if (minecraft.getConnection() != null) {
             PacketDistributor.sendToServer(new SetMaidPathDebugPayload(value));
         }
@@ -28,6 +35,14 @@ public final class MaidPathDebugClient {
         if (Minecraft.getInstance().getConnection() != null) {
             PacketDistributor.sendToServer(new SetMaidPathDebugPayload(isEnabled()));
         }
+    }
+
+    public static void onClientLogin(ClientPlayerNetworkEvent.LoggingIn event) {
+        synchronizePreference();
+    }
+
+    public static void onClientLogout(ClientPlayerNetworkEvent.LoggingOut event) {
+        Minecraft.getInstance().debugRenderer.clear();
     }
 
     public static void onRenderLevel(RenderLevelStageEvent event) {

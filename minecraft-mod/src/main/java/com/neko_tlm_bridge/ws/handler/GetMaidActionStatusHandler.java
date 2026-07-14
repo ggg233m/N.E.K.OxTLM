@@ -2,6 +2,7 @@ package com.neko_tlm_bridge.ws.handler;
 
 import com.google.gson.JsonObject;
 import com.neko_tlm_bridge.tlm.agent.runtime.MaidActionStore;
+import com.neko_tlm_bridge.ws.Protocol;
 import net.minecraft.server.MinecraftServer;
 import org.java_websocket.WebSocket;
 
@@ -18,7 +19,7 @@ public final class GetMaidActionStatusHandler implements MessageHandlerInterface
     public JsonObject handle(JsonObject request, WebSocket conn) {
         String requestId = request.has("request_id") ? request.get("request_id").getAsString() : null;
         JsonObject response = new JsonObject();
-        response.addProperty("type", "maid_action_status");
+        response.addProperty("type", Protocol.TYPE_MAID_ACTION_STATUS);
         if (requestId != null) response.addProperty("request_id", requestId);
         JsonObject data = new JsonObject();
         try {
@@ -26,7 +27,11 @@ public final class GetMaidActionStatusHandler implements MessageHandlerInterface
             UUID actionId = UUID.fromString(request.getAsJsonObject("data").get("action_id").getAsString());
             var status = MaidActionStore.getInstance().getStatus(actionId);
             data.addProperty("found", status.isPresent());
-            status.ifPresent(value -> data.add("action", value));
+            status.ifPresent(value -> value.entrySet().forEach(entry ->
+                    data.add(entry.getKey(), entry.getValue().deepCopy())));
+            if (status.isEmpty()) {
+                data.addProperty("error_code", "ACTION_NOT_FOUND");
+            }
         } catch (RuntimeException malformed) {
             data.addProperty("found", false);
             data.addProperty("error", malformed.getMessage() == null ? "INVALID_REQUEST" : malformed.getMessage());

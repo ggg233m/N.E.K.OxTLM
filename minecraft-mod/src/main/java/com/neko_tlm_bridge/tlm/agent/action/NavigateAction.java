@@ -11,7 +11,6 @@ import com.neko_tlm_bridge.tlm.agent.MaidActionTickResult;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.entity.ai.behavior.BlockPosTracker;
 import net.minecraft.world.entity.ai.memory.MemoryModuleType;
-import net.minecraft.world.entity.ai.memory.WalkTarget;
 import net.minecraft.world.level.pathfinder.Path;
 import net.minecraft.world.phys.Vec3;
 
@@ -48,11 +47,13 @@ public final class NavigateAction implements MaidAction {
         Objects.requireNonNull(args, "args");
         JsonObject target = requireObject(args, "target");
         BlockPos targetPos = new BlockPos(
-                requireInt(target, "x"),
-                requireInt(target, "y"),
-                requireInt(target, "z"));
+                requireCoordinate(target, "x"),
+                requireCoordinate(target, "y"),
+                requireCoordinate(target, "z"));
         double speed = optionalDouble(args, "speed", 0.7D);
         double stopDistance = optionalDouble(args, "stop_distance", 1.5D);
+        requireRange(speed, "speed", 0.4D, 1.0D);
+        requireRange(stopDistance, "stop_distance", 1.0D, 4.0D);
         return new NavigateAction(targetPos, speed, stopDistance);
     }
 
@@ -127,7 +128,14 @@ public final class NavigateAction implements MaidAction {
         }
 
         if (context.maid().getNavigation().isDone()) {
+            if (retries >= MAX_RETRIES) {
+                return failure(ActionEndReason.STUCK, "navigation_finished_before_arrival");
+            }
+            retries++;
+            clearAgentMemories(context);
             stage = Stage.PATHFINDING;
+            windowStartDistance = distance;
+            windowStartedAt = context.gameTime();
             return MaidActionTickResult.running();
         }
 
@@ -166,7 +174,8 @@ public final class NavigateAction implements MaidAction {
                 retries++;
                 windowStartedAt = context.gameTime();
                 windowStartDistance = distance;
-                return null;
+                clearAgentMemories(context);
+                return MaidActionTickResult.running();
             }
             return failure(ActionEndReason.PATH_NOT_FOUND, "path_not_found");
         }
@@ -184,8 +193,9 @@ public final class NavigateAction implements MaidAction {
 
     private void maintainAgentMemories(MaidActionContext context) {
         BlockPosTracker tracker = new BlockPosTracker(target);
-        context.maid().getBrain().setMemory(MemoryModuleType.WALK_TARGET,
-                new WalkTarget(tracker, (float) speed, (int) Math.ceil(stopDistance)));
+        // MaidPathNavigation is the sole locomotion owner. Writing WALK_TARGET
+        // as well would let MoveToTargetSink replace/stop the same route using
+        // an integer close-enough radius (notably too large for harvest).
         context.maid().getBrain().setMemory(MemoryModuleType.LOOK_TARGET, tracker);
     }
 
@@ -251,6 +261,20 @@ public final class NavigateAction implements MaidAction {
             return parent.get(name).getAsInt();
         } catch (RuntimeException exception) {
             throw new IllegalArgumentException(name + " must be an integer", exception);
+        }
+    }
+
+    private static int requireCoordinate(JsonObject parent, String name) {
+        int value = requireInt(parent, name);
+        if (value < -30_000_000 || value > 30_000_000) {
+            throw new IllegalArgumentException(name + " must be between -30000000 and 30000000");
+        }
+        return value;
+    }
+
+    private static void requireRange(double value, String name, double minimum, double maximum) {
+        if (value < minimum || value > maximum) {
+            throw new IllegalArgumentException(name + " must be between " + minimum + " and " + maximum);
         }
     }
 

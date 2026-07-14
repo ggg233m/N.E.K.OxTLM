@@ -1,5 +1,6 @@
 """Routes useful maid action feedback into the N.E.K.O conversation."""
 
+import asyncio
 import time
 from typing import Dict, Optional
 
@@ -47,29 +48,22 @@ class ActionFeedbackHandler:
         key = f"{self._key(record)}:{record.sequence}"
         if key in self._decisions:
             return False
-        self._decisions.add(key)
-        await self._plugin._push_minecraft_context(
+        await self._push_with_retry(
             self._progress_text(record)
-            + " 服务端标记此阶段需要新的决策，请结合动作状态决定重试、取消或改换目标。",
-            ai_behavior="respond",
-            priority=4,
-            metadata={
-                "description": "Minecraft 女仆 Agent 动作需要决策",
-                "action_id": record.action_id,
-                "generation": record.generation,
-            },
-            aggregate=False,
-            coalesce_key=None,
+                + " 服务端标记此阶段需要新的决策，请结合动作状态决定重试、取消或改换目标。",
+            ai_behavior="respond", priority=4,
+            metadata={"description": "Minecraft 女仆 Agent 动作需要决策",
+                      "action_id": record.action_id, "generation": record.generation},
+            aggregate=False, coalesce_key=None,
         )
+        self._decisions.add(key)
         return True
 
     async def finished(self, record: ActionRecord) -> bool:
         key = self._key(record)
         if key in self._finished:
             return False
-        self._finished.add(key)
-        self._last_progress.pop(key, None)
-        await self._plugin._push_minecraft_context(
+        await self._push_with_retry(
             self._finished_text(record),
             ai_behavior="respond",
             priority=5,
@@ -83,7 +77,21 @@ class ActionFeedbackHandler:
             aggregate=False,
             coalesce_key=None,
         )
+        self._finished.add(key)
+        self._last_progress.pop(key, None)
         return True
+
+    async def _push_with_retry(self, text: str, **kwargs) -> None:
+        """Retry important decision/terminal feedback before marking it delivered."""
+        for attempt, delay in enumerate((0.0, 0.5, 1.5)):
+            if delay:
+                await asyncio.sleep(delay)
+            try:
+                await self._plugin._push_minecraft_context(text, **kwargs)
+                return
+            except Exception:
+                if attempt == 2:
+                    raise
 
     @staticmethod
     def _key(record: ActionRecord) -> str:
@@ -93,8 +101,6 @@ class ActionFeedbackHandler:
     def _progress_text(record: ActionRecord) -> str:
         kind = _KIND_NAMES.get(record.kind, record.kind or "动作")
         text = f"女仆 Agent 的{kind}动作正在执行，阶段：{record.stage or record.status}。"
-        if record.progress is not None:
-            text += f" 当前进度约 {round(record.progress * 100)}%。"
         text += "这是执行进度，不要仅因这条进度消息打断玩家。"
         return text
 

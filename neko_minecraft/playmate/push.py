@@ -66,6 +66,11 @@ class MinecraftPushRouter:
             key = item[4] if len(item) > 4 else None
             groups.setdefault(key, []).append(item)
         for key, group_items in groups.items():
+            # A coalesce key represents a replaceable snapshot. Keep only the
+            # newest value in this aggregation window; key-less events still
+            # retain the existing multi-line aggregation behavior.
+            if key is not None:
+                group_items = [group_items[-1]]
             lines = []
             for _, text, _, _, _ in group_items:
                 for line in str(text).splitlines():

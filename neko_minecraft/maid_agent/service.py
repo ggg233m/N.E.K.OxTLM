@@ -51,8 +51,8 @@ class MaidActionService:
         else:
             items = []
         for item in items:
-            record, _ = self.tracker.apply(item)
-            if record is not None:
+            record, accepted = self.tracker.apply(item)
+            if accepted and record is not None:
                 records.append(record)
         return records
 
@@ -94,19 +94,18 @@ class MaidActionService:
                 "type": "get_maid_action_status",
                 "data": {"action_id": record.action_id},
             }, timeout=5)
-            if status_response.get("type") != "error":
+            if self._is_not_found(status_response):
+                lost_record, accepted = self.tracker.mark_server_state_lost(record)
+                if accepted:
+                    lost.append(record.action_id)
+                    await self.feedback.finished(lost_record)
+            elif status_response.get("type") != "error":
                 status_data = self._payload(status_response)
                 updated, accepted = self.tracker.apply(status_data)
                 if accepted and updated is not None:
                     recovered.append(record.action_id)
                     if updated.terminal:
                         await self.feedback.finished(updated)
-                continue
-            if self._is_not_found(status_response):
-                lost_record, accepted = self.tracker.mark_server_state_lost(record)
-                if accepted:
-                    lost.append(record.action_id)
-                    await self.feedback.finished(lost_record)
             else:
                 unresolved.append(record.action_id)
 

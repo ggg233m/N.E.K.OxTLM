@@ -11,6 +11,7 @@ import com.neko_tlm_bridge.tlm.agent.MaidActionTickResult;
 import com.neko_tlm_bridge.tlm.agent.runtime.HandLease;
 import com.neko_tlm_bridge.tlm.agent.runtime.MaidActionStore;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.tags.TagKey;
@@ -19,6 +20,11 @@ import net.minecraft.world.entity.ai.memory.MemoryModuleType;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.ClipContext;
+import net.minecraft.world.level.pathfinder.Path;
+import net.minecraft.world.phys.BlockHitResult;
+import net.minecraft.world.phys.HitResult;
+import net.minecraft.world.phys.Vec3;
 import net.neoforged.neoforge.items.IItemHandler;
 
 import java.util.ArrayList;
@@ -32,7 +38,11 @@ import java.util.function.Predicate;
 /** Searches, approaches and harvests a bounded number of blocks. */
 public final class HarvestBlocksAction implements MaidAction {
     private static final int MAX_SEARCH_CANDIDATES = 16;
-    private static final double APPROACH_DISTANCE = 2.25D;
+    private static final double APPROACH_DISTANCE = 1.0D;
+    private static final double MAX_BREAK_DISTANCE_SQUARED = 4.5D * 4.5D;
+    private static final Direction[] HORIZONTAL_DIRECTIONS = {
+            Direction.NORTH, Direction.SOUTH, Direction.WEST, Direction.EAST
+    };
 
     private final BlockPos explicitTarget;
     private final Predicate<BlockState> selector;
@@ -47,6 +57,7 @@ public final class HarvestBlocksAction implements MaidAction {
     private final Set<BlockPos> rejectedCandidates = new HashSet<>();
     private BlockPos searchOrigin;
     private BlockPos currentTarget;
+    private BlockPos currentStandPos;
     private BlockState expectedState;
     private NavigateAction navigation;
     private HandLease handLease;
@@ -82,7 +93,8 @@ public final class HarvestBlocksAction implements MaidAction {
         String description;
         if (hasTarget) {
             JsonObject target = requireObject(args, "target_pos");
-            targetPos = new BlockPos(requireInt(target, "x"), requireInt(target, "y"), requireInt(target, "z"));
+            targetPos = new BlockPos(requireCoordinate(target, "x"), requireCoordinate(target, "y"),
+                    requireCoordinate(target, "z"));
             description = "position:" + targetPos.toShortString();
         } else {
             JsonObject selectorJson = requireObject(args, "selector");
@@ -103,6 +115,9 @@ public final class HarvestBlocksAction implements MaidAction {
         int radius = optionalInt(args, "search_radius", 12);
         int maxBlocks = optionalInt(args, "max_blocks", 1);
         double speed = optionalDouble(args, "speed", 0.7D);
+        requireRange(radius, "search_radius", 1, 12);
+        requireRange(maxBlocks, "max_blocks", 1, 8);
+        requireRange(speed, "speed", 0.4D, 1.0D);
         ToolPolicy policy = ToolPolicy.fromWireName(optionalString(args, "tool_policy", "require_correct"));
         return new HarvestBlocksAction(targetPos, selectorPredicate, description, radius, maxBlocks, policy, speed);
     }
@@ -188,12 +203,17 @@ public final class HarvestBlocksAction implements MaidAction {
 
     private MaidActionTickResult chooseNextCandidate(MaidActionContext context) {
         while (!candidates.isEmpty()) {
-            currentTarget = candidates.removeFirst();
-            expectedState = context.level().getBlockState(currentTarget);
-            if (!expectedState.isAir() && matchesTarget(expectedState)) {
+            BlockPos candidate = candidates.removeFirst();
+            BlockState candidateState = context.level().getBlockState(candidate);
+            BlockPos standPos = findReachableStandPosition(context, candidate);
+            if (!candidateState.isAir() && matchesTarget(candidateState) && standPos != null) {
+                currentTarget = candidate;
+                currentStandPos = standPos;
+                expectedState = candidateState;
                 report(context, Stage.SELECTING_TOOL, overallProgress(), currentTarget);
                 return MaidActionTickResult.running();
             }
+            rejectedCandidates.add(candidate.immutable());
         }
         if (explicitTarget == null) {
             stage = Stage.SEARCHING;
@@ -234,7 +254,7 @@ public final class HarvestBlocksAction implements MaidAction {
             }
         }
 
-        navigation = new NavigateAction(currentTarget, speed, APPROACH_DISTANCE);
+        navigation = new NavigateAction(currentStandPos, speed, APPROACH_DISTANCE);
         navigation.start(context);
         report(context, Stage.PATHFINDING, overallProgress(), currentTarget);
         return MaidActionTickResult.running();
@@ -271,6 +291,10 @@ public final class HarvestBlocksAction implements MaidAction {
         }
         if (handLease.validate(context.maid()) != HandLease.LeaseHealth.HEALTHY) {
             return failure(ActionEndReason.HAND_CONFLICT, "held_tool_changed_while_breaking");
+        }
+        if (!canReachVisibleFace(context, currentTarget)) {
+            return onCandidateFailure(context, ActionEndReason.PATH_NOT_FOUND,
+                    "target_face_is_not_visible_or_in_reach");
         }
 
         float hardness = state.getDestroySpeed(context.level(), currentTarget);
@@ -317,6 +341,7 @@ public final class HarvestBlocksAction implements MaidAction {
         }
         harvested++;
         currentTarget = null;
+        currentStandPos = null;
         expectedState = null;
         if (harvested >= maxBlocks || explicitTarget != null) {
             return success(context);
@@ -335,6 +360,7 @@ public final class HarvestBlocksAction implements MaidAction {
             rejectedCandidates.add(currentTarget.immutable());
         }
         currentTarget = null;
+        currentStandPos = null;
         expectedState = null;
         if (!candidates.isEmpty()) {
             return chooseNextCandidate(context);
@@ -441,6 +467,69 @@ public final class HarvestBlocksAction implements MaidAction {
 
     private static int optionalInt(JsonObject parent, String name, int fallback) {
         return parent.has(name) ? requireInt(parent, name) : fallback;
+    }
+
+    private BlockPos findReachableStandPosition(MaidActionContext context, BlockPos target) {
+        // Never select the maid's support block: breaking it can cause an
+        // immediate fall even when the path itself is valid.
+        if (target.equals(context.maid().getOnPos())
+                || target.equals(context.maid().blockPosition().below())) {
+            return null;
+        }
+        List<BlockPos> positions = new ArrayList<>();
+        for (Direction direction : HORIZONTAL_DIRECTIONS) {
+            positions.add(target.relative(direction).immutable());
+        }
+        positions.sort(Comparator.comparingDouble(context.maid().blockPosition()::distSqr));
+        for (BlockPos standPos : positions) {
+            if (!isSafeStandPosition(context, standPos)) {
+                continue;
+            }
+            if (context.maid().position().distanceToSqr(Vec3.atBottomCenterOf(standPos))
+                    <= APPROACH_DISTANCE * APPROACH_DISTANCE) {
+                return standPos;
+            }
+            Path path = context.maid().getNavigation().createPath(standPos, 0);
+            if (path != null && path.getNodeCount() > 0 && path.canReach()) {
+                return standPos;
+            }
+        }
+        return null;
+    }
+
+    private static boolean isSafeStandPosition(MaidActionContext context, BlockPos pos) {
+        BlockState feet = context.level().getBlockState(pos);
+        BlockState head = context.level().getBlockState(pos.above());
+        BlockPos belowPos = pos.below();
+        BlockState below = context.level().getBlockState(belowPos);
+        return feet.getCollisionShape(context.level(), pos).isEmpty()
+                && head.getCollisionShape(context.level(), pos.above()).isEmpty()
+                && feet.getFluidState().isEmpty()
+                && head.getFluidState().isEmpty()
+                && below.isFaceSturdy(context.level(), belowPos, Direction.UP);
+    }
+
+    private static boolean canReachVisibleFace(MaidActionContext context, BlockPos target) {
+        Vec3 eye = context.maid().getEyePosition();
+        Vec3 center = Vec3.atCenterOf(target);
+        if (eye.distanceToSqr(center) > MAX_BREAK_DISTANCE_SQUARED) {
+            return false;
+        }
+        BlockHitResult hit = context.level().clip(new ClipContext(
+                eye, center, ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, context.maid()));
+        return hit.getType() == HitResult.Type.BLOCK && hit.getBlockPos().equals(target);
+    }
+
+    private static int requireCoordinate(JsonObject parent, String name) {
+        int value = requireInt(parent, name);
+        requireRange(value, name, -30_000_000, 30_000_000);
+        return value;
+    }
+
+    private static void requireRange(double value, String name, double minimum, double maximum) {
+        if (value < minimum || value > maximum) {
+            throw new IllegalArgumentException(name + " must be between " + minimum + " and " + maximum);
+        }
     }
 
     private static double optionalDouble(JsonObject parent, String name, double fallback) {

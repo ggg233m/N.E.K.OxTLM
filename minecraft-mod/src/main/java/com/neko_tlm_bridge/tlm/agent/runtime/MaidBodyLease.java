@@ -8,6 +8,8 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.NbtUtils;
 import net.minecraft.resources.ResourceLocation;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.Objects;
 import java.util.UUID;
@@ -18,6 +20,7 @@ import java.util.UUID;
  * is restored only while it still equals the value applied by the agent.
  */
 public final class MaidBodyLease {
+    private static final Logger LOGGER = LoggerFactory.getLogger("NekoTlmBridge");
     public static final String PERSISTENT_TAG = "NekoMaidAgentLease";
     private static final int SCHEMA_VERSION = 1;
     private static final int AGENT_RESTRICTION_RADIUS = 64;
@@ -69,6 +72,11 @@ public final class MaidBodyLease {
         }
         CompoundTag tag = persistent.getCompound(PERSISTENT_TAG);
         try {
+            int schema = tag.getInt("schema");
+            if (schema != SCHEMA_VERSION) {
+                LOGGER.warn("Attempting best-effort recovery of maid lease schema {} (supported {})",
+                        schema, SCHEMA_VERSION);
+            }
             UUID actionId = UUID.fromString(tag.getString("action_id"));
             long generation = tag.getLong("generation");
             Snapshot original = Snapshot.fromTag(tag.getCompound("original"));
@@ -76,7 +84,9 @@ public final class MaidBodyLease {
             HandLease hand = tag.contains("hand") ? HandLease.fromTag(tag.getCompound("hand")) : null;
             return new MaidBodyLease(actionId, generation, original, applied, hand);
         } catch (RuntimeException malformed) {
-            persistent.remove(PERSISTENT_TAG);
+            // Never destroy the only recovery evidence. A later compatible
+            // version or administrator can still inspect/recover this tag.
+            LOGGER.error("Unable to parse persisted maid body lease; preserving NBT", malformed);
             return null;
         }
     }

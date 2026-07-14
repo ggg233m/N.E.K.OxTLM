@@ -116,6 +116,7 @@ public class NekoConfigScreen extends Screen {
                     pathRenderingEnabled = !pathRenderingEnabled;
                     ClientConfig.PATH_RENDERING_ENABLED.set(pathRenderingEnabled);
                     ClientConfig.SPEC.save();
+                    MaidPathDebugClient.setEnabled(pathRenderingEnabled);
                     button.setMessage(toggleText("neko_tlm_bridge.config.client.pathRenderingEnabled", pathRenderingEnabled));
                 }
         ).bounds(centerX + 5, 160, 150, 20).build();

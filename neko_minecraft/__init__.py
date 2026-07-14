@@ -124,6 +124,7 @@ class NekoMinecraftPlugin(NekoPluginBase):
         self._bridge = None
         self._poll_task = None
         self._instruction_task = None
+        self._maid_reconcile_task = None
         self._maid_status_refresh_task = None
         self._request_futures = {}
         self._maid_status_cache = {}
@@ -285,6 +286,12 @@ class NekoMinecraftPlugin(NekoPluginBase):
                 await self._maid_status_refresh_task
             except asyncio.CancelledError:
                 pass
+        if self._maid_reconcile_task and not self._maid_reconcile_task.done():
+            self._maid_reconcile_task.cancel()
+            try:
+                await self._maid_reconcile_task
+            except asyncio.CancelledError:
+                pass
         if self._instruction_task and not self._instruction_task.done():
             self._instruction_task.cancel()
             try:
@@ -345,18 +352,25 @@ class NekoMinecraftPlugin(NekoPluginBase):
             self._instruction_task.cancel()
         self._instruction_task = None
         # 对账依赖轮询循环继续消费响应，不能在此同步等待。
-        asyncio.create_task(self._reconcile_maid_actions())
+        if self._maid_reconcile_task and not self._maid_reconcile_task.done():
+            self._maid_reconcile_task.cancel()
+        self._maid_reconcile_task = asyncio.create_task(self._reconcile_maid_actions())
 
     async def _reconcile_maid_actions(self):
-        try:
-            result = await self._maid_action_service.reconcile()
-            if not result.get("success", False):
-                self.logger.warning(f"[MaidAgent] Reconcile deferred: {result}")
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            # 重连后的首次对账失败不影响桥接；下次重连或显式查询仍可恢复。
-            self.logger.warning(f"[MaidAgent] Reconcile failed: {exc}")
+        for attempt, delay in enumerate((0, 1, 2, 5), start=1):
+            if delay:
+                await asyncio.sleep(delay)
+            try:
+                result = await self._maid_action_service.reconcile()
+                if result.get("success", False) and not result.get("unresolved"):
+                    return
+                self.logger.warning(
+                    f"[MaidAgent] Reconcile attempt {attempt} deferred: {result}")
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self.logger.warning(
+                    f"[MaidAgent] Reconcile attempt {attempt} failed: {exc}")
 
     async def _inject_instructions(self):
         self._instructions_injected = True

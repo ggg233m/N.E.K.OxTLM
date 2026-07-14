@@ -17,6 +17,7 @@ import com.github.tartaricacid.touhoulittlemaid.entity.task.TaskManager;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.ai.memory.MemoryModuleType;
+import net.minecraft.world.entity.schedule.Activity;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -91,20 +92,22 @@ public final class MaidActionStore {
             return new StartResult(false, "ACTION_KIND_UNAVAILABLE", null);
         }
 
-        ActiveAction previous = activeByMaid.get(maid.getUUID());
-        if (previous != null) {
-            if (!replaceExisting) {
-                return new StartResult(false, "MAID_BUSY", previous.snapshot());
-            }
-            terminate(previous, ActionStatus.SUPERSEDED, ActionEndReason.SUPERSEDED, new JsonObject());
-        }
-
         MaidAction action;
         try {
             action = Objects.requireNonNull(factory.create(maid, safeArgs), "factory returned null");
         } catch (RuntimeException invalid) {
             LOGGER.debug("Rejected maid action {}: {}", actionId, invalid.getMessage());
             return new StartResult(false, invalid.getMessage() == null ? "VALIDATION_FAILED" : invalid.getMessage(), null);
+        }
+
+        // Factory construction is the validation boundary. Never supersede a
+        // healthy action merely because the replacement request is malformed.
+        ActiveAction previous = activeByMaid.get(maid.getUUID());
+        if (previous != null) {
+            if (!replaceExisting) {
+                return new StartResult(false, "MAID_BUSY", previous.snapshot());
+            }
+            terminate(previous, ActionStatus.SUPERSEDED, ActionEndReason.SUPERSEDED, new JsonObject());
         }
 
         long generation = generationsByMaid.merge(maid.getUUID(), 1L, Long::sum);
@@ -114,9 +117,10 @@ public final class MaidActionStore {
         MaidBodyLease lease;
         try {
             lease = MaidBodyLease.acquire(maid, actionId, generation,
-                    appliedTasks.getOrDefault(kind, TaskManager.getIdleTask()));
+                    appliedTaskFor(kind, maid));
         } catch (RuntimeException failure) {
             LOGGER.error("Failed to acquire maid body lease for {}", actionId, failure);
+            recoverOrphanLease(maid);
             return new StartResult(false, "LEASE_ACQUIRE_FAILED", null);
         }
 
@@ -126,7 +130,7 @@ public final class MaidActionStore {
         recordsByAction.put(actionId, active);
         try {
             action.start(active.context(started));
-            active.status = ActionStatus.RUNNING;
+            transition(active, ActionStatus.RUNNING);
             if ("PENDING".equals(active.stage)) {
                 active.stage = "RUNNING";
             }
@@ -147,10 +151,13 @@ public final class MaidActionStore {
             return new CancelResult(record != null, record == null ? "ACTION_NOT_FOUND" : null,
                     record == null ? null : record.snapshot());
         }
+        if (active.status.isTerminal()) {
+            return new CancelResult(true, null, active.snapshot());
+        }
         if (active.status == ActionStatus.CANCEL_REQUESTED || active.status == ActionStatus.TERMINATING) {
             return new CancelResult(true, null, active.snapshot());
         }
-        active.status = ActionStatus.CANCEL_REQUESTED;
+        transition(active, ActionStatus.CANCEL_REQUESTED);
         active.stage = "CANCEL_REQUESTED";
         return new CancelResult(true, null, active.snapshot());
     }
@@ -206,7 +213,10 @@ public final class MaidActionStore {
             terminate(active, ActionStatus.FAILED, ActionEndReason.ENTITY_DEAD, new JsonObject());
             return false;
         }
-        if (maid.isOnFire() || maid.isInLava() || maid.isUnderWater()) {
+        boolean drowning = maid.isUnderWater()
+                && maid.getAirSupply() < Math.max(20, maid.getMaxAirSupply() / 2);
+        if (maid.isOnFire() || maid.isInLava() || drowning
+                || maid.getBrain().isActive(Activity.PANIC)) {
             terminate(active, ActionStatus.CANCELLED, ActionEndReason.SAFETY_PREEMPTED, new JsonObject());
             return false;
         }
@@ -264,7 +274,10 @@ public final class MaidActionStore {
         }
 
         for (ActiveAction active : new ArrayList<>(activeByMaid.values())) {
-            if (active.maid.isRemoved()) {
+            if (active.maid.isDeadOrDying() || !active.maid.isAlive()) {
+                terminate(active, ActionStatus.FAILED, ActionEndReason.ENTITY_DEAD,
+                        new JsonObject());
+            } else if (active.maid.isRemoved()) {
                 terminate(active, ActionStatus.FAILED, ActionEndReason.ENTITY_UNLOADED,
                         new JsonObject(), false);
             }
@@ -282,7 +295,10 @@ public final class MaidActionStore {
 
     public boolean hasActiveLease(UUID actionId, long generation) {
         ActionRecord record = recordsByAction.get(actionId);
-        return record instanceof ActiveAction active && active.generation == generation;
+        return record instanceof ActiveAction active
+                && active.generation == generation
+                && !active.status.isTerminal()
+                && activeByMaid.get(active.maidId) == active;
     }
 
     public void recoverOrphanLease(EntityMaid maid) {
@@ -293,8 +309,18 @@ public final class MaidActionStore {
         LOGGER.warn("Recovering orphan maid action lease {} generation {} for {}",
                 orphan.actionId(), orphan.generation(), maid.getUUID());
         generationsByMaid.merge(maid.getUUID(), orphan.generation(), Math::max);
-        cleanupNavigation(maid);
-        orphan.release(maid);
+        try {
+            cleanupNavigation(maid);
+        } catch (RuntimeException cleanupFailure) {
+            LOGGER.error("Failed to clear navigation while recovering orphan lease for {}",
+                    maid.getUUID(), cleanupFailure);
+        }
+        try {
+            orphan.release(maid);
+        } catch (RuntimeException releaseFailure) {
+            // Keep the persisted lease as recovery evidence for a later retry.
+            LOGGER.error("Failed to recover orphan maid lease for {}", maid.getUUID(), releaseFailure);
+        }
     }
 
     private void terminate(ActiveAction active, ActionStatus terminalStatus,
@@ -307,29 +333,51 @@ public final class MaidActionStore {
         if (active.status.isTerminal() || active.status == ActionStatus.TERMINATING) {
             return;
         }
-        active.status = ActionStatus.TERMINATING;
+        transition(active, ActionStatus.TERMINATING);
         try {
             active.action.stop(active.context(active.maid.level().getGameTime()), reason);
         } catch (RuntimeException cleanupFailure) {
             LOGGER.error("Action stop failed for {}", active.actionId, cleanupFailure);
             active.warnings.add("ACTION_STOP_FAILED");
         }
-        cleanupNavigation(active.maid);
+        try {
+            cleanupNavigation(active.maid);
+        } catch (RuntimeException cleanupFailure) {
+            LOGGER.error("Navigation cleanup failed for {}", active.actionId, cleanupFailure);
+            active.warnings.add("NAVIGATION_CLEANUP_FAILED");
+        }
         if (releaseLease) {
-            MaidBodyLease.ReleaseReport release = active.lease.release(active.maid);
-            if (release.handConflict()) {
-                active.warnings.add("HAND_CONFLICT");
+            try {
+                MaidBodyLease.ReleaseReport release = active.lease.release(active.maid);
+                if (release.handConflict()) {
+                    active.warnings.add("HAND_CONFLICT");
+                }
+            } catch (RuntimeException releaseFailure) {
+                // Do not strand the state machine in TERMINATING. The NBT lease
+                // intentionally remains so entity load can retry orphan recovery.
+                LOGGER.error("Body lease release failed for {}", active.actionId, releaseFailure);
+                active.warnings.add("LEASE_RELEASE_FAILED");
             }
         }
 
-        active.status = terminalStatus;
-        active.stage = terminalStatus.name();
-        active.endReason = reason;
-        active.result = result == null ? new JsonObject() : result.deepCopy();
-        active.finishedAtMs = System.currentTimeMillis();
-        active.sequence++;
-        activeByMaid.remove(active.maidId, active);
-        broadcast("maid_action_finished", active.snapshot());
+        try {
+            transition(active, terminalStatus);
+        } catch (RuntimeException transitionFailure) {
+            LOGGER.error("Forcing terminal state {} for {} after transition failure",
+                    terminalStatus, active.actionId, transitionFailure);
+            active.status = terminalStatus;
+            active.sequence++;
+            active.warnings.add("TERMINAL_TRANSITION_FORCED");
+        } finally {
+            active.stage = terminalStatus.name();
+            active.endReason = reason;
+            active.result = result == null ? new JsonObject() : result.deepCopy();
+            active.finishedAtMs = System.currentTimeMillis();
+            activeByMaid.remove(active.maidId, active);
+            if (active.eventsEnabled) {
+                broadcast("maid_action_finished", active.snapshot());
+            }
+        }
     }
 
     private static void cleanupNavigation(EntityMaid maid) {
@@ -340,9 +388,32 @@ public final class MaidActionStore {
         maid.setSwingingArms(false);
     }
 
+    private static void transition(ActionRecord record, ActionStatus next) {
+        if (!record.status.canTransitionTo(next)) {
+            throw new IllegalStateException("Invalid maid action transition " + record.status + " -> " + next);
+        }
+        record.status = next;
+        // Every observable state snapshot must advance the ordering token. In
+        // particular, a cancel response must be newer than the last progress
+        // event or Python will correctly discard it as a stale duplicate.
+        record.sequence++;
+    }
+
     private static String requestFingerprint(UUID maidId, MaidActionKind kind, JsonObject args,
                                              long timeoutMs, boolean replaceExisting) {
         return maidId + "|" + kind.wireName() + "|" + args + "|" + timeoutMs + "|" + replaceExisting;
+    }
+
+    private IMaidTask appliedTaskFor(MaidActionKind kind, EntityMaid maid) {
+        if (kind == MaidActionKind.LEGACY_ATTACK && maid.getTask() != null) {
+            String taskId = maid.getTask().getUid().toString();
+            if (taskId.endsWith(":attack") || taskId.endsWith(":ranged_attack")
+                    || taskId.endsWith(":crossbow_attack") || taskId.endsWith(":danmaku_attack")
+                    || taskId.endsWith(":trident_attack")) {
+                return maid.getTask();
+            }
+        }
+        return appliedTasks.getOrDefault(kind, TaskManager.getIdleTask());
     }
 
     private static void broadcast(String type, JsonObject data) {

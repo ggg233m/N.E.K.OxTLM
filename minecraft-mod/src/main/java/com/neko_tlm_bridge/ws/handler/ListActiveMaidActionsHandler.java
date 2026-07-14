@@ -2,6 +2,7 @@ package com.neko_tlm_bridge.ws.handler;
 
 import com.google.gson.JsonObject;
 import com.neko_tlm_bridge.tlm.agent.runtime.MaidActionStore;
+import com.neko_tlm_bridge.ws.Protocol;
 import net.minecraft.server.MinecraftServer;
 import org.java_websocket.WebSocket;
 
@@ -18,7 +19,7 @@ public final class ListActiveMaidActionsHandler implements MessageHandlerInterfa
     public JsonObject handle(JsonObject request, WebSocket conn) {
         String requestId = request.has("request_id") ? request.get("request_id").getAsString() : null;
         JsonObject response = new JsonObject();
-        response.addProperty("type", "maid_action_list");
+        response.addProperty("type", Protocol.TYPE_MAID_ACTION_LIST);
         if (requestId != null) response.addProperty("request_id", requestId);
         JsonObject data = new JsonObject();
         try {

@@ -42,8 +42,18 @@ neoForge {
             programArgument '--nogui'
             systemProperty 'neoforge.enabledGameTestNamespaces', project.mod_id
         }
+        gameTestServer {
+            type = 'gameTestServer'
+            systemProperty 'neoforge.enabledGameTestNamespaces', project.mod_id
+        }
         configureEach {
             logLevel = org.slf4j.event.Level.DEBUG
+            // Dev launches use exploded mod classes, so jarJar libraries are not unpacked.
+            // Add only the embedded library here. Extending from runtimeClasspath also
+            // puts the TLM mod jar on the plain classpath, bypassing mod discovery and
+            // causing its Minecraft-dependent classes to load in the wrong module.
+            additionalRuntimeClasspathConfiguration.dependencies.add(
+                    project.dependencies.create("org.java-websocket:Java-WebSocket:1.5.4"))
         }
     }
 
@@ -59,7 +69,14 @@ dependencies {
     implementation "org.java-websocket:Java-WebSocket:1.5.4"
     implementation "com.google.code.gson:gson:2.10.1"
 
+    testImplementation platform("org.junit:junit-bom:5.11.4")
+    testImplementation "org.junit.jupiter:junit-jupiter"
+
     jarJar "org.java-websocket:Java-WebSocket:1.5.4"
+}
+
+tasks.named('test', Test).configure {
+    useJUnitPlatform()
 }
 
 tasks.withType(ProcessResources).configureEach {
