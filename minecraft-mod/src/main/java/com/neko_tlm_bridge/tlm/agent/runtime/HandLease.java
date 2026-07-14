@@ -60,11 +60,13 @@ public final class HandLease {
         }
 
         ItemStack originalHand = maid.getMainHandItem();
+        HandLease lease = new HandLease(sourceSlot, StackFingerprint.of(tool),
+                StackFingerprint.of(originalHand));
+        // Persist expected post-swap slots before mutating either real slot.
+        lease.persistIntoBodyLease(maid);
         inventory.setStackInSlot(sourceSlot, originalHand);
         maid.setItemInHand(InteractionHand.MAIN_HAND, tool);
-
-        return new HandLease(sourceSlot, StackFingerprint.of(tool),
-                StackFingerprint.of(originalHand));
+        return lease;
     }
 
     /** Recreates a lease after entity NBT loading; it does not move items. */
@@ -98,6 +100,7 @@ public final class HandLease {
     public void acknowledgeHeldToolMutation(EntityMaid maid) {
         requireOpen();
         expectedHand = StackFingerprint.of(maid.getMainHandItem());
+        persistIntoBodyLease(maid);
     }
 
     public LeaseHealth validate(EntityMaid maid) {
@@ -148,6 +151,16 @@ public final class HandLease {
         if (released) {
             throw new IllegalStateException("Hand lease is already released");
         }
+    }
+
+    private void persistIntoBodyLease(EntityMaid maid) {
+        CompoundTag persistent = maid.getPersistentData();
+        if (!persistent.contains(MaidBodyLease.PERSISTENT_TAG)) {
+            return;
+        }
+        CompoundTag bodyTag = persistent.getCompound(MaidBodyLease.PERSISTENT_TAG);
+        bodyTag.put("hand", toTag());
+        persistent.put(MaidBodyLease.PERSISTENT_TAG, bodyTag);
     }
 
     public enum LeaseHealth {

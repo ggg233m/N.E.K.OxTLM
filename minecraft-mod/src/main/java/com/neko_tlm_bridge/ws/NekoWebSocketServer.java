@@ -130,6 +130,18 @@ public class NekoWebSocketServer extends WebSocketServer {
         }
     }
 
+    /** Broadcasts a typed asynchronous maid-action lifecycle message. */
+    public void broadcastMaidActionMessage(String type, JsonObject actionData) {
+        if (clients.isEmpty()) return;
+        JsonObject msg = new JsonObject();
+        msg.addProperty("type", type);
+        msg.add("data", actionData);
+        String json = GSON.toJson(msg);
+        for (WebSocket client : clients) {
+            sendToClient(client, json);
+        }
+    }
+
     public boolean hasClients() {
         return !clients.isEmpty();
     }
