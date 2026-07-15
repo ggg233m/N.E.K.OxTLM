@@ -43,6 +43,7 @@ public final class HarvestBlocksAction implements MaidAction {
     private static final Direction[] HORIZONTAL_DIRECTIONS = {
             Direction.NORTH, Direction.SOUTH, Direction.WEST, Direction.EAST
     };
+    private static final int[] STAND_Y_OFFSETS = {0, 1, -1};
 
     private final BlockPos explicitTarget;
     private final Predicate<BlockState> selector;
@@ -186,13 +187,28 @@ public final class HarvestBlocksAction implements MaidAction {
             BlockPos origin = searchOrigin;
             BlockPos.betweenClosedStream(origin.offset(-searchRadius, -searchRadius, -searchRadius),
                             origin.offset(searchRadius, searchRadius, searchRadius))
+                    // The vanilla iterator reuses a MutableBlockPos. Freeze it
+                    // before any stateful stream operation (especially sort),
+                    // otherwise every retained candidate becomes the final
+                    // corner visited by the iterator.
+                    .map(BlockPos::immutable)
                     .filter(pos -> pos.distSqr(origin) <= (double) searchRadius * searchRadius)
                     .filter(context.level()::hasChunkAt)
                     .filter(pos -> !rejectedCandidates.contains(pos))
                     .filter(pos -> selector.test(context.level().getBlockState(pos)))
-                    .sorted(Comparator.comparingDouble(origin::distSqr))
+                    // Prefer exposed blocks. Without this cheap geometry filter,
+                    // the nearest 16 stone candidates are usually buried below
+                    // the maid and can never have a valid approach position.
+                    .filter(pos -> hasSafeAdjacentStandPosition(context, pos))
+                    // Prefer targets that can be worked from the same level
+                    // (or one block below, for a wall face). Surface blocks
+                    // that require standing above them are kept as a fallback
+                    // so a generic "stone" selector does not spend its first
+                    // 16 candidates trying to dig the surrounding floor.
+                    .sorted(Comparator
+                            .comparingInt((BlockPos pos) -> approachHeightRank(context, pos))
+                            .thenComparingDouble(origin::distSqr))
                     .limit(MAX_SEARCH_CANDIDATES)
-                    .map(BlockPos::immutable)
                     .forEach(candidates::add);
         }
 
@@ -219,11 +235,9 @@ public final class HarvestBlocksAction implements MaidAction {
             }
             rejectedCandidates.add(candidate.immutable());
         }
-        if (explicitTarget == null) {
-            stage = Stage.SEARCHING;
-            return MaidActionTickResult.running();
-        }
-        return failure(ActionEndReason.TARGET_CHANGED, "target_changed_before_harvest");
+        return explicitTarget == null
+                ? failure(ActionEndReason.PATH_NOT_FOUND, "no_reachable_matching_block_found")
+                : failure(ActionEndReason.TARGET_CHANGED, "target_changed_before_harvest");
     }
 
     private MaidActionTickResult selectTool(MaidActionContext context) {
@@ -480,10 +494,7 @@ public final class HarvestBlocksAction implements MaidAction {
                 || target.equals(context.maid().blockPosition().below())) {
             return null;
         }
-        List<BlockPos> positions = new ArrayList<>();
-        for (Direction direction : HORIZONTAL_DIRECTIONS) {
-            positions.add(target.relative(direction).immutable());
-        }
+        List<BlockPos> positions = standPositionCandidates(target);
         positions.sort(Comparator.comparingDouble(context.maid().blockPosition()::distSqr));
         for (BlockPos standPos : positions) {
             if (!isSafeStandPosition(context, standPos)) {
@@ -499,6 +510,42 @@ public final class HarvestBlocksAction implements MaidAction {
             }
         }
         return null;
+    }
+
+    private static boolean hasSafeAdjacentStandPosition(MaidActionContext context, BlockPos target) {
+        if (target.equals(context.maid().getOnPos())
+                || target.equals(context.maid().blockPosition().below())) {
+            return false;
+        }
+        for (BlockPos standPos : standPositionCandidates(target)) {
+            if (isSafeStandPosition(context, standPos)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static int approachHeightRank(MaidActionContext context, BlockPos target) {
+        for (Direction direction : HORIZONTAL_DIRECTIONS) {
+            BlockPos adjacent = target.relative(direction);
+            // Same-level and wall-face targets are safer than floor targets.
+            if (isSafeStandPosition(context, adjacent)
+                    || isSafeStandPosition(context, adjacent.below())) {
+                return 0;
+            }
+        }
+        return 1;
+    }
+
+    private static List<BlockPos> standPositionCandidates(BlockPos target) {
+        List<BlockPos> positions = new ArrayList<>(HORIZONTAL_DIRECTIONS.length * STAND_Y_OFFSETS.length);
+        for (Direction direction : HORIZONTAL_DIRECTIONS) {
+            BlockPos adjacent = target.relative(direction);
+            for (int yOffset : STAND_Y_OFFSETS) {
+                positions.add(adjacent.offset(0, yOffset, 0).immutable());
+            }
+        }
+        return positions;
     }
 
     private static boolean isSafeStandPosition(MaidActionContext context, BlockPos pos) {

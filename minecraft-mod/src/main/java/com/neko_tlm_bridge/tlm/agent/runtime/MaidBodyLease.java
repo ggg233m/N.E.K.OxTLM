@@ -66,6 +66,19 @@ public final class MaidBodyLease {
     }
 
     public static MaidBodyLease fromPersistentData(EntityMaid maid) {
+        return readPersistentData(maid, true);
+    }
+
+    /**
+     * Returns whether the persisted tag is complete enough to recover. This is
+     * intentionally silent because the schedule guard may call it repeatedly
+     * while an orphan lease is waiting for recovery.
+     */
+    public static boolean hasRecoverablePersistentLease(EntityMaid maid) {
+        return readPersistentData(maid, false) != null;
+    }
+
+    private static MaidBodyLease readPersistentData(EntityMaid maid, boolean logFailure) {
         CompoundTag persistent = maid.getPersistentData();
         if (!persistent.contains(PERSISTENT_TAG)) {
             return null;
@@ -73,7 +86,7 @@ public final class MaidBodyLease {
         CompoundTag tag = persistent.getCompound(PERSISTENT_TAG);
         try {
             int schema = tag.getInt("schema");
-            if (schema != SCHEMA_VERSION) {
+            if (logFailure && schema != SCHEMA_VERSION) {
                 LOGGER.warn("Attempting best-effort recovery of maid lease schema {} (supported {})",
                         schema, SCHEMA_VERSION);
             }
@@ -86,7 +99,9 @@ public final class MaidBodyLease {
         } catch (RuntimeException malformed) {
             // Never destroy the only recovery evidence. A later compatible
             // version or administrator can still inspect/recover this tag.
-            LOGGER.error("Unable to parse persisted maid body lease; preserving NBT", malformed);
+            if (logFailure) {
+                LOGGER.error("Unable to parse persisted maid body lease; preserving NBT", malformed);
+            }
             return null;
         }
     }

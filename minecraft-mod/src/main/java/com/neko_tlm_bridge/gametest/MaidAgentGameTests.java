@@ -5,12 +5,15 @@ import com.github.tartaricacid.touhoulittlemaid.init.InitEntities;
 import com.google.gson.JsonObject;
 import com.neko_tlm_bridge.tlm.agent.MaidActionKind;
 import com.neko_tlm_bridge.tlm.agent.runtime.MaidActionStore;
+import com.neko_tlm_bridge.tlm.agent.runtime.MaidBodyLease;
 import net.minecraft.core.BlockPos;
 import net.minecraft.gametest.framework.GameTest;
 import net.minecraft.gametest.framework.GameTestHelper;
+import net.minecraft.nbt.CompoundTag;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
+import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.phys.Vec3;
 import net.neoforged.neoforge.gametest.GameTestHolder;
@@ -86,12 +89,121 @@ public final class MaidAgentGameTests {
         });
     }
 
+    @GameTest(template = "maid_agent_test", timeoutTicks = 400)
+    public static void harvestSelectorPrefersExposedStone(GameTestHelper helper) {
+        prepareFloorArea(helper, 0, 10, 0, 10, Blocks.STONE);
+        BlockPos relativeTarget = new BlockPos(8, 1, 1);
+        helper.setBlock(relativeTarget, Blocks.STONE);
+        EntityMaid maid = helper.spawn(InitEntities.MAID.get(), new BlockPos(1, 1, 1));
+        maid.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(Items.IRON_PICKAXE));
+        UUID actionId = UUID.randomUUID();
+
+        JsonObject selector = new JsonObject();
+        selector.addProperty("type", "block");
+        selector.addProperty("id", "minecraft:stone");
+        JsonObject args = new JsonObject();
+        args.add("selector", selector);
+        args.addProperty("search_radius", 7);
+        args.addProperty("max_blocks", 1);
+        args.addProperty("tool_policy", "require_correct");
+        args.addProperty("speed", 0.8D);
+        helper.runAfterDelay(5, () -> {
+            BlockPos standPos = helper.absolutePos(new BlockPos(7, 1, 1));
+            var fixturePath = maid.getNavigation().createPath(standPos, 0);
+            helper.assertTrue(fixturePath != null && fixturePath.canReach(),
+                    "selector test fixture must provide a reachable adjacent stand position");
+            MaidActionStore.StartResult start = MaidActionStore.getInstance().start(
+                    actionId, maid, MaidActionKind.HARVEST_BLOCKS, args, 20_000L, true);
+            helper.assertTrue(start.accepted(), "selector harvest action should be accepted");
+        });
+
+        helper.succeedWhen(() -> {
+            var current = MaidActionStore.getInstance().getStatus(actionId);
+            helper.assertTrue(current.isPresent(), "selector harvest action has not started yet");
+            JsonObject status = current.orElseThrow();
+            helper.assertTrue("SUCCEEDED".equals(status.get("status").getAsString()),
+                    "selector harvest action should succeed, current=" + status);
+            helper.assertTrue(helper.getBlockState(relativeTarget).isAir(),
+                    "exposed selector target should be removed");
+            helper.assertTrue(helper.getBlockState(new BlockPos(1, 0, 1)).is(Blocks.STONE),
+                    "selector must not mine the maid's support block");
+            helper.assertTrue(helper.getBlockState(new BlockPos(2, 0, 1)).is(Blocks.STONE),
+                    "selector should prefer the exposed target over a nearby stone floor");
+        });
+    }
+
+    @GameTest(template = "maid_agent_test", timeoutTicks = 400)
+    public static void activeLeaseSuppressesScheduleTeleport(GameTestHelper helper) {
+        prepareFloor(helper, 1, 11, 1);
+        BlockPos relativeTarget = new BlockPos(2, 1, 1);
+        helper.setBlock(relativeTarget, Blocks.OBSIDIAN);
+        EntityMaid maid = helper.spawn(InitEntities.MAID.get(), new BlockPos(1, 1, 1));
+        maid.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(Items.DIAMOND_PICKAXE));
+        BlockPos staleScheduleHome = helper.absolutePos(new BlockPos(10, 1, 1));
+        maid.getSchedulePos().setWorkPos(staleScheduleHome);
+        maid.getSchedulePos().setIdlePos(staleScheduleHome);
+        maid.getSchedulePos().setSleepPos(staleScheduleHome);
+        maid.getSchedulePos().setConfigured(true);
+        maid.getPersistentData().put(MaidBodyLease.PERSISTENT_TAG, new CompoundTag());
+        helper.assertTrue(!MaidBodyLease.hasRecoverablePersistentLease(maid),
+                "malformed lease evidence must not disable the maid schedule forever");
+        maid.getPersistentData().remove(MaidBodyLease.PERSISTENT_TAG);
+        UUID actionId = UUID.randomUUID();
+        Vec3[] previousPosition = {maid.position()};
+
+        JsonObject args = new JsonObject();
+        args.add("target_pos", position(helper.absolutePos(relativeTarget)));
+        args.addProperty("search_radius", 12);
+        args.addProperty("max_blocks", 1);
+        args.addProperty("tool_policy", "require_correct");
+        args.addProperty("speed", 0.7D);
+        helper.runAfterDelay(5, () -> {
+            MaidActionStore.StartResult start = MaidActionStore.getInstance().start(
+                    actionId, maid, MaidActionKind.HARVEST_BLOCKS, args, 20_000L, true);
+            helper.assertTrue(start.accepted(), "long harvest action should be accepted");
+            // SchedulePos.tick runs every 40 entity ticks. Force the very next
+            // tick onto that boundary while the Agent lease is live.
+            maid.tickCount = 39;
+        });
+        helper.runAfterDelay(15, () -> {
+            MaidActionStore.CancelResult cancel = MaidActionStore.getInstance().requestCancel(actionId);
+            helper.assertTrue(cancel.accepted(), "long harvest action should accept cancellation");
+        });
+        helper.onEachTick(() -> {
+            if (MaidActionStore.getInstance().getActiveStatus(maid.getUUID()).isPresent()) {
+                helper.assertTrue(maid.position().distanceToSqr(previousPosition[0]) < 9.0D,
+                        "TLM schedule tick teleported a maid while the Agent lease was active");
+            }
+            previousPosition[0] = maid.position();
+        });
+
+        helper.succeedWhen(() -> {
+            var current = MaidActionStore.getInstance().getStatus(actionId);
+            helper.assertTrue(current.isPresent(), "long harvest action has not started yet");
+            JsonObject status = current.orElseThrow();
+            helper.assertTrue("CANCELLED".equals(status.get("status").getAsString()),
+                    "long harvest action should cancel without teleporting, current=" + status);
+            helper.assertTrue(maid.position().distanceToSqr(
+                            Vec3.atBottomCenterOf(helper.absolutePos(new BlockPos(1, 1, 1)))) < 9.0D,
+                    "maid should remain near the Agent action origin");
+        });
+    }
+
     private static void prepareFloor(GameTestHelper helper, int startX, int endX, int z) {
+        prepareFloor(helper, startX, endX, z, Blocks.STONE);
+    }
+
+    private static void prepareFloor(GameTestHelper helper, int startX, int endX, int z, Block floor) {
+        prepareFloorArea(helper, startX, endX, z - 1, z + 1, floor);
+    }
+
+    private static void prepareFloorArea(GameTestHelper helper, int startX, int endX,
+                                         int startZ, int endZ, Block floor) {
         for (int x = startX; x <= endX; x++) {
-            for (int dz = -1; dz <= 1; dz++) {
-                helper.setBlock(new BlockPos(x, 0, z + dz), Blocks.STONE);
-                helper.setBlock(new BlockPos(x, 1, z + dz), Blocks.AIR);
-                helper.setBlock(new BlockPos(x, 2, z + dz), Blocks.AIR);
+            for (int z = startZ; z <= endZ; z++) {
+                helper.setBlock(new BlockPos(x, 0, z), floor);
+                helper.setBlock(new BlockPos(x, 1, z), Blocks.AIR);
+                helper.setBlock(new BlockPos(x, 2, z), Blocks.AIR);
             }
         }
     }

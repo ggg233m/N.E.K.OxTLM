@@ -183,6 +183,12 @@ public final class MaidActionStore {
                 && active.action.resources().contains(resource);
     }
 
+    /** Used by the TLM schedule guard during the maid's entity tick. */
+    public boolean hasActiveMaidAction(UUID maidId) {
+        ActiveAction active = activeByMaid.get(maidId);
+        return active != null && !active.status.isTerminal();
+    }
+
     public Optional<JsonObject> getActiveStatus(UUID maidId) {
         ActiveAction active = activeByMaid.get(maidId);
         return active == null ? Optional.empty() : Optional.of(active.snapshot());
