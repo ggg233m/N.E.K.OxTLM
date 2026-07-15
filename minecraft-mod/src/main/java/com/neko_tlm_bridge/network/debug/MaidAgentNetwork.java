@@ -1,5 +1,6 @@
 package com.neko_tlm_bridge.network.debug;
 
+import com.neko_tlm_bridge.network.agent.EmergencyStopMaidActionsPayload;
 import net.neoforged.neoforge.network.event.RegisterPayloadHandlersEvent;
 import net.neoforged.neoforge.network.registration.PayloadRegistrar;
 
@@ -15,5 +16,9 @@ public final class MaidAgentNetwork {
                 SetMaidPathDebugPayload.TYPE,
                 SetMaidPathDebugPayload.STREAM_CODEC,
                 SetMaidPathDebugPayload::handle);
+        registrar.playToServer(
+                EmergencyStopMaidActionsPayload.TYPE,
+                EmergencyStopMaidActionsPayload.STREAM_CODEC,
+                EmergencyStopMaidActionsPayload::handle);
     }
 }

@@ -162,6 +162,28 @@ public final class MaidActionStore {
         return new CancelResult(true, null, active.snapshot());
     }
 
+    /**
+     * Immediately terminates every active Agent action owned by the requesting
+     * player. This is the server-authoritative emergency-stop path used by the
+     * client key binding, so it deliberately does not depend on WebSocket,
+     * Python, or waiting for the maid behavior's next tick.
+     */
+    public int emergencyStopOwnedBy(UUID ownerId) {
+        Objects.requireNonNull(ownerId, "ownerId");
+        int stopped = 0;
+        for (ActiveAction active : new ArrayList<>(activeByMaid.values())) {
+            UUID maidOwnerId = active.maid.getOwnerUUID();
+            if (!ownerId.equals(maidOwnerId)) {
+                continue;
+            }
+            JsonObject result = new JsonObject();
+            result.addProperty("source", "client_emergency_stop");
+            terminate(active, ActionStatus.CANCELLED, ActionEndReason.REQUESTED, result);
+            stopped++;
+        }
+        return stopped;
+    }
+
     public Optional<JsonObject> getStatus(UUID actionId) {
         ActionRecord record = recordsByAction.get(actionId);
         return record == null ? Optional.empty() : Optional.of(record.snapshot());

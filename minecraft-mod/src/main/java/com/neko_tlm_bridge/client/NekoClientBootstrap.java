@@ -20,6 +20,8 @@ public final class NekoClientBootstrap {
         modContainer.registerExtensionPoint(IConfigScreenFactory.class,
                 (container, parentScreen) -> new NekoConfigScreen(parentScreen));
         modEventBus.addListener(PlanOverlayRenderer::onRegisterGuiLayers);
+        modEventBus.addListener(MaidEmergencyStopClient::onRegisterKeyMappings);
+        NeoForge.EVENT_BUS.addListener(MaidEmergencyStopClient::onClientTick);
         NeoForge.EVENT_BUS.addListener(MaidPathDebugClient::onRenderLevel);
         NeoForge.EVENT_BUS.addListener(MaidPathDebugClient::onClientLogin);
         NeoForge.EVENT_BUS.addListener(MaidPathDebugClient::onClientLogout);

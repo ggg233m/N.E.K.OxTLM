@@ -31,5 +31,9 @@
   "neko_tlm_bridge.command.reject": "[✗ Reject]",
   "neko_tlm_bridge.command.not_found": "Pending command request not found: %s",
   "neko_tlm_bridge.command.executed": "Executed command: %s",
-  "neko_tlm_bridge.command.rejected": "Rejected command: %s"
+  "neko_tlm_bridge.command.rejected": "Rejected command: %s",
+  "key.categories.neko_tlm_bridge": "N.E.K.O Maid Agent",
+  "key.neko_tlm_bridge.emergency_stop": "Emergency Stop All Maid Agent Actions",
+  "message.neko_tlm_bridge.emergency_stop.stopped": "[N.E.K.O] Emergency-stopped %s maid Agent action(s)",
+  "message.neko_tlm_bridge.emergency_stop.none": "[N.E.K.O] No maid Agent action is currently running"
 }

@@ -31,5 +31,9 @@
   "neko_tlm_bridge.command.reject": "[✗ 拒绝]",
   "neko_tlm_bridge.command.not_found": "未找到待确认的指令请求: %s",
   "neko_tlm_bridge.command.executed": "已执行指令: %s",
-  "neko_tlm_bridge.command.rejected": "已拒绝指令: %s"
+  "neko_tlm_bridge.command.rejected": "已拒绝指令: %s",
+  "key.categories.neko_tlm_bridge": "N.E.K.O 女仆 Agent",
+  "key.neko_tlm_bridge.emergency_stop": "急停所有女仆 Agent 动作",
+  "message.neko_tlm_bridge.emergency_stop.stopped": "[N.E.K.O] 已急停 %s 个女仆 Agent 动作",
+  "message.neko_tlm_bridge.emergency_stop.none": "[N.E.K.O] 没有正在执行的女仆 Agent 动作"
 }
