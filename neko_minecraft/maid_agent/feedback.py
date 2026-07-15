@@ -125,5 +125,11 @@ class ActionFeedbackHandler:
                 "selector 在已加载区块和 search_radius 内重试一次；不要强制加载区块，不要让玩家靠近"
                 "这个未经确认的坐标，也不要原样重试 target_pos。"
             )
+        if message == "no_matching_block_found":
+            text += (
+                " 如果玩家要找的是矿物且没有限定只搜索附近，请沿用 selector 和目标数量，立即自动重试"
+                "一次有界探矿：mining_plan 使用 auto、maid_facing、max_distance=8、max_depth=4、"
+                "excavation_budget=24，并设置 timeout_ms=120000；最多自动重试一次，禁止无限开矿道。"
+            )
         text += "请根据真实终态简短回应玩家；失败时不要声称动作成功。"
         return text

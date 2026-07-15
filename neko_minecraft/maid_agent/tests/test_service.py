@@ -128,6 +128,28 @@ class MaidActionServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("不要让玩家靠近", text)
         self.assertIn("不要强制加载区块", text)
 
+    async def test_missing_ore_feedback_offers_one_bounded_prospect_retry(self):
+        plugin = FakePlugin()
+        service = MaidActionService(plugin)
+        await service.handle_message({
+            "type": "maid_action_finished",
+            "data": {
+                "action_id": "missing-ore", "maid_id": "maid", "generation": 1,
+                "sequence": 4, "kind": "harvest_blocks", "status": "FAILED",
+                "stage": "FAILED", "end_reason": "TARGET_CHANGED",
+                "result": {
+                    "message": "no_matching_block_found",
+                    "selector": "tag:#minecraft:coal_ores",
+                },
+            },
+        })
+
+        text = plugin.pushes[-1][0]
+        self.assertIn("mining_plan", text)
+        self.assertIn("max_distance=8", text)
+        self.assertIn("timeout_ms=120000", text)
+        self.assertIn("最多自动重试一次", text)
+
     async def test_decision_required_uses_respond(self):
         plugin = FakePlugin()
         service = MaidActionService(plugin)

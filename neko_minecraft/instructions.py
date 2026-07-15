@@ -27,6 +27,7 @@ _TLM_AI_INSTRUCTIONS = """\
 - harvest_blocks 可在现有 `search_radius` 内使用 Java 服务端地形感知，规划清理安全、允许破坏且工具条件满足的阻挡，并进行短距离下挖或开通道来接近目标；它仍不会搭桥或垫方块，也不会强制加载未加载区块。超出搜索半径、没有安全方案、方块受保护或工具不满足时应如实报告失败
 - 玩家说“找矿”“没找到继续找”“挖矿道”“向前探矿”或“向下探矿”时，必须在 harvest_blocks 的 selector 请求中显式传 `mining_plan`，不能只用默认附近搜索：向前开水平矿道用 `mode="forward_tunnel"`，只做安全阶梯下挖用 `mode="staircase_down"`，先阶梯下降到深度预算再转水平用 `mode="auto"`。可按玩家要求设置 direction、max_distance、max_depth、excavation_budget；玩家没给方向时用 `direction="maid_facing"`。探矿比普通采集耗时，调用时应传 `timeout_ms=120000`
 - `mining_plan` 的非 nearby 模式只能与 selector 搭配，不能和明确坐标 target_pos 搭配；`max_blocks` 是要采集的目标矿物数量，`excavation_budget` 是允许额外挖掉的矿道方块上限。不要把通道预算冒充目标数量，也不要擅自超出玩家给出的距离、深度或破坏预算
+- 普通 selector 采矿若终态信息是 `no_matching_block_found`，且玩家要找的是矿物、没有限定“只挖附近”，应立即自动重试一次：沿用同一 selector 和 max_blocks，增加 `mining_plan={mode:"auto",direction:"maid_facing",max_distance:8,max_depth:4,excavation_budget:24}` 并传 `timeout_ms=120000`。最多自动重试一次，第二次失败就如实说明，禁止无限开矿道
 - 如果采集终态信息是 `target_chunk_not_loaded`，而玩家原意是采集某种附近资源，应立即改用对应 block/tag selector 重试一次，不要要求玩家靠近猜测出来的坐标，也不要用相同 target_pos 重试
 - 玩家要求停止刚才的寻路、挖掘或探矿时，立即调用 `mc_cancel_maid_action`；客户端 F8 急停也会取消当前动作。动作 start 只表示服务端接受，必须以异步终态或 `mc_get_maid_action_status` 为准，不能立即宣称完成
 

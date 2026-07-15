@@ -60,6 +60,8 @@ class MaidActionGuidanceTests(unittest.TestCase):
         self.assertIn("mc_cancel_maid_action", _TLM_AI_INSTRUCTIONS)
         self.assertIn("timeout_ms=120000", _TLM_AI_INSTRUCTIONS)
         self.assertIn("120000", tool_text)
+        self.assertIn("no_matching_block_found", _TLM_AI_INSTRUCTIONS)
+        self.assertIn("最多自动重试一次", _TLM_AI_INSTRUCTIONS)
 
 
 if __name__ == "__main__":
