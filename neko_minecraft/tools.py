@@ -534,6 +534,12 @@ async def do_start_maid_action(
             "INVALID_ACTION_ARGUMENTS", "timeout_ms must be between 1000 and 120000"
         )
     action_id = str(action_id or uuid.uuid4())
+    logger = getattr(plugin, "logger", None)
+    if logger is not None:
+        logger.info(
+            "[MaidAgent] start action_id=%s maid_id=%s kind=%s args=%s",
+            action_id, resolved_id, str(kind).strip().lower(), normalized_args,
+        )
     request = {
         "type": "start_maid_action",
         "data": {

@@ -172,7 +172,11 @@ public final class HarvestBlocksAction implements MaidAction {
         candidates.clear();
         if (explicitTarget != null) {
             if (!context.level().hasChunkAt(explicitTarget)) {
-                return failure(ActionEndReason.VALIDATION_FAILED, "target_chunk_not_loaded");
+                JsonObject result = positionDetail(explicitTarget);
+                result.addProperty("message", "target_chunk_not_loaded");
+                result.addProperty("retry_hint",
+                        "For a nearby resource request, retry with a block/tag selector instead of this target_pos");
+                return MaidActionTickResult.failed(ActionEndReason.VALIDATION_FAILED, result);
             }
             if (context.level().getBlockState(explicitTarget).isAir()) {
                 return failure(ActionEndReason.TARGET_CHANGED, "target_is_air");

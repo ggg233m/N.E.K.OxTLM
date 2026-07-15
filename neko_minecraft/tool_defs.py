@@ -189,6 +189,8 @@ MC_START_MAID_ACTION = {
         "harvest_blocks 会前往目标方块或搜索附近指定方块并采集。"
         "工具只返回是否接受，动作完成或失败会异步通知。新动作默认会覆盖旧动作。"
         "明确要求去某坐标、主动挖掘或采集时应调用本工具，不要用 mc_switch_task 假装挖矿。"
+        "按名称采集资源（例如挖石头、挖煤、砍木头）必须使用 selector；"
+        "target_pos 仅限玩家明确给出或可信工具返回的方块坐标，禁止使用玩家/女仆坐标或猜测坐标。"
     ),
     "parameters": {
         "type": "object",
@@ -202,8 +204,9 @@ MC_START_MAID_ACTION = {
                 "type": "object",
                 "description": (
                     "navigate: {target:{x,y,z}, speed?, stop_distance?}；"
-                    "harvest_blocks: target_pos 与 selector 二选一，selector 形如"
-                    "{type:'block'|'tag', id:'minecraft:stone'}，并可传 search_radius、"
+                    "harvest_blocks: target_pos 与 selector 二选一。挖石头等按资源名称的请求必须传"
+                    "selector，例如 {type:'block', id:'minecraft:stone'}；target_pos 只能是玩家明确"
+                    "指定或可信工具返回的方块坐标，不得猜测。selector 也可使用 tag；可传 search_radius、"
                     "max_blocks、tool_policy(require_correct|allow_wrong)、speed"
                 ),
                 "additionalProperties": True,

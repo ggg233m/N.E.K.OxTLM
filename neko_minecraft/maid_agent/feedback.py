@@ -116,5 +116,13 @@ class ActionFeedbackHandler:
         message = record.result.get("message") if isinstance(record.result, dict) else None
         if message:
             text += f" 服务端信息：{message}。"
+        retry_hint = record.result.get("retry_hint") if isinstance(record.result, dict) else None
+        if retry_hint:
+            text += f" 重试提示：{retry_hint}。"
+        if message == "target_chunk_not_loaded":
+            text += (
+                " 如果玩家请求的是某类附近资源而不是明确坐标，请立刻改用对应的 block/tag "
+                "selector 重试一次；不要让玩家靠近这个未经确认的坐标，也不要原样重试 target_pos。"
+            )
         text += "请根据真实终态简短回应玩家；失败时不要声称动作成功。"
         return text

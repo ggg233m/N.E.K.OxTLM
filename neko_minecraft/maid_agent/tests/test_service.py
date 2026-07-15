@@ -107,6 +107,26 @@ class MaidActionServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, len(plugin.pushes))
         self.assertEqual("respond", plugin.pushes[0][1]["ai_behavior"])
 
+    async def test_unloaded_guessed_target_tells_model_to_retry_with_selector(self):
+        plugin = FakePlugin()
+        service = MaidActionService(plugin)
+        await service.handle_message({
+            "type": "maid_action_finished",
+            "data": {
+                "action_id": "a", "maid_id": "m", "generation": 1,
+                "sequence": 4, "kind": "harvest_blocks", "status": "FAILED",
+                "stage": "FAILED", "end_reason": "VALIDATION_FAILED",
+                "result": {
+                    "message": "target_chunk_not_loaded",
+                    "retry_hint": "retry with a block/tag selector",
+                },
+            },
+        })
+        text, kwargs = plugin.pushes[0]
+        self.assertEqual("respond", kwargs["ai_behavior"])
+        self.assertIn("selector", text)
+        self.assertIn("不要让玩家靠近", text)
+
     async def test_decision_required_uses_respond(self):
         plugin = FakePlugin()
         service = MaidActionService(plugin)
