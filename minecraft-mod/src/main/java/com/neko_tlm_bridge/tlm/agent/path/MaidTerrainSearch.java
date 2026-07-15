@@ -160,8 +160,11 @@ public final class MaidTerrainSearch {
                     1.45D, from.pos().above(2), up, up.above());
 
             BlockPos down = horizontal.below();
+            // While stepping down, the maid enters the destination column
+            // before her feet have fully dropped. Reserve the third cell for
+            // that diagonal body sweep as well as the final two-cell stance.
             offerStep(from, MaidTerrainStep.Kind.DESCEND, down,
-                    1.20D, down, down.above());
+                    1.20D, down, down.above(), down.above(2));
         }
 
         BlockPos below = from.pos().below();
@@ -178,18 +181,24 @@ public final class MaidTerrainSearch {
             return;
         }
 
+        List<BlockPos> clearance = new ArrayList<>(clearanceCells.length);
         List<BlockPos> toBreak = new ArrayList<>(clearanceCells.length);
         double breakCost = 0.0D;
         for (BlockPos cell : clearanceCells) {
-            if (!evaluator.withinBounds(cell) || !evaluator.isLoaded(cell)) {
+            BlockPos immutableCell = cell.immutable();
+            if (clearance.contains(immutableCell)) {
+                continue;
+            }
+            clearance.add(immutableCell);
+            if (!evaluator.withinBounds(immutableCell) || !evaluator.isLoaded(immutableCell)) {
                 return;
             }
-            double cost = evaluator.clearCost(cell);
+            double cost = evaluator.clearCost(immutableCell);
             if (!Double.isFinite(cost) || cost < 0.0D) {
                 return;
             }
             if (cost > 0.0D) {
-                toBreak.add(cell.immutable());
+                toBreak.add(immutableCell);
                 breakCost += cost;
             }
         }
@@ -205,7 +214,7 @@ public final class MaidTerrainSearch {
 
         double heuristic = heuristic(destination);
         MaidTerrainStep step = new MaidTerrainStep(kind, from.pos(), destination,
-                toBreak, movementCost + breakCost);
+                clearance, toBreak, movementCost + breakCost);
         open.add(new SearchNode(destination.immutable(), newCost, heuristic,
                 newCost + HEURISTIC_WEIGHT * heuristic, from, step, nextSequence++));
     }

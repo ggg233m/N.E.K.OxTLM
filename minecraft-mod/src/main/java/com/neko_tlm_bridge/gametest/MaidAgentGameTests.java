@@ -89,6 +89,51 @@ public final class MaidAgentGameTests {
         });
     }
 
+    @GameTest(template = "maid_agent_test", timeoutTicks = 800)
+    public static void harvestBehindTwoBlockHighWallClearsFullPassage(GameTestHelper helper) {
+        for (int x = 0; x <= 10; x++) {
+            helper.setBlock(new BlockPos(x, 0, 2), Blocks.STONE);
+            helper.setBlock(new BlockPos(x, 3, 2), Blocks.BEDROCK);
+            for (int y = 1; y <= 3; y++) {
+                helper.setBlock(new BlockPos(x, y, 1), Blocks.BEDROCK);
+                helper.setBlock(new BlockPos(x, y, 3), Blocks.BEDROCK);
+            }
+        }
+        BlockPos wallFeet = new BlockPos(4, 1, 2);
+        BlockPos wallHead = wallFeet.above();
+        BlockPos relativeTarget = new BlockPos(8, 1, 2);
+        helper.setBlock(wallFeet, Blocks.DIRT);
+        helper.setBlock(wallHead, Blocks.DIRT);
+        helper.setBlock(relativeTarget, Blocks.GRANITE);
+
+        EntityMaid maid = helper.spawn(InitEntities.MAID.get(), new BlockPos(1, 1, 2));
+        maid.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(Items.IRON_PICKAXE));
+        UUID actionId = UUID.randomUUID();
+        JsonObject args = new JsonObject();
+        args.add("target_pos", position(helper.absolutePos(relativeTarget)));
+        args.addProperty("search_radius", 10);
+        args.addProperty("max_blocks", 1);
+        args.addProperty("tool_policy", "require_correct");
+        args.addProperty("speed", 0.8D);
+
+        helper.runAfterDelay(5, () -> {
+            MaidActionStore.StartResult start = MaidActionStore.getInstance().start(
+                    actionId, maid, MaidActionKind.HARVEST_BLOCKS, args, 35_000L, true);
+            helper.assertTrue(start.accepted(), "two-block passage harvest should be accepted");
+        });
+        helper.succeedWhen(() -> {
+            JsonObject status = MaidActionStore.getInstance().getStatus(actionId).orElseThrow();
+            helper.assertTrue("SUCCEEDED".equals(status.get("status").getAsString()),
+                    "maid should clear the full-height passage and harvest the target, current=" + status);
+            helper.assertTrue(helper.getBlockState(wallFeet).isAir(),
+                    "passage feet cell should be cleared");
+            helper.assertTrue(helper.getBlockState(wallHead).isAir(),
+                    "passage head cell should be cleared");
+            helper.assertTrue(helper.getBlockState(relativeTarget).isAir(),
+                    "target behind the wall should be harvested");
+        });
+    }
+
     @GameTest(template = "maid_agent_test", timeoutTicks = 400)
     public static void harvestSelectorPrefersExposedBaseStone(GameTestHelper helper) {
         prepareFloorArea(helper, 0, 10, 0, 10, Blocks.STONE);

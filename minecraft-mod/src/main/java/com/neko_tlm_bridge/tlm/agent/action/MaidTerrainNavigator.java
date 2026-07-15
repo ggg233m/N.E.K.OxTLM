@@ -35,8 +35,6 @@ import java.util.Set;
 public final class MaidTerrainNavigator {
     private static final double MIN_SPEED = 0.4D;
     private static final double MAX_SPEED = 1.0D;
-    private static final double STEP_ARRIVAL_DISTANCE = 0.85D;
-    private static final double MAX_FROM_DRIFT_SQUARED = 1.75D * 1.75D;
     private static final long STUCK_WINDOW_TICKS = 40L;
     private static final double REQUIRED_STEP_PROGRESS = 0.25D;
 
@@ -79,6 +77,10 @@ public final class MaidTerrainNavigator {
             return;
         }
         started = true;
+        // A terrain route owns locomotion from this point on. Do not let a
+        // path left by follow/work AI move the maid while the first passage
+        // cells are being cleared.
+        stopNativeNavigation(context);
         for (MaidTerrainStep step : terrainPath.steps()) {
             for (BlockPos pos : step.toBreak()) {
                 plannedBreakStates.putIfAbsent(pos, context.level().getBlockState(pos));
@@ -110,7 +112,7 @@ public final class MaidTerrainNavigator {
 
         MaidTerrainStep step = terrainPath.steps().get(stepIndex);
         if (!movementStarted && breaker == null && breakIndex == 0
-                && distanceSquared(context.maid(), step.from()) > MAX_FROM_DRIFT_SQUARED) {
+                && !context.maid().blockPosition().equals(step.from())) {
             return fail(context, ActionEndReason.TARGET_CHANGED,
                     "maid_is_no_longer_at_terrain_step_origin", true);
         }
@@ -189,6 +191,7 @@ public final class MaidTerrainNavigator {
 
     private TickResult clearNextObstacle(MaidActionContext context, MaidTerrainStep step) {
         while (breakIndex < pendingBreaks.size()) {
+            stopLocomotion(context);
             BlockPos pos = pendingBreaks.get(breakIndex);
             BlockState expected = plannedBreakStates.get(pos);
             BlockState current = context.level().getBlockState(pos);
@@ -237,13 +240,22 @@ public final class MaidTerrainNavigator {
     }
 
     private TickResult moveToStepDestination(MaidActionContext context, MaidTerrainStep step) {
+        if (!isStepClearanceOpen(context, step)) {
+            return fail(context, ActionEndReason.TARGET_CHANGED,
+                    "terrain_step_clearance_is_not_two_blocks_high", true);
+        }
         if (!isDestinationStillUsable(context, step.to())) {
             return fail(context, ActionEndReason.TARGET_CHANGED,
                     "terrain_step_destination_changed", true);
         }
 
         double distance = distance(context.maid(), step.to());
-        if (distance <= STEP_ARRIVAL_DISTANCE) {
+        // Adjacent node centres are only one block apart. A distance-only
+        // threshold previously completed a step after roughly 0.15 blocks of
+        // travel, so the logical path could run ahead into an uncleared wall.
+        // Completing only after the entity really occupies the destination
+        // also verifies the correct elevation for ascend/descend steps.
+        if (context.maid().blockPosition().equals(step.to())) {
             completeStep(context);
             if (stepIndex >= terrainPath.steps().size()) {
                 return arrive(context);
@@ -396,6 +408,7 @@ public final class MaidTerrainNavigator {
         detail.addProperty("step_kind", step.kind().name());
         addPosition(detail, "from", step.from());
         addPosition(detail, "to", step.to());
+        detail.addProperty("clearance_cells", step.clearance().size());
         detail.addProperty("obstacles_total", step.toBreak().size());
         detail.addProperty("obstacles_processed", breakIndex);
         return detail;
@@ -408,11 +421,15 @@ public final class MaidTerrainNavigator {
     }
 
     private void stopNativeNavigation(MaidActionContext context) {
+        stopLocomotion(context);
+        context.maid().getBrain().eraseMemory(MemoryModuleType.LOOK_TARGET);
+        context.maid().setSwingingArms(false);
+    }
+
+    private static void stopLocomotion(MaidActionContext context) {
         context.maid().getNavigation().stop();
         context.maid().getBrain().eraseMemory(MemoryModuleType.PATH);
         context.maid().getBrain().eraseMemory(MemoryModuleType.WALK_TARGET);
-        context.maid().getBrain().eraseMemory(MemoryModuleType.LOOK_TARGET);
-        context.maid().setSwingingArms(false);
     }
 
     private static Path createDebugPath(MaidTerrainPath path) {
@@ -430,6 +447,11 @@ public final class MaidTerrainNavigator {
     }
 
     private static boolean isDestinationStillUsable(MaidActionContext context, BlockPos destination) {
+        if (!isLoadedBuildPosition(context, destination)
+                || !isLoadedBuildPosition(context, destination.above())
+                || !isLoadedBuildPosition(context, destination.below())) {
+            return false;
+        }
         BlockState feet = context.level().getBlockState(destination);
         BlockState head = context.level().getBlockState(destination.above());
         BlockPos supportPos = destination.below();
@@ -441,20 +463,36 @@ public final class MaidTerrainNavigator {
                 && support.isFaceSturdy(context.level(), supportPos, Direction.UP);
     }
 
+    private static boolean isStepClearanceOpen(MaidActionContext context, MaidTerrainStep step) {
+        for (BlockPos pos : step.clearance()) {
+            if (!isLoadedBuildPosition(context, pos)) {
+                return false;
+            }
+            BlockState state = context.level().getBlockState(pos);
+            if (!state.getFluidState().isEmpty()
+                    || !state.getCollisionShape(context.level(), pos).isEmpty()) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static boolean isLoadedBuildPosition(MaidActionContext context, BlockPos pos) {
+        return pos.getY() >= context.level().getMinBuildHeight()
+                && pos.getY() < context.level().getMaxBuildHeight()
+                && context.level().hasChunkAt(pos);
+    }
+
     private double progress(double distance) {
-        if (movementStartDistance <= STEP_ARRIVAL_DISTANCE) {
+        if (movementStartDistance <= 1.0E-6D) {
             return 1.0D;
         }
         return Math.max(0.0D, Math.min(0.99D,
-                (movementStartDistance - distance) / (movementStartDistance - STEP_ARRIVAL_DISTANCE)));
+                (movementStartDistance - distance) / movementStartDistance));
     }
 
     private static double distance(EntityMaid maid, BlockPos pos) {
         return maid.position().distanceTo(Vec3.atBottomCenterOf(pos));
-    }
-
-    private static double distanceSquared(EntityMaid maid, BlockPos pos) {
-        return maid.position().distanceToSqr(Vec3.atBottomCenterOf(pos));
     }
 
     private static void addPosition(JsonObject detail, String prefix, BlockPos pos) {

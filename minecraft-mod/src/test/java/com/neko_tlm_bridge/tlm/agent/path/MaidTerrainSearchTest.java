@@ -60,6 +60,40 @@ class MaidTerrainSearchTest {
     }
 
     @Test
+    void reservesAndClearsBothFeetAndHeadCellsThroughWall() {
+        BlockPos start = pos(0, 1, 0);
+        BlockPos feet = pos(1, 1, 0);
+        BlockPos head = feet.above();
+        BlockPos goal = pos(2, 1, 0);
+        FakeEvaluator world = flatWorld(0, 2, 0, 0)
+                .clearCost(feet, 2.0)
+                .clearCost(head, 3.0);
+
+        MaidTerrainPath path = complete(new MaidTerrainSearch(start, Set.of(goal), world, 32));
+        MaidTerrainStep wallStep = path.steps().getFirst();
+
+        assertEquals(MaidTerrainStep.Kind.TRAVERSE, wallStep.kind());
+        assertEquals(List.of(feet, head), wallStep.clearance());
+        assertEquals(List.of(feet, head), wallStep.toBreak());
+        assertTrue(wallStep.clearance().contains(wallStep.to()));
+        assertTrue(wallStep.clearance().contains(wallStep.to().above()));
+    }
+
+    @Test
+    void rejectsPassageWhenHeadCellCannotBeCleared() {
+        BlockPos start = pos(0, 1, 0);
+        BlockPos blockedHead = pos(1, 2, 0);
+        BlockPos goal = pos(2, 1, 0);
+        FakeEvaluator world = flatWorld(0, 2, 0, 0)
+                .clearCost(blockedHead, Double.POSITIVE_INFINITY);
+
+        MaidTerrainSearch search = new MaidTerrainSearch(start, Set.of(goal), world, 32);
+
+        assertEquals(MaidTerrainSearch.Status.FAILED, finish(search));
+        assertTrue(search.result().isEmpty());
+    }
+
+    @Test
     void usesExplicitAscendAndDescendSteps() {
         FakeEvaluator world = new FakeEvaluator(0, 4, 0, 4, 0, 0)
                 .support(pos(0, 0, 0))
@@ -81,6 +115,9 @@ class MaidTerrainSearchTest {
         assertEquals(List.of(
                 pos(1, 2, 0), pos(2, 2, 0), pos(3, 1, 0), goal
         ), destinations(path));
+        MaidTerrainStep descend = path.steps().get(2);
+        assertEquals(List.of(descend.to(), descend.to().above(), descend.to().above(2)),
+                descend.clearance());
     }
 
     @Test
