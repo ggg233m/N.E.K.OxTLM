@@ -111,7 +111,7 @@ class ActionRegistry:
             raise ActionValidationError("mining_plan must be an object")
         allowed = {
             "mode", "direction", "max_distance", "max_depth",
-            "excavation_budget",
+            "max_segments", "excavation_budget",
         }
         unknown = sorted(set(value) - allowed)
         if unknown:
@@ -162,14 +162,20 @@ class ActionRegistry:
                 "auto requires max_distance > max_depth"
             )
 
+        max_segments = self._integer(
+            value.get("max_segments", 1), "mining_plan.max_segments", 1, 4
+        )
+        default_excavation_budget = 64 if max_segments > 1 else 24
+
         return {
             "mode": mode,
             "direction": direction,
             "max_distance": max_distance,
             "max_depth": max_depth,
+            "max_segments": max_segments,
             "excavation_budget": self._integer(
-                value.get("excavation_budget", 24),
-                "mining_plan.excavation_budget", 0, 64,
+                value.get("excavation_budget", default_excavation_budget),
+                "mining_plan.excavation_budget", 0, 256,
             ),
         }
 

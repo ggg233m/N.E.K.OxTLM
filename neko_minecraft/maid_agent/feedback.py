@@ -117,16 +117,27 @@ class ActionFeedbackHandler:
         if message:
             text += f" 服务端信息：{message}。"
         retry_hint = record.result.get("retry_hint") if isinstance(record.result, dict) else None
-        prospect_exhausted = message in {
-            "no_matching_block_found",
+        selector_missing = message == "no_matching_block_found"
+        prospect_safety_limit = message in {
             "prospecting_budget_exhausted_without_match",
             "prospecting_distance_or_depth_budget_exhausted",
+            "prospecting_excavation_budget_exhausted",
+            "prospecting_excavation_budget_would_be_exceeded",
+            "target_route_excavation_budget_would_be_exceeded",
+            "prospecting_segment_limit_exhausted",
         }
+        if message and message.startswith(("prospecting_", "target_route_")):
+            prospect_safety_limit = prospect_safety_limit or any(
+                marker in message for marker in (
+                    "budget_exhausted", "budget_would_be_exceeded",
+                    "distance_or_depth", "segment_limit",
+                )
+            )
         path_origin_drift = message in {
             "maid_is_no_longer_at_terrain_step_origin",
             "terrain_origin_drift_replan_exhausted",
         }
-        if retry_hint and not prospect_exhausted and not path_origin_drift:
+        if retry_hint and not selector_missing and not prospect_safety_limit and not path_origin_drift:
             text += f" 重试提示：{retry_hint}。"
         if message == "target_chunk_not_loaded":
             text += (
@@ -134,11 +145,34 @@ class ActionFeedbackHandler:
                 "selector 在已加载区块和 search_radius 内重试一次；不要强制加载区块，不要让玩家靠近"
                 "这个未经确认的坐标，也不要原样重试 target_pos。"
             )
-        if prospect_exhausted:
+        if selector_missing:
             text += (
-                " 不要自动重复同一动作。本次请求允许的附近搜索或有界探矿已经完成；"
-                "如果 selector 原本代表矿石，请确认使用正确的 minecraft:*_ores 标签，"
-                "只有玩家明确要求扩大方向、距离、深度或开凿预算时才启动新动作。"
+                " 不要自动重复同一动作。附近搜索没有匹配到该 selector；如果请求的是矿石，"
+                "请确认使用正确的 minecraft:*_ores 标签。"
+            )
+        if prospect_safety_limit:
+            diagnostics = []
+            for key, label in (
+                ("prospect_segment", "当前段"),
+                ("prospect_max_segments", "段数上限"),
+                ("prospect_segment_steps", "当前段步数"),
+                ("prospect_steps", "已前进步数"),
+                ("prospect_total_step_limit", "总步数上限"),
+                ("prospect_descent_steps", "已下降步数"),
+                ("prospect_total_descent_limit", "总下降上限"),
+                ("prospect_blocks_cleared", "已开凿方块"),
+                ("prospect_excavation_budget", "开凿预算"),
+                ("prospect_remaining_excavation_budget", "剩余开凿预算"),
+            ):
+                value = record.result.get(key) if isinstance(record.result, dict) else None
+                if value is not None:
+                    diagnostics.append(f"{label}={value}")
+            if diagnostics:
+                text += " 服务端安全限制：" + "，".join(diagnostics) + "。"
+            text += (
+                " 这是距离、深度、段数或开凿预算的安全上限，并不表示资源 selector 错误，"
+                "也与附近扫描半径无关。不要自动重复或自行扩大限制；只有玩家明确授权增加方向、"
+                "距离、深度、段数或开凿预算时，才使用新的有界计划启动动作。"
             )
         if path_origin_drift:
             text += (

@@ -270,6 +270,53 @@ public final class MaidAgentGameTests {
         });
     }
 
+    @GameTest(template = "maid_agent_test", timeoutTicks = 1600)
+    public static void forwardProspectingContinuesFromLivePositionInSecondSegment(
+            GameTestHelper helper) {
+        for (int x = 0; x <= 13; x++) {
+            helper.setBlock(new BlockPos(x, 0, 2), Blocks.STONE);
+            helper.setBlock(new BlockPos(x, 3, 2), Blocks.BEDROCK);
+            for (int y = 1; y <= 3; y++) {
+                helper.setBlock(new BlockPos(x, y, 1), Blocks.BEDROCK);
+                helper.setBlock(new BlockPos(x, y, 3), Blocks.BEDROCK);
+            }
+        }
+        for (int x = 2; x <= 11; x++) {
+            helper.setBlock(new BlockPos(x, 1, 2), Blocks.STONE);
+            helper.setBlock(new BlockPos(x, 2, 2), Blocks.STONE);
+        }
+        BlockPos ore = new BlockPos(12, 1, 2);
+        helper.setBlock(ore, Blocks.COAL_ORE);
+
+        EntityMaid maid = helper.spawn(InitEntities.MAID.get(), new BlockPos(1, 1, 2));
+        maid.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(Items.IRON_PICKAXE));
+        UUID actionId = UUID.randomUUID();
+        JsonObject args = selectorHarvestArgs("block", "minecraft:coal_ore", 1);
+        args.add("mining_plan", miningPlan(
+                "forward_tunnel", "east", 8, 0, 24, 2));
+
+        helper.runAfterDelay(5, () -> {
+            MaidActionStore.StartResult start = MaidActionStore.getInstance().start(
+                    actionId, maid, MaidActionKind.HARVEST_BLOCKS, args, 60_000L, true);
+            helper.assertTrue(start.accepted(),
+                    "multi-segment forward prospecting action should be accepted");
+        });
+        helper.succeedWhen(() -> {
+            JsonObject status = MaidActionStore.getInstance().getStatus(actionId).orElseThrow();
+            helper.assertTrue("SUCCEEDED".equals(status.get("status").getAsString()),
+                    "second prospecting segment should discover and harvest coal, current=" + status);
+            JsonObject result = status.getAsJsonObject("result");
+            helper.assertTrue(result.get("prospect_steps").getAsInt() >= 10,
+                    "ore must only become visible after ten completed prospecting steps");
+            helper.assertTrue(result.get("prospect_segment").getAsInt() == 2,
+                    "terminal diagnostics should report the second prospecting segment");
+            helper.assertTrue(result.get("prospect_max_segments").getAsInt() == 2,
+                    "terminal diagnostics should preserve the configured segment count");
+            helper.assertTrue(helper.getBlockState(ore).isAir(),
+                    "coal beyond the first eight-step segment should be harvested");
+        });
+    }
+
     @GameTest(template = "maid_agent_test", timeoutTicks = 1000)
     public static void staircaseProspectingDescendsWithoutDiggingCurrentSupport(GameTestHelper helper) {
         BlockPos originalSupport = new BlockPos(1, 4, 2);
@@ -471,12 +518,19 @@ public final class MaidAgentGameTests {
 
     private static JsonObject miningPlan(String mode, String direction,
                                          int distance, int depth, int budget) {
+        return miningPlan(mode, direction, distance, depth, budget, 1);
+    }
+
+    private static JsonObject miningPlan(String mode, String direction,
+                                         int distance, int depth, int budget,
+                                         int maxSegments) {
         JsonObject plan = new JsonObject();
         plan.addProperty("mode", mode);
         plan.addProperty("direction", direction);
         plan.addProperty("max_distance", distance);
         plan.addProperty("max_depth", depth);
         plan.addProperty("excavation_budget", budget);
+        plan.addProperty("max_segments", maxSegments);
         return plan;
     }
 }

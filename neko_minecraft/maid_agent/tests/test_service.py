@@ -169,9 +169,55 @@ class MaidActionServiceTests(unittest.IsolatedAsyncioTestCase):
         })
 
         text = plugin.pushes[-1][0]
-        self.assertIn("有界探矿已经完成", text)
-        self.assertIn("不要自动重复", text)
+        self.assertIn("安全上限", text)
+        self.assertIn("不表示资源 selector 错误", text)
+        self.assertIn("玩家明确授权", text)
+        self.assertNotIn("minecraft:*_ores", text)
         self.assertNotIn("Refresh the target or retry", text)
+
+    async def test_every_prospect_limit_feedback_explains_budget_not_selector(self):
+        messages = (
+            "prospecting_distance_or_depth_budget_exhausted",
+            "prospecting_excavation_budget_exhausted",
+            "prospecting_excavation_budget_would_be_exceeded",
+            "target_route_excavation_budget_would_be_exceeded",
+            "prospecting_segment_limit_exhausted",
+        )
+        for sequence, message in enumerate(messages, start=20):
+            with self.subTest(message=message):
+                plugin = FakePlugin()
+                service = MaidActionService(plugin)
+                await service.handle_message({
+                    "type": "maid_action_finished",
+                    "data": {
+                        "action_id": f"limit-{sequence}", "maid_id": "maid",
+                        "generation": 1, "sequence": sequence,
+                        "kind": "harvest_blocks", "status": "FAILED",
+                        "stage": "FAILED", "end_reason": "PATH_NOT_FOUND",
+                        "result": {
+                            "message": message,
+                            "retry_hint": "Increase search_radius or retry",
+                            "prospect_segment": 2,
+                            "prospect_max_segments": 2,
+                            "prospect_segment_steps": 8,
+                            "prospect_steps": 16,
+                            "prospect_total_step_limit": 16,
+                            "prospect_blocks_cleared": 64,
+                            "prospect_excavation_budget": 64,
+                            "prospect_remaining_excavation_budget": 0,
+                        },
+                    },
+                })
+                text = plugin.pushes[-1][0]
+                self.assertIn("服务端安全限制", text)
+                self.assertIn("当前段=2", text)
+                self.assertIn("总步数上限=16", text)
+                self.assertIn("开凿预算=64", text)
+                self.assertIn("剩余开凿预算=0", text)
+                self.assertIn("不表示资源 selector 错误", text)
+                self.assertIn("只有玩家明确授权", text)
+                self.assertNotIn("Increase search_radius or retry", text)
+                self.assertNotIn("minecraft:*_ores", text)
 
     async def test_terrain_origin_drift_feedback_does_not_blame_selector(self):
         plugin = FakePlugin()

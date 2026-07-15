@@ -51,13 +51,24 @@ class MaidActionGuidanceTests(unittest.TestCase):
         )
         for value in (
             "mining_plan", "forward_tunnel", "staircase_down", "auto",
-            "max_distance", "max_depth", "excavation_budget",
+            "max_distance", "max_depth", "max_segments", "excavation_budget",
         ):
             self.assertIn(value, tool_text)
             self.assertIn(value, _TLM_AI_INSTRUCTIONS)
         self.assertIn("附近没有目标", _TLM_AI_INSTRUCTIONS)
         self.assertIn("F8", _TLM_AI_INSTRUCTIONS)
         self.assertIn("mc_cancel_maid_action", _TLM_AI_INSTRUCTIONS)
+
+    def test_guidance_does_not_let_model_invent_mining_budgets(self):
+        tool_text = MC_START_MAID_ACTION["description"] + str(
+            MC_START_MAID_ACTION["parameters"]
+        )
+        for text in (tool_text, _TLM_AI_INSTRUCTIONS):
+            self.assertIn("省略 mining_plan", text)
+            self.assertIn("禁止", text)
+            self.assertIn("max_segments", text)
+            self.assertIn("2..4", text)
+            self.assertIn("256", text)
 
     def test_guidance_prefers_ore_tags_and_whole_veins(self):
         tool_text = MC_START_MAID_ACTION["description"] + str(

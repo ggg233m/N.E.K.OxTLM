@@ -28,7 +28,10 @@ class MiningPlanTest {
         assertTrue(plan.enabled());
         assertEquals(8, plan.maxDistance());
         assertEquals(4, plan.maxDepth());
-        assertEquals(24, plan.excavationBudget());
+        assertEquals(64, plan.excavationBudget());
+        assertEquals(4, plan.maxSegments());
+        assertEquals(32, plan.totalStepLimit());
+        assertEquals(16, plan.totalDescentLimit());
     }
 
     @Test
@@ -67,6 +70,78 @@ class MiningPlanTest {
         assertEquals(new BlockPos(0, 19, -1),
                 plan.nextDestination(current, Direction.NORTH, 0));
         assertFalse(plan.hasNextStep(3, 3));
+    }
+
+    @Test
+    void multiSegmentPlanRollsOverWithoutResettingActionHardLimits() {
+        JsonObject args = argsWithPlan("auto", "east", 8, 4, 64);
+        args.getAsJsonObject("mining_plan").addProperty("max_segments", 2);
+        MiningPlan plan = MiningPlan.fromArgs(args, true);
+
+        assertEquals(2, plan.maxSegments());
+        assertEquals(16, plan.totalStepLimit());
+        assertEquals(8, plan.totalDescentLimit());
+        assertFalse(plan.hasNextStep(8, 4, 8, 4));
+        assertTrue(plan.canAdvanceSegment(0, 8, 4));
+        assertTrue(plan.hasNextStep(8, 4, 0, 0));
+        assertFalse(plan.canAdvanceSegment(1, 16, 8));
+    }
+
+    @Test
+    void autoContinuesForwardAfterActionWideDescentLimit() {
+        JsonObject args = argsWithPlan("auto", "east", 16, 12, 128);
+        args.getAsJsonObject("mining_plan").addProperty("max_segments", 4);
+        MiningPlan plan = MiningPlan.fromArgs(args, true);
+
+        assertEquals(32, plan.totalDescentLimit());
+        assertEquals(MiningPlan.StepMode.FORWARD,
+                plan.nextStepMode(32, 0));
+        assertTrue(plan.hasNextStep(40, 32, 0, 0));
+        assertTrue(plan.canAdvanceSegment(2, 40, 32));
+        assertEquals(new BlockPos(1, -55, 0), plan.nextDestination(
+                new BlockPos(0, -55, 0), Direction.EAST, 32, 0));
+    }
+
+    @Test
+    void explicitPlanDefaultsToOneSegmentAndMultiSegmentGetsSafeBudget() {
+        JsonObject singleArgs = new JsonObject();
+        JsonObject single = new JsonObject();
+        single.addProperty("mode", "auto");
+        singleArgs.add("mining_plan", single);
+        MiningPlan singlePlan = MiningPlan.fromArgs(singleArgs, true);
+
+        assertEquals(1, singlePlan.maxSegments());
+        assertEquals(24, singlePlan.excavationBudget());
+
+        JsonObject multipleArgs = new JsonObject();
+        JsonObject multiple = new JsonObject();
+        multiple.addProperty("mode", "auto");
+        multiple.addProperty("max_segments", 3);
+        multipleArgs.add("mining_plan", multiple);
+        MiningPlan multiplePlan = MiningPlan.fromArgs(multipleArgs, true);
+
+        assertEquals(3, multiplePlan.maxSegments());
+        assertEquals(64, multiplePlan.excavationBudget());
+    }
+
+    @Test
+    void rejectsInvalidSegmentAndExpandedExcavationBounds() {
+        JsonObject noSegments = argsWithPlan("auto", "east", 8, 4, 64);
+        noSegments.getAsJsonObject("mining_plan").addProperty("max_segments", 0);
+        assertThrows(IllegalArgumentException.class,
+                () -> MiningPlan.fromArgs(noSegments, true));
+
+        JsonObject tooManySegments = argsWithPlan("auto", "east", 8, 4, 64);
+        tooManySegments.getAsJsonObject("mining_plan").addProperty("max_segments", 5);
+        assertThrows(IllegalArgumentException.class,
+                () -> MiningPlan.fromArgs(tooManySegments, true));
+
+        JsonObject maximumBudget = argsWithPlan("auto", "east", 8, 4, 256);
+        assertEquals(256, MiningPlan.fromArgs(maximumBudget, true).excavationBudget());
+
+        JsonObject excessiveBudget = argsWithPlan("auto", "east", 8, 4, 257);
+        assertThrows(IllegalArgumentException.class,
+                () -> MiningPlan.fromArgs(excessiveBudget, true));
     }
 
     @Test

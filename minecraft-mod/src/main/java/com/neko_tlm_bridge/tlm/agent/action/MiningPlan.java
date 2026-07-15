@@ -18,18 +18,24 @@ public record MiningPlan(
         Heading heading,
         int maxDistance,
         int maxDepth,
-        int excavationBudget
+        int excavationBudget,
+        int maxSegments
 ) {
     private static final int DEFAULT_DISTANCE = 8;
     private static final int DEFAULT_DEPTH = 4;
     private static final int DEFAULT_EXCAVATION_BUDGET = 24;
+    private static final int AUTOMATIC_EXCAVATION_BUDGET = 64;
+    private static final int AUTOMATIC_MAX_SEGMENTS = 4;
+    private static final int TOTAL_STEP_HARD_LIMIT = 64;
+    private static final int TOTAL_DESCENT_HARD_LIMIT = 32;
 
     public MiningPlan {
         Objects.requireNonNull(mode, "mode");
         Objects.requireNonNull(heading, "heading");
         requireRange(maxDistance, "mining_plan.max_distance", 1, 16);
         requireRange(maxDepth, "mining_plan.max_depth", 0, 12);
-        requireRange(excavationBudget, "mining_plan.excavation_budget", 0, 64);
+        requireRange(excavationBudget, "mining_plan.excavation_budget", 0, 256);
+        requireRange(maxSegments, "mining_plan.max_segments", 1, 4);
         if (mode == Mode.FORWARD_TUNNEL && maxDepth != 0) {
             throw new IllegalArgumentException(
                     "mining_plan.max_depth must be 0 for forward_tunnel");
@@ -48,14 +54,21 @@ public record MiningPlan(
         }
     }
 
+    /** Backwards-compatible single-segment constructor for existing callers. */
+    public MiningPlan(Mode mode, Heading heading, int maxDistance, int maxDepth,
+                      int excavationBudget) {
+        this(mode, heading, maxDistance, maxDepth, excavationBudget, 1);
+    }
+
     public static MiningPlan nearby() {
         return new MiningPlan(Mode.NEARBY, Heading.MAID_FACING,
-                DEFAULT_DISTANCE, 0, DEFAULT_EXCAVATION_BUDGET);
+                DEFAULT_DISTANCE, 0, DEFAULT_EXCAVATION_BUDGET, 1);
     }
 
     public static MiningPlan automatic() {
         return new MiningPlan(Mode.AUTO, Heading.MAID_FACING,
-                DEFAULT_DISTANCE, DEFAULT_DEPTH, DEFAULT_EXCAVATION_BUDGET);
+                DEFAULT_DISTANCE, DEFAULT_DEPTH, AUTOMATIC_EXCAVATION_BUDGET,
+                AUTOMATIC_MAX_SEGMENTS);
     }
 
     public static MiningPlan fromArgs(JsonObject args, boolean selectorTargeting) {
@@ -73,7 +86,8 @@ public record MiningPlan(
         }
         JsonObject value = args.getAsJsonObject("mining_plan");
         Set<String> allowedFields = Set.of(
-                "mode", "direction", "max_distance", "max_depth", "excavation_budget");
+                "mode", "direction", "max_distance", "max_depth", "excavation_budget",
+                "max_segments");
         for (String name : value.keySet()) {
             if (!allowedFields.contains(name)) {
                 throw new IllegalArgumentException(
@@ -93,8 +107,11 @@ public record MiningPlan(
             case NEARBY, FORWARD_TUNNEL -> 0;
         };
         int maxDepth = optionalInt(value, "max_depth", defaultDepth);
-        int budget = optionalInt(value, "excavation_budget", DEFAULT_EXCAVATION_BUDGET);
-        return new MiningPlan(mode, heading, maxDistance, maxDepth, budget);
+        int maxSegments = optionalInt(value, "max_segments", 1);
+        int defaultBudget = maxSegments > 1
+                ? AUTOMATIC_EXCAVATION_BUDGET : DEFAULT_EXCAVATION_BUDGET;
+        int budget = optionalInt(value, "excavation_budget", defaultBudget);
+        return new MiningPlan(mode, heading, maxDistance, maxDepth, budget, maxSegments);
     }
 
     public boolean enabled() {
@@ -110,30 +127,88 @@ public record MiningPlan(
                 : Direction.NORTH;
     }
 
-    public boolean hasNextStep(int completedSteps, int descentSteps) {
-        if (!enabled() || completedSteps >= maxDistance) {
-            return false;
-        }
-        return mode != Mode.STAIRCASE_DOWN || descentSteps < maxDepth;
+    /** Maximum number of prospecting steps across every segment. */
+    public int totalStepLimit() {
+        return Math.min(TOTAL_STEP_HARD_LIMIT, maxDistance * maxSegments);
     }
 
-    public StepMode nextStepMode(int descentSteps) {
+    /** Maximum number of descending steps across every segment. */
+    public int totalDescentLimit() {
+        return Math.min(TOTAL_DESCENT_HARD_LIMIT, maxDepth * maxSegments);
+    }
+
+    /**
+     * Returns whether the current segment may execute one more step while
+     * respecting both its soft limits and the action-wide hard limits.
+     */
+    public boolean hasNextStep(int totalSteps, int totalDescent,
+                               int segmentSteps, int segmentDescent) {
+        if (!enabled() || totalSteps >= totalStepLimit()
+                || segmentSteps >= maxDistance) {
+            return false;
+        }
+        if (nextStepMode(totalDescent, segmentDescent) != StepMode.DESCEND) {
+            return true;
+        }
+        return totalDescent < totalDescentLimit() && segmentDescent < maxDepth;
+    }
+
+    /**
+     * Backwards-compatible single-segment query. Multi-segment executors
+     * should use the four-counter overload and {@link #canAdvanceSegment}.
+     */
+    public boolean hasNextStep(int completedSteps, int descentSteps) {
+        return hasNextStep(completedSteps, descentSteps, completedSteps, descentSteps);
+    }
+
+    /**
+     * Returns whether a zero-based current segment may roll over to the next
+     * one without exceeding the action-wide step or descent hard limits.
+     */
+    public boolean canAdvanceSegment(int segmentIndex, int totalSteps, int totalDescent) {
+        if (!enabled() || segmentIndex < 0 || segmentIndex + 1 >= maxSegments
+                || totalSteps >= totalStepLimit()) {
+            return false;
+        }
+        return mode != Mode.STAIRCASE_DOWN
+                || totalDescent < totalDescentLimit();
+    }
+
+    public StepMode nextStepMode(int segmentDescentSteps) {
+        return nextStepMode(0, segmentDescentSteps);
+    }
+
+    /**
+     * Resolves the next mode with both segment and action-wide descent
+     * limits. AUTO becomes a forward tunnel after the total descent limit;
+     * it does not terminate while safe horizontal steps remain.
+     */
+    public StepMode nextStepMode(int totalDescentSteps, int segmentDescentSteps) {
         return switch (mode) {
             case NEARBY -> throw new IllegalStateException("nearby mode has no prospecting step");
             case FORWARD_TUNNEL -> StepMode.FORWARD;
             case STAIRCASE_DOWN -> StepMode.DESCEND;
-            case AUTO -> descentSteps < maxDepth ? StepMode.DESCEND : StepMode.FORWARD;
+            case AUTO -> totalDescentSteps >= totalDescentLimit()
+                    || segmentDescentSteps >= maxDepth
+                    ? StepMode.FORWARD : StepMode.DESCEND;
         };
     }
 
-    public BlockPos nextDestination(BlockPos current, Direction direction, int descentSteps) {
+    public BlockPos nextDestination(BlockPos current, Direction direction,
+                                    int segmentDescentSteps) {
+        return nextDestination(current, direction, 0, segmentDescentSteps);
+    }
+
+    public BlockPos nextDestination(BlockPos current, Direction direction,
+                                    int totalDescentSteps, int segmentDescentSteps) {
         Objects.requireNonNull(current, "current");
         Objects.requireNonNull(direction, "direction");
         if (!direction.getAxis().isHorizontal()) {
             throw new IllegalArgumentException("prospecting direction must be horizontal");
         }
         BlockPos forward = current.relative(direction);
-        return nextStepMode(descentSteps) == StepMode.DESCEND ? forward.below() : forward;
+        return nextStepMode(totalDescentSteps, segmentDescentSteps) == StepMode.DESCEND
+                ? forward.below() : forward;
     }
 
     public enum Mode {

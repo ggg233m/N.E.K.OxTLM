@@ -159,6 +159,7 @@ class ActionRegistryTests(unittest.TestCase):
             "direction": "maid_facing",
             "max_distance": 8,
             "max_depth": 0,
+            "max_segments": 1,
             "excavation_budget": 24,
         }, args["mining_plan"])
 
@@ -171,6 +172,26 @@ class ActionRegistryTests(unittest.TestCase):
                 })
                 self.assertEqual(4, args["mining_plan"]["max_depth"])
                 self.assertEqual("north", args["mining_plan"]["direction"])
+                self.assertEqual(1, args["mining_plan"]["max_segments"])
+                self.assertEqual(24, args["mining_plan"]["excavation_budget"])
+
+    def test_multi_segment_plan_gets_larger_default_budget(self):
+        args = self.registry.normalize("harvest_blocks", {
+            "selector": {"type": "tag", "id": "minecraft:diamond_ores"},
+            "mining_plan": {"mode": "auto", "max_segments": 3},
+        })
+        self.assertEqual(3, args["mining_plan"]["max_segments"])
+        self.assertEqual(64, args["mining_plan"]["excavation_budget"])
+
+        explicit = self.registry.normalize("harvest_blocks", {
+            "selector": {"type": "tag", "id": "minecraft:diamond_ores"},
+            "mining_plan": {
+                "mode": "auto", "max_segments": 4,
+                "excavation_budget": 256,
+            },
+        })
+        self.assertEqual(4, explicit["mining_plan"]["max_segments"])
+        self.assertEqual(256, explicit["mining_plan"]["excavation_budget"])
 
     def test_rejects_non_nearby_plan_for_explicit_target(self):
         with self.assertRaisesRegex(ActionValidationError, "require selector"):
@@ -207,6 +228,22 @@ class ActionRegistryTests(unittest.TestCase):
             self.registry.normalize("harvest_blocks", {
                 "selector": selector,
                 "mining_plan": {"mode": "auto", "max_distance": 17},
+            })
+        for max_segments in (0, 5):
+            with self.subTest(max_segments=max_segments):
+                with self.assertRaisesRegex(ActionValidationError, "between 1 and 4"):
+                    self.registry.normalize("harvest_blocks", {
+                        "selector": selector,
+                        "mining_plan": {
+                            "mode": "auto", "max_segments": max_segments,
+                        },
+                    })
+        with self.assertRaisesRegex(ActionValidationError, "between 0 and 256"):
+            self.registry.normalize("harvest_blocks", {
+                "selector": selector,
+                "mining_plan": {
+                    "mode": "auto", "excavation_budget": 257,
+                },
             })
         with self.assertRaisesRegex(ActionValidationError, "unsupported fields"):
             self.registry.normalize("harvest_blocks", {
