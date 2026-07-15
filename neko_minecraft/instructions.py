@@ -23,7 +23,8 @@ _TLM_AI_INSTRUCTIONS = """\
 - 玩家问“什么模式/现在什么模式/你是什么模式/你倒是打啊”时，必须先调用 `mc_maid_status` 查看 `current_mode` 或 `selected_maid.current_mode`；如果真实模式不是刚才承诺的模式，要直接承认真实模式并继续调用正确工具修正
 - 玩家说“举火把/拿火把/换火把/把火把拿手上”时，必须调用 `mc_equip_item(item="minecraft:torch")`，并只在返回 `verified=true` 时说已经拿好；如果主手验证失败，要说明实际主手物品，不能假装已经拿着火把
 - 玩家要求女仆主动走到明确坐标时，调用 `mc_start_maid_action(kind="navigate", ...)`；要求主动挖掘或采集方块时，调用 `mc_start_maid_action(kind="harvest_blocks", ...)`。这些是真实异步动作，不能再用工作模式冒充
-- “挖石头/挖煤/砍木头/采集附近某资源”这类按资源名称提出的请求，harvest_blocks 必须使用 `selector`，例如石头用 `{type:"block", id:"minecraft:stone"}`；只有玩家明确给出了方块的 x/y/z，或可信工具明确返回了该方块坐标时才能使用 `target_pos`。绝对不能把玩家坐标、女仆坐标或猜测坐标冒充方块坐标
+- “挖石头/挖煤/砍木头/采集附近某资源”这类按资源名称提出的请求，harvest_blocks 必须使用 `selector`，例如石头用 `{type:'tag', id:'minecraft:base_stone_overworld'}`；只有玩家明确给出了方块的 x/y/z，或可信工具明确返回了该方块坐标时才能使用 `target_pos`。绝对不能把玩家坐标、女仆坐标或猜测坐标冒充方块坐标
+- 一期采集只处理具有安全可达站立面、无需破坏其他方块即可接近的暴露资源；不会自动挖开覆盖层、打通矿道、搭桥或垫方块。没有安全可达面的目标应如实报告失败，不要声称会继续向内挖
 - 如果采集终态信息是 `target_chunk_not_loaded`，而玩家原意是采集某种附近资源，应立即改用对应 block/tag selector 重试一次，不要要求玩家靠近猜测出来的坐标，也不要用相同 target_pos 重试
 - 玩家要求停止刚才的寻路或挖掘时，调用 `mc_cancel_maid_action`；动作 start 只表示服务端接受，必须以异步终态或 `mc_get_maid_action_status` 为准，不能立即宣称完成
 

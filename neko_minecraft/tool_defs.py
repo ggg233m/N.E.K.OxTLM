@@ -191,6 +191,7 @@ MC_START_MAID_ACTION = {
         "明确要求去某坐标、主动挖掘或采集时应调用本工具，不要用 mc_switch_task 假装挖矿。"
         "按名称采集资源（例如挖石头、挖煤、砍木头）必须使用 selector；"
         "target_pos 仅限玩家明确给出或可信工具返回的方块坐标，禁止使用玩家/女仆坐标或猜测坐标。"
+        "一期只采集具有安全可达站立面的暴露资源，不会自动挖开覆盖层或打通矿道。"
     ),
     "parameters": {
         "type": "object",
@@ -205,9 +206,10 @@ MC_START_MAID_ACTION = {
                 "description": (
                     "navigate: {target:{x,y,z}, speed?, stop_distance?}；"
                     "harvest_blocks: target_pos 与 selector 二选一。挖石头等按资源名称的请求必须传"
-                    "selector，例如 {type:'block', id:'minecraft:stone'}；target_pos 只能是玩家明确"
+                    "selector，例如 {type:'tag', id:'minecraft:base_stone_overworld'}；target_pos 只能是玩家明确"
                     "指定或可信工具返回的方块坐标，不得猜测。selector 也可使用 tag；可传 search_radius、"
-                    "max_blocks、tool_policy(require_correct|allow_wrong)、speed"
+                    "max_blocks、tool_policy(require_correct|allow_wrong)、speed。一期只采集有安全可达面的"
+                    "暴露资源，不会自动挖覆盖层、打通矿道、搭桥或垫方块"
                 ),
                 "additionalProperties": True,
             },

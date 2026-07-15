@@ -37,7 +37,8 @@ import java.util.function.Predicate;
 
 /** Searches, approaches and harvests a bounded number of blocks. */
 public final class HarvestBlocksAction implements MaidAction {
-    private static final int MAX_SEARCH_CANDIDATES = 16;
+    private static final int MAX_SEARCH_CANDIDATES = 64;
+    private static final int MAX_CANDIDATE_PATH_CHECKS_PER_TICK = 2;
     private static final double APPROACH_DISTANCE = 1.0D;
     private static final double MAX_BREAK_DISTANCE_SQUARED = 4.5D * 4.5D;
     private static final Direction[] HORIZONTAL_DIRECTIONS = {
@@ -65,6 +66,12 @@ public final class HarvestBlocksAction implements MaidAction {
     private double breakingProgress;
     private int harvested;
     private boolean started;
+    private boolean searchPrepared;
+    private int matchedBlocks;
+    private int safeStandCandidates;
+    private int pathAttempts;
+    private int nullPaths;
+    private int unreachablePaths;
 
     public HarvestBlocksAction(BlockPos explicitTarget, Predicate<BlockState> selector,
                                String selectorDescription, int searchRadius, int maxBlocks,
@@ -170,63 +177,85 @@ public final class HarvestBlocksAction implements MaidAction {
 
     private MaidActionTickResult search(MaidActionContext context) {
         report(context, Stage.SEARCHING, overallProgress(), null);
-        candidates.clear();
-        if (explicitTarget != null) {
-            if (!context.level().hasChunkAt(explicitTarget)) {
-                JsonObject result = positionDetail(explicitTarget);
-                result.addProperty("message", "target_chunk_not_loaded");
-                result.addProperty("retry_hint",
-                        "For a nearby resource request, retry with a block/tag selector instead of this target_pos");
-                return MaidActionTickResult.failed(ActionEndReason.VALIDATION_FAILED, result);
+        if (!searchPrepared) {
+            MaidActionTickResult preparationFailure = prepareSearch(context);
+            if (preparationFailure != null) {
+                return preparationFailure;
             }
-            if (context.level().getBlockState(explicitTarget).isAir()) {
-                return failure(ActionEndReason.TARGET_CHANGED, "target_is_air");
-            }
-            candidates.add(explicitTarget);
-        } else {
-            BlockPos origin = searchOrigin;
-            BlockPos.betweenClosedStream(origin.offset(-searchRadius, -searchRadius, -searchRadius),
-                            origin.offset(searchRadius, searchRadius, searchRadius))
-                    // The vanilla iterator reuses a MutableBlockPos. Freeze it
-                    // before any stateful stream operation (especially sort),
-                    // otherwise every retained candidate becomes the final
-                    // corner visited by the iterator.
-                    .map(BlockPos::immutable)
-                    .filter(pos -> pos.distSqr(origin) <= (double) searchRadius * searchRadius)
-                    .filter(context.level()::hasChunkAt)
-                    .filter(pos -> !rejectedCandidates.contains(pos))
-                    .filter(pos -> selector.test(context.level().getBlockState(pos)))
-                    // Prefer exposed blocks. Without this cheap geometry filter,
-                    // the nearest 16 stone candidates are usually buried below
-                    // the maid and can never have a valid approach position.
-                    .filter(pos -> hasSafeAdjacentStandPosition(context, pos))
-                    // Prefer targets that can be worked from the same level
-                    // (or one block below, for a wall face). Surface blocks
-                    // that require standing above them are kept as a fallback
-                    // so a generic "stone" selector does not spend its first
-                    // 16 candidates trying to dig the surrounding floor.
-                    .sorted(Comparator
-                            .comparingInt((BlockPos pos) -> approachHeightRank(context, pos))
-                            .thenComparingDouble(origin::distSqr))
-                    .limit(MAX_SEARCH_CANDIDATES)
-                    .forEach(candidates::add);
         }
 
         if (candidates.isEmpty()) {
             if (harvested > 0) {
                 return success(context);
             }
-            return failure(ActionEndReason.TARGET_CHANGED, "no_matching_block_found");
+            return failure(matchedBlocks == 0 ? ActionEndReason.TARGET_CHANGED : ActionEndReason.PATH_NOT_FOUND,
+                    matchedBlocks == 0 ? "no_matching_block_found" : "no_safe_stand_position_found");
         }
         return chooseNextCandidate(context);
     }
 
+    private MaidActionTickResult prepareSearch(MaidActionContext context) {
+        searchPrepared = true;
+        if (explicitTarget != null) {
+            if (!context.level().hasChunkAt(explicitTarget)) {
+                JsonObject result = positionDetail(explicitTarget);
+                result.addProperty("message", "target_chunk_not_loaded");
+                addSearchDiagnostics(result,
+                        "For a nearby resource request, retry with a block/tag selector instead of this target_pos");
+                return MaidActionTickResult.failed(ActionEndReason.VALIDATION_FAILED, result);
+            }
+            if (context.level().getBlockState(explicitTarget).isAir()) {
+                return failure(ActionEndReason.TARGET_CHANGED, "target_is_air");
+            }
+            matchedBlocks = 1;
+            if (hasSafeAdjacentStandPosition(context, explicitTarget)) {
+                safeStandCandidates = 1;
+            }
+            candidates.add(explicitTarget);
+        } else {
+            BlockPos origin = searchOrigin;
+            List<BlockPos> discovered = new ArrayList<>();
+            for (BlockPos mutablePos : BlockPos.betweenClosed(
+                    origin.offset(-searchRadius, -searchRadius, -searchRadius),
+                    origin.offset(searchRadius, searchRadius, searchRadius))) {
+                // The vanilla iterator reuses a MutableBlockPos, so freeze it
+                // before retaining it beyond this loop iteration.
+                BlockPos pos = mutablePos.immutable();
+                if (pos.distSqr(origin) > (double) searchRadius * searchRadius
+                        || !context.level().hasChunkAt(pos)) {
+                    continue;
+                }
+                BlockState state = context.level().getBlockState(pos);
+                if (!selector.test(state)) {
+                    continue;
+                }
+                matchedBlocks++;
+                if (!hasSafeAdjacentStandPosition(context, pos)) {
+                    continue;
+                }
+                safeStandCandidates++;
+                discovered.add(pos);
+            }
+            discovered.sort(Comparator
+                    .comparingInt((BlockPos pos) -> approachHeightRank(context, pos))
+                    .thenComparingDouble(origin::distSqr));
+            candidates.addAll(discovered.subList(0, Math.min(MAX_SEARCH_CANDIDATES, discovered.size())));
+        }
+        return null;
+    }
+
     private MaidActionTickResult chooseNextCandidate(MaidActionContext context) {
-        while (!candidates.isEmpty()) {
+        int checkedThisTick = 0;
+        while (!candidates.isEmpty() && checkedThisTick < MAX_CANDIDATE_PATH_CHECKS_PER_TICK) {
+            checkedThisTick++;
             BlockPos candidate = candidates.removeFirst();
             BlockState candidateState = context.level().getBlockState(candidate);
+            if (candidateState.isAir() || !matchesTarget(candidateState)) {
+                rejectedCandidates.add(candidate.immutable());
+                continue;
+            }
             BlockPos standPos = findReachableStandPosition(context, candidate);
-            if (!candidateState.isAir() && matchesTarget(candidateState) && standPos != null) {
+            if (standPos != null) {
                 currentTarget = candidate;
                 currentStandPos = standPos;
                 expectedState = candidateState;
@@ -234,6 +263,13 @@ public final class HarvestBlocksAction implements MaidAction {
                 return MaidActionTickResult.running();
             }
             rejectedCandidates.add(candidate.immutable());
+        }
+        if (!candidates.isEmpty()) {
+            stage = Stage.SEARCHING;
+            return MaidActionTickResult.running();
+        }
+        if (explicitTarget == null && harvested > 0) {
+            return success(context);
         }
         return explicitTarget == null
                 ? failure(ActionEndReason.PATH_NOT_FOUND, "no_reachable_matching_block_found")
@@ -421,7 +457,7 @@ public final class HarvestBlocksAction implements MaidAction {
         report(context, Stage.VERIFYING, 1.0D, null);
         JsonObject result = new JsonObject();
         result.addProperty("harvested", harvested);
-        result.addProperty("selector", selectorDescription);
+        addSearchDiagnostics(result, "none");
         return MaidActionTickResult.succeeded(result);
     }
 
@@ -444,10 +480,33 @@ public final class HarvestBlocksAction implements MaidAction {
         return Math.min(0.99D, (double) harvested / maxBlocks);
     }
 
-    private static MaidActionTickResult failure(ActionEndReason reason, String message) {
+    private MaidActionTickResult failure(ActionEndReason reason, String message) {
         JsonObject result = new JsonObject();
         result.addProperty("message", message);
+        addSearchDiagnostics(result, retryHint(reason));
         return MaidActionTickResult.failed(reason, result);
+    }
+
+    private void addSearchDiagnostics(JsonObject result, String retryHint) {
+        result.addProperty("matched_blocks", matchedBlocks);
+        result.addProperty("safe_stand_candidates", safeStandCandidates);
+        result.addProperty("path_attempts", pathAttempts);
+        result.addProperty("null_paths", nullPaths);
+        result.addProperty("unreachable_paths", unreachablePaths);
+        result.addProperty("search_radius", searchRadius);
+        result.addProperty("selector", selectorDescription);
+        result.addProperty("retry_hint", retryHint);
+    }
+
+    private static String retryHint(ActionEndReason reason) {
+        return switch (reason) {
+            case PATH_NOT_FOUND, STUCK ->
+                    "Expose a reachable block face, move the maid closer, or increase search_radius";
+            case TOOL_NOT_FOUND -> "Provide a correct harvesting tool or use tool_policy=allow_wrong";
+            case TARGET_CHANGED -> "Refresh the target or retry with a broader block/tag selector";
+            case VALIDATION_FAILED -> "Check the target coordinates and loaded area before retrying";
+            default -> "Refresh world state and retry the action";
+        };
     }
 
     private static JsonObject positionDetail(BlockPos pos) {
@@ -496,20 +555,31 @@ public final class HarvestBlocksAction implements MaidAction {
         }
         List<BlockPos> positions = standPositionCandidates(target);
         positions.sort(Comparator.comparingDouble(context.maid().blockPosition()::distSqr));
+        positions.removeIf(standPos -> !isSafeStandPosition(context, standPos));
         for (BlockPos standPos : positions) {
-            if (!isSafeStandPosition(context, standPos)) {
-                continue;
-            }
             if (context.maid().position().distanceToSqr(Vec3.atBottomCenterOf(standPos))
                     <= APPROACH_DISTANCE * APPROACH_DISTANCE) {
                 return standPos;
             }
-            Path path = context.maid().getNavigation().createPath(standPos, 0);
-            if (path != null && path.getNodeCount() > 0 && path.canReach()) {
-                return standPos;
-            }
         }
-        return null;
+        if (positions.isEmpty()) {
+            return null;
+        }
+
+        // Ask the path finder for the best of all safe adjacent positions in
+        // one search. This bounds a block candidate to a single A* call.
+        Set<BlockPos> targets = new HashSet<>(positions);
+        pathAttempts++;
+        Path path = context.maid().getNavigation().createPath(targets, 0);
+        if (path == null) {
+            nullPaths++;
+            return null;
+        }
+        if (path.getNodeCount() == 0 || !path.canReach() || !targets.contains(path.getTarget())) {
+            unreachablePaths++;
+            return null;
+        }
+        return path.getTarget().immutable();
     }
 
     private static boolean hasSafeAdjacentStandPosition(MaidActionContext context, BlockPos target) {

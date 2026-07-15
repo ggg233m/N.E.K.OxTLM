@@ -10,6 +10,20 @@ import websockets
 from websockets.exceptions import ConnectionClosed, InvalidMessage
 
 
+_DEFAULT_RECV_LOG_LIMIT = 300
+_MAID_ACTION_FINISHED_LOG_LIMIT = 4096
+
+
+def _received_log_preview(raw, message_type):
+    """Keep terminal action diagnostics while bounding noisy WS console output."""
+    limit = (
+        _MAID_ACTION_FINISHED_LOG_LIMIT
+        if message_type == "maid_action_finished"
+        else _DEFAULT_RECV_LOG_LIMIT
+    )
+    return str(raw)[:limit]
+
+
 class WSBridge:
     def __init__(self, ws_url, logger, heartbeat_interval=30, reconnect_interval=5, max_reconnect_interval=60):
         self.ws_url = ws_url
@@ -142,10 +156,11 @@ class WSBridge:
                         if data.get("type") == "pong":
                             self._last_pong_time = time.time()
                         if data.get("type") != "pong":
+                            preview = _received_log_preview(raw, data.get("type"))
                             if data.get("type") == "game_context":
-                                self._logger.debug(f"[WSBridge] recv: {raw[:300]}")
+                                self._logger.debug(f"[WSBridge] recv: {preview}")
                             else:
-                                self._logger.info(f"[WSBridge] recv: {raw[:300]}")
+                                self._logger.info(f"[WSBridge] recv: {preview}")
                         self._recv_queue.put(data)
                     except json.JSONDecodeError:
                         self._logger.warning(f"Invalid JSON: {raw}")

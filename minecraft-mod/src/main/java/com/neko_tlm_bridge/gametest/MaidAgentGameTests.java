@@ -90,17 +90,17 @@ public final class MaidAgentGameTests {
     }
 
     @GameTest(template = "maid_agent_test", timeoutTicks = 400)
-    public static void harvestSelectorPrefersExposedStone(GameTestHelper helper) {
+    public static void harvestSelectorPrefersExposedBaseStone(GameTestHelper helper) {
         prepareFloorArea(helper, 0, 10, 0, 10, Blocks.STONE);
         BlockPos relativeTarget = new BlockPos(8, 1, 1);
-        helper.setBlock(relativeTarget, Blocks.STONE);
+        helper.setBlock(relativeTarget, Blocks.GRANITE);
         EntityMaid maid = helper.spawn(InitEntities.MAID.get(), new BlockPos(1, 1, 1));
         maid.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(Items.IRON_PICKAXE));
         UUID actionId = UUID.randomUUID();
 
         JsonObject selector = new JsonObject();
-        selector.addProperty("type", "block");
-        selector.addProperty("id", "minecraft:stone");
+        selector.addProperty("type", "tag");
+        selector.addProperty("id", "minecraft:base_stone_overworld");
         JsonObject args = new JsonObject();
         args.add("selector", selector);
         args.addProperty("search_radius", 7);
@@ -124,7 +124,7 @@ public final class MaidAgentGameTests {
             helper.assertTrue("SUCCEEDED".equals(status.get("status").getAsString()),
                     "selector harvest action should succeed, current=" + status);
             helper.assertTrue(helper.getBlockState(relativeTarget).isAir(),
-                    "exposed selector target should be removed");
+                    "exposed granite selector target should be removed");
             helper.assertTrue(helper.getBlockState(new BlockPos(1, 0, 1)).is(Blocks.STONE),
                     "selector must not mine the maid's support block");
             helper.assertTrue(helper.getBlockState(new BlockPos(2, 0, 1)).is(Blocks.STONE),
