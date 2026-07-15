@@ -52,12 +52,27 @@ public final class MaidPathDebugService {
     }
 
     public static void publishIfNeeded(EntityMaid maid, long gameTime, boolean force) {
+        Path path = maid.getNavigation().getPath();
+        if (path == null || maid.getNavigation().isDone()) {
+            clear(maid.getUUID());
+            return;
+        }
+        publishIfNeeded(maid, path, gameTime, force);
+    }
+
+    /**
+     * Publishes a stable, server-authored path that is not installed into the
+     * vanilla navigation object. Terrain actions use this to show their full
+     * multi-step plan while native navigation executes one adjacent step at a
+     * time. Callers should retain and advance the same {@link Path} instance;
+     * constructing a new path every tick defeats identity-based rate limiting.
+     */
+    public static void publishIfNeeded(EntityMaid maid, Path path, long gameTime, boolean force) {
         if (!MaidActionStore.getInstance().hasActiveResource(maid.getUUID(), MaidActionResource.MOVE)) {
             clear(maid.getUUID());
             return;
         }
-        Path path = maid.getNavigation().getPath();
-        if (path == null || maid.getNavigation().isDone()) {
+        if (path == null || path.isDone()) {
             clear(maid.getUUID());
             return;
         }

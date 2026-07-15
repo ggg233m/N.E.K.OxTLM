@@ -10,6 +10,9 @@ import com.neko_tlm_bridge.tlm.agent.MaidActionResource;
 import com.neko_tlm_bridge.tlm.agent.MaidActionTickResult;
 import com.neko_tlm_bridge.tlm.agent.runtime.HandLease;
 import com.neko_tlm_bridge.tlm.agent.runtime.MaidActionStore;
+import com.neko_tlm_bridge.tlm.agent.path.MaidTerrainPath;
+import com.neko_tlm_bridge.tlm.agent.path.MaidTerrainSearch;
+import com.neko_tlm_bridge.tlm.agent.path.MaidTerrainWorldEvaluator;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.core.registries.Registries;
@@ -21,7 +24,6 @@ import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.ClipContext;
-import net.minecraft.world.level.pathfinder.Path;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
@@ -33,13 +35,18 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Set;
 import java.util.HashSet;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.function.Predicate;
 
 /** Searches, approaches and harvests a bounded number of blocks. */
 public final class HarvestBlocksAction implements MaidAction {
     private static final int MAX_SEARCH_CANDIDATES = 64;
-    private static final int MAX_CANDIDATE_PATH_CHECKS_PER_TICK = 2;
-    private static final double APPROACH_DISTANCE = 1.0D;
+    private static final int MAX_TERRAIN_GOALS = 384;
+    private static final int PATH_SEARCH_BUDGET_PER_TICK = 256;
+    private static final int MAX_PATH_SEARCH_EXPANSIONS = 12_000;
+    private static final int MAX_TERRAIN_REPLANS = 3;
     private static final double MAX_BREAK_DISTANCE_SQUARED = 4.5D * 4.5D;
     private static final Direction[] HORIZONTAL_DIRECTIONS = {
             Direction.NORTH, Direction.SOUTH, Direction.WEST, Direction.EAST
@@ -61,7 +68,10 @@ public final class HarvestBlocksAction implements MaidAction {
     private BlockPos currentTarget;
     private BlockPos currentStandPos;
     private BlockState expectedState;
-    private NavigateAction navigation;
+    private MaidTerrainSearch terrainSearch;
+    private MaidTerrainPath terrainPath;
+    private MaidTerrainNavigator navigation;
+    private Map<BlockPos, BlockPos> terrainGoalTargets = Map.of();
     private HandLease handLease;
     private double breakingProgress;
     private int harvested;
@@ -72,6 +82,9 @@ public final class HarvestBlocksAction implements MaidAction {
     private int pathAttempts;
     private int nullPaths;
     private int unreachablePaths;
+    private int plannerExpandedNodes;
+    private int terrainReplans;
+    private int routeBlocksCleared;
 
     public HarvestBlocksAction(BlockPos explicitTarget, Predicate<BlockState> selector,
                                String selectorDescription, int searchRadius, int maxBlocks,
@@ -155,8 +168,9 @@ public final class HarvestBlocksAction implements MaidAction {
 
         return switch (stage) {
             case VALIDATING, SEARCHING -> search(context);
+            case PATHFINDING -> advanceTerrainSearch(context);
             case SELECTING_TOOL -> selectTool(context);
-            case PATHFINDING, APPROACHING -> approach(context);
+            case APPROACHING -> approach(context);
             case BREAKING -> breakBlock(context);
             case VERIFYING -> verifyAndContinue(context);
         };
@@ -166,7 +180,7 @@ public final class HarvestBlocksAction implements MaidAction {
     public void stop(MaidActionContext context, ActionEndReason reason) {
         clearBreakingAnimation(context);
         if (navigation != null) {
-            navigation.stop(context, reason);
+            navigation.stop(context);
             navigation = null;
         }
     }
@@ -189,9 +203,9 @@ public final class HarvestBlocksAction implements MaidAction {
                 return success(context);
             }
             return failure(matchedBlocks == 0 ? ActionEndReason.TARGET_CHANGED : ActionEndReason.PATH_NOT_FOUND,
-                    matchedBlocks == 0 ? "no_matching_block_found" : "no_safe_stand_position_found");
+                    matchedBlocks == 0 ? "no_matching_block_found" : "no_terrain_path_goal_found");
         }
-        return chooseNextCandidate(context);
+        return beginTerrainSearch(context);
     }
 
     private MaidActionTickResult prepareSearch(MaidActionContext context) {
@@ -215,6 +229,7 @@ public final class HarvestBlocksAction implements MaidAction {
         } else {
             BlockPos origin = searchOrigin;
             List<BlockPos> discovered = new ArrayList<>();
+            Map<BlockPos, Integer> approachRanks = new HashMap<>();
             for (BlockPos mutablePos : BlockPos.betweenClosed(
                     origin.offset(-searchRadius, -searchRadius, -searchRadius),
                     origin.offset(searchRadius, searchRadius, searchRadius))) {
@@ -230,50 +245,127 @@ public final class HarvestBlocksAction implements MaidAction {
                     continue;
                 }
                 matchedBlocks++;
-                if (!hasSafeAdjacentStandPosition(context, pos)) {
+                if (rejectedCandidates.contains(pos)
+                        || pos.equals(context.maid().getOnPos())
+                        || pos.equals(context.maid().blockPosition().below())) {
                     continue;
                 }
-                safeStandCandidates++;
+                boolean exposed = hasSafeAdjacentStandPosition(context, pos);
+                if (exposed) {
+                    safeStandCandidates++;
+                }
                 discovered.add(pos);
+                approachRanks.put(pos, sideApproachAvailable(context, pos) ? 0 : exposed ? 1 : 2);
             }
             discovered.sort(Comparator
-                    .comparingInt((BlockPos pos) -> approachHeightRank(context, pos))
-                    .thenComparingDouble(origin::distSqr));
+                    .comparingInt((BlockPos pos) -> approachRanks.getOrDefault(pos, 2))
+                    .thenComparingDouble(pos -> miningSelectionScore(origin, pos)));
             candidates.addAll(discovered.subList(0, Math.min(MAX_SEARCH_CANDIDATES, discovered.size())));
         }
         return null;
     }
 
-    private MaidActionTickResult chooseNextCandidate(MaidActionContext context) {
-        int checkedThisTick = 0;
-        while (!candidates.isEmpty() && checkedThisTick < MAX_CANDIDATE_PATH_CHECKS_PER_TICK) {
-            checkedThisTick++;
-            BlockPos candidate = candidates.removeFirst();
+    private MaidActionTickResult beginTerrainSearch(MaidActionContext context) {
+        BlockPos start = context.maid().blockPosition().immutable();
+        BlockState planningState = candidates.stream()
+                .map(context.level()::getBlockState)
+                .filter(state -> !state.isAir() && matchesTarget(state))
+                .findFirst()
+                .orElse(null);
+        if (planningState == null) {
+            return failure(ActionEndReason.TARGET_CHANGED, "all_targets_changed_before_planning");
+        }
+        MaidActionTickResult toolFailure = ensureHeldTool(context, planningState);
+        if (toolFailure != null) {
+            return toolFailure;
+        }
+        MaidTerrainWorldEvaluator evaluator = new MaidTerrainWorldEvaluator(
+                context.level(), context.maid(), searchOrigin,
+                searchRadius + 2, searchRadius + 2,
+                toolPolicy == ToolPolicy.REQUIRE_CORRECT);
+        LinkedHashMap<BlockPos, BlockPos> goals = new LinkedHashMap<>();
+
+        for (BlockPos candidate : candidates) {
             BlockState candidateState = context.level().getBlockState(candidate);
-            if (candidateState.isAir() || !matchesTarget(candidateState)) {
-                rejectedCandidates.add(candidate.immutable());
+            if (candidateState.isAir() || !matchesTarget(candidateState)
+                    || rejectedCandidates.contains(candidate)) {
                 continue;
             }
-            BlockPos standPos = findReachableStandPosition(context, candidate);
-            if (standPos != null) {
+            ItemStack held = context.maid().getMainHandItem();
+            if (toolPolicy == ToolPolicy.REQUIRE_CORRECT
+                    && candidateState.requiresCorrectToolForDrops()
+                    && !held.isCorrectToolForDrops(candidateState)) {
+                continue;
+            }
+            if (canReachVisibleFace(context, candidate)
+                    && !candidate.equals(context.maid().getOnPos())
+                    && !candidate.equals(context.maid().blockPosition().below())) {
                 currentTarget = candidate;
-                currentStandPos = standPos;
+                currentStandPos = start;
                 expectedState = candidateState;
+                terrainPath = new MaidTerrainPath(List.of(), start, 0.0D, 0);
                 report(context, Stage.SELECTING_TOOL, overallProgress(), currentTarget);
                 return MaidActionTickResult.running();
             }
-            rejectedCandidates.add(candidate.immutable());
+
+            for (BlockPos standPos : standPositionCandidates(candidate)) {
+                if (goals.size() >= MAX_TERRAIN_GOALS) {
+                    break;
+                }
+                if (!potentialMiningStance(evaluator, standPos, candidate)) {
+                    continue;
+                }
+                goals.putIfAbsent(standPos.immutable(), candidate.immutable());
+            }
         }
-        if (!candidates.isEmpty()) {
-            stage = Stage.SEARCHING;
+
+        if (goals.isEmpty()) {
+            return failure(ActionEndReason.PATH_NOT_FOUND, "no_clearable_mining_stance_found");
+        }
+        terrainGoalTargets = Map.copyOf(goals);
+        pathAttempts++;
+        terrainSearch = new MaidTerrainSearch(start, goals.keySet(), evaluator, MAX_PATH_SEARCH_EXPANSIONS);
+        report(context, Stage.PATHFINDING, overallProgress(), null);
+        return MaidActionTickResult.running();
+    }
+
+    private MaidActionTickResult advanceTerrainSearch(MaidActionContext context) {
+        if (terrainSearch == null) {
+            return failure(ActionEndReason.INTERNAL_ERROR, "terrain_search_missing");
+        }
+        MaidTerrainSearch.Status status = terrainSearch.advance(PATH_SEARCH_BUDGET_PER_TICK);
+        plannerExpandedNodes = Math.max(plannerExpandedNodes, terrainSearch.expandedNodes());
+        JsonObject detail = new JsonObject();
+        detail.addProperty("planner", "maid_weighted_astar");
+        detail.addProperty("nodes_expanded", terrainSearch.expandedNodes());
+        detail.addProperty("goal_count", terrainGoalTargets.size());
+        detail.addProperty("replans", terrainReplans);
+        context.execution().reportProgress(Stage.PATHFINDING.wireName, overallProgress(), detail);
+        if (status == MaidTerrainSearch.Status.SEARCHING) {
             return MaidActionTickResult.running();
         }
-        if (explicitTarget == null && harvested > 0) {
-            return success(context);
+        if (status == MaidTerrainSearch.Status.FAILED) {
+            unreachablePaths++;
+            return failure(ActionEndReason.PATH_NOT_FOUND, "terrain_search_exhausted");
         }
-        return explicitTarget == null
-                ? failure(ActionEndReason.PATH_NOT_FOUND, "no_reachable_matching_block_found")
-                : failure(ActionEndReason.TARGET_CHANGED, "target_changed_before_harvest");
+
+        terrainPath = terrainSearch.result().orElse(null);
+        if (terrainPath == null) {
+            return failure(ActionEndReason.INTERNAL_ERROR, "terrain_search_found_without_path");
+        }
+        currentStandPos = terrainPath.target();
+        currentTarget = terrainGoalTargets.get(currentStandPos);
+        if (currentTarget == null) {
+            return failure(ActionEndReason.INTERNAL_ERROR, "terrain_goal_lost_target_mapping");
+        }
+        expectedState = context.level().getBlockState(currentTarget);
+        if (expectedState.isAir() || !matchesTarget(expectedState)) {
+            return restartTerrainSearch(context, ActionEndReason.TARGET_CHANGED,
+                    "target_changed_after_path_search");
+        }
+        terrainSearch = null;
+        report(context, Stage.SELECTING_TOOL, overallProgress(), currentTarget);
+        return MaidActionTickResult.running();
     }
 
     private MaidActionTickResult selectTool(MaidActionContext context) {
@@ -281,37 +373,53 @@ public final class HarvestBlocksAction implements MaidAction {
             return onCandidateFailure(context, ActionEndReason.TARGET_CHANGED, "target_changed_before_tool_selection");
         }
 
-        if (handLease == null) {
-            ToolCandidate selected = findBestTool(context.maid(), expectedState);
-            if (selected == null) {
-                return failure(ActionEndReason.TOOL_NOT_FOUND, "correct_tool_not_found");
-            }
-            try {
-                handLease = selected.slot == HandLease.HELD_TOOL_SLOT
-                        ? HandLease.heldTool(context.maid())
-                        : HandLease.equipFromBackpack(context.maid(), selected.slot);
-            } catch (RuntimeException exception) {
-                return failure(ActionEndReason.HAND_CONFLICT, "tool_slot_changed");
-            }
-            boolean attached = MaidActionStore.getInstance().attachHandLease(
-                    context.execution().actionId(), context.execution().generation(), handLease);
-            if (!attached) {
-                handLease.release(context.maid());
-                handLease = null;
-                return failure(ActionEndReason.SUPERSEDED, "action_ended_before_tool_lease_attached");
-            }
-        } else {
-            ItemStack held = context.maid().getMainHandItem();
-            boolean correct = !expectedState.requiresCorrectToolForDrops() || held.isCorrectToolForDrops(expectedState);
-            if (toolPolicy == ToolPolicy.REQUIRE_CORRECT && !correct) {
-                return failure(ActionEndReason.TOOL_NOT_FOUND, "equipped_tool_is_wrong_for_next_block");
-            }
+        MaidActionTickResult toolFailure = ensureHeldTool(context, expectedState);
+        if (toolFailure != null) {
+            return toolFailure;
         }
 
-        navigation = new NavigateAction(currentStandPos, speed, APPROACH_DISTANCE);
+        if (terrainPath == null) {
+            return failure(ActionEndReason.INTERNAL_ERROR, "terrain_path_missing_before_execution");
+        }
+        navigation = new MaidTerrainNavigator(
+                terrainPath, handLease, speed,
+                toolPolicy == ToolPolicy.REQUIRE_CORRECT);
         navigation.start(context);
-        report(context, Stage.PATHFINDING, overallProgress(), currentTarget);
+        report(context, Stage.APPROACHING, overallProgress(), currentTarget);
         return MaidActionTickResult.running();
+    }
+
+    private MaidActionTickResult ensureHeldTool(MaidActionContext context, BlockState state) {
+        if (handLease != null) {
+            if (handLease.validate(context.maid()) != HandLease.LeaseHealth.HEALTHY) {
+                return failure(ActionEndReason.HAND_CONFLICT, "held_tool_changed_during_action");
+            }
+            ItemStack held = context.maid().getMainHandItem();
+            boolean correct = !state.requiresCorrectToolForDrops() || held.isCorrectToolForDrops(state);
+            return toolPolicy == ToolPolicy.REQUIRE_CORRECT && !correct
+                    ? failure(ActionEndReason.TOOL_NOT_FOUND, "equipped_tool_is_wrong_for_target")
+                    : null;
+        }
+
+        ToolCandidate selected = findBestTool(context.maid(), state);
+        if (selected == null) {
+            return failure(ActionEndReason.TOOL_NOT_FOUND, "correct_tool_not_found");
+        }
+        try {
+            handLease = selected.slot == HandLease.HELD_TOOL_SLOT
+                    ? HandLease.heldTool(context.maid())
+                    : HandLease.equipFromBackpack(context.maid(), selected.slot);
+        } catch (RuntimeException exception) {
+            return failure(ActionEndReason.HAND_CONFLICT, "tool_slot_changed");
+        }
+        boolean attached = MaidActionStore.getInstance().attachHandLease(
+                context.execution().actionId(), context.execution().generation(), handLease);
+        if (!attached) {
+            handLease.release(context.maid());
+            handLease = null;
+            return failure(ActionEndReason.SUPERSEDED, "action_ended_before_tool_lease_attached");
+        }
+        return null;
     }
 
     private MaidActionTickResult approach(MaidActionContext context) {
@@ -322,18 +430,46 @@ public final class HarvestBlocksAction implements MaidAction {
             return failure(ActionEndReason.HAND_CONFLICT, "held_tool_changed_while_approaching");
         }
 
-        MaidActionTickResult result = navigation.tick(context);
-        if (result.outcome() == MaidActionTickResult.Outcome.FAILED) {
-            navigation.stop(context, result.reason());
-            navigation = null;
-            return onCandidateFailure(context, result.reason(), "candidate_not_reachable");
+        MaidTerrainNavigator.TickResult result = navigation.tick(context);
+        for (MaidTerrainNavigator.ClearedBlock cleared : navigation.drainClearedBlocks()) {
+            routeBlocksCleared++;
+            rejectedCandidates.add(cleared.pos());
+            if (matchesClearedTarget(cleared)) {
+                harvested++;
+                if (harvested >= maxBlocks) {
+                    navigation.stop(context);
+                    navigation = null;
+                    return success(context);
+                }
+            }
         }
-        if (result.outcome() == MaidActionTickResult.Outcome.SUCCEEDED) {
+        if (result.outcome() == MaidTerrainNavigator.Outcome.FAILED) {
+            boolean retry = result.replanRecommended() && terrainReplans < MAX_TERRAIN_REPLANS;
+            navigation.stop(context);
             navigation = null;
+            if (retry) {
+                terrainReplans++;
+                return restartTerrainSearch(context, result.reason(), "terrain_execution_requires_replan");
+            }
+            return onCandidateFailure(context, result.reason(),
+                    result.detail().has("message")
+                            ? result.detail().get("message").getAsString()
+                            : "terrain_path_execution_failed");
+        }
+        if (result.outcome() == MaidTerrainNavigator.Outcome.ARRIVED) {
+            navigation = null;
+            if (!canReachVisibleFace(context, currentTarget)) {
+                return onCandidateFailure(context, ActionEndReason.PATH_NOT_FOUND,
+                        "planned_mining_stance_has_no_visible_target_face");
+            }
             breakingProgress = 0.0D;
             report(context, Stage.BREAKING, overallProgress(), currentTarget);
         } else {
             stage = Stage.APPROACHING;
+            JsonObject detail = result.detail();
+            detail.addProperty("harvested", harvested);
+            detail.addProperty("max_blocks", maxBlocks);
+            context.execution().reportProgress(Stage.APPROACHING.wireName, overallProgress(), detail);
         }
         return MaidActionTickResult.running();
     }
@@ -357,6 +493,9 @@ public final class HarvestBlocksAction implements MaidAction {
         }
         ItemStack tool = context.maid().getMainHandItem();
         boolean correctForDrops = !state.requiresCorrectToolForDrops() || tool.isCorrectToolForDrops(state);
+        if (toolPolicy == ToolPolicy.REQUIRE_CORRECT && !correctForDrops) {
+            return failure(ActionEndReason.TOOL_NOT_FOUND, "tool_broke_or_became_invalid_before_target");
+        }
         float toolSpeed = Math.max(1.0F, tool.getDestroySpeed(state));
         double increment = hardness == 0.0F ? 1.0D
                 : toolSpeed / hardness / (correctForDrops ? 30.0D : 100.0D);
@@ -394,12 +533,17 @@ public final class HarvestBlocksAction implements MaidAction {
             return failure(ActionEndReason.INTERNAL_ERROR, "block_remained_after_successful_break");
         }
         harvested++;
+        rejectedCandidates.add(currentTarget.immutable());
         currentTarget = null;
         currentStandPos = null;
         expectedState = null;
+        resetTerrainPlan();
         if (harvested >= maxBlocks || explicitTarget != null) {
             return success(context);
         }
+        searchOrigin = context.maid().blockPosition().immutable();
+        candidates.clear();
+        searchPrepared = false;
         stage = Stage.SEARCHING;
         return MaidActionTickResult.running();
     }
@@ -407,22 +551,57 @@ public final class HarvestBlocksAction implements MaidAction {
     private MaidActionTickResult onCandidateFailure(MaidActionContext context, ActionEndReason reason, String message) {
         clearBreakingAnimation(context);
         if (navigation != null) {
-            navigation.stop(context, reason);
+            navigation.stop(context);
             navigation = null;
         }
         if (currentTarget != null) {
             rejectedCandidates.add(currentTarget.immutable());
         }
+        resetTerrainPlan();
         currentTarget = null;
         currentStandPos = null;
         expectedState = null;
-        if (!candidates.isEmpty()) {
-            return chooseNextCandidate(context);
-        }
         if (explicitTarget == null && harvested > 0) {
             return success(context);
         }
-        return failure(reason, message);
+        if (explicitTarget != null || rejectedCandidates.size() >= MAX_SEARCH_CANDIDATES) {
+            return failure(reason, message);
+        }
+        searchOrigin = context.maid().blockPosition().immutable();
+        candidates.clear();
+        searchPrepared = false;
+        stage = Stage.SEARCHING;
+        return MaidActionTickResult.running();
+    }
+
+    private MaidActionTickResult restartTerrainSearch(MaidActionContext context,
+                                                       ActionEndReason reason, String message) {
+        clearBreakingAnimation(context);
+        if (navigation != null) {
+            navigation.stop(context);
+            navigation = null;
+        }
+        if (reason == ActionEndReason.TARGET_CHANGED && currentTarget != null) {
+            rejectedCandidates.add(currentTarget.immutable());
+        }
+        resetTerrainPlan();
+        currentTarget = null;
+        currentStandPos = null;
+        expectedState = null;
+        if (terrainReplans > MAX_TERRAIN_REPLANS) {
+            return failure(reason, message);
+        }
+        searchOrigin = context.maid().blockPosition().immutable();
+        candidates.clear();
+        searchPrepared = false;
+        stage = Stage.SEARCHING;
+        return MaidActionTickResult.running();
+    }
+
+    private void resetTerrainPlan() {
+        terrainSearch = null;
+        terrainPath = null;
+        terrainGoalTargets = Map.of();
     }
 
     private ToolCandidate findBestTool(EntityMaid maid, BlockState state) {
@@ -451,6 +630,12 @@ public final class HarvestBlocksAction implements MaidAction {
             return !state.isAir();
         }
         return selector.test(state);
+    }
+
+    private boolean matchesClearedTarget(MaidTerrainNavigator.ClearedBlock cleared) {
+        return explicitTarget != null
+                ? cleared.pos().equals(explicitTarget)
+                : selector.test(cleared.state());
     }
 
     private MaidActionTickResult success(MaidActionContext context) {
@@ -493,6 +678,10 @@ public final class HarvestBlocksAction implements MaidAction {
         result.addProperty("path_attempts", pathAttempts);
         result.addProperty("null_paths", nullPaths);
         result.addProperty("unreachable_paths", unreachablePaths);
+        result.addProperty("planner", "maid_weighted_astar");
+        result.addProperty("planner_expanded_nodes", plannerExpandedNodes);
+        result.addProperty("terrain_replans", terrainReplans);
+        result.addProperty("route_blocks_cleared", routeBlocksCleared);
         result.addProperty("search_radius", searchRadius);
         result.addProperty("selector", selectorDescription);
         result.addProperty("retry_hint", retryHint);
@@ -501,7 +690,7 @@ public final class HarvestBlocksAction implements MaidAction {
     private static String retryHint(ActionEndReason reason) {
         return switch (reason) {
             case PATH_NOT_FOUND, STUCK ->
-                    "Expose a reachable block face, move the maid closer, or increase search_radius";
+                    "Move the maid closer, provide the required tools, or increase search_radius within loaded chunks";
             case TOOL_NOT_FOUND -> "Provide a correct harvesting tool or use tool_policy=allow_wrong";
             case TARGET_CHANGED -> "Refresh the target or retry with a broader block/tag selector";
             case VALIDATION_FAILED -> "Check the target coordinates and loaded area before retrying";
@@ -546,40 +735,33 @@ public final class HarvestBlocksAction implements MaidAction {
         return parent.has(name) ? requireInt(parent, name) : fallback;
     }
 
-    private BlockPos findReachableStandPosition(MaidActionContext context, BlockPos target) {
-        // Never select the maid's support block: breaking it can cause an
-        // immediate fall even when the path itself is valid.
-        if (target.equals(context.maid().getOnPos())
-                || target.equals(context.maid().blockPosition().below())) {
-            return null;
-        }
-        List<BlockPos> positions = standPositionCandidates(target);
-        positions.sort(Comparator.comparingDouble(context.maid().blockPosition()::distSqr));
-        positions.removeIf(standPos -> !isSafeStandPosition(context, standPos));
-        for (BlockPos standPos : positions) {
-            if (context.maid().position().distanceToSqr(Vec3.atBottomCenterOf(standPos))
-                    <= APPROACH_DISTANCE * APPROACH_DISTANCE) {
-                return standPos;
-            }
-        }
-        if (positions.isEmpty()) {
-            return null;
-        }
+    private static double miningSelectionScore(BlockPos origin, BlockPos target) {
+        double distance = Math.sqrt(origin.distSqr(target));
+        double depthPenalty = Math.max(0, origin.getY() - target.getY()) * 3.0D;
+        return distance + depthPenalty;
+    }
 
-        // Ask the path finder for the best of all safe adjacent positions in
-        // one search. This bounds a block candidate to a single A* call.
-        Set<BlockPos> targets = new HashSet<>(positions);
-        pathAttempts++;
-        Path path = context.maid().getNavigation().createPath(targets, 0);
-        if (path == null) {
-            nullPaths++;
-            return null;
+    private static boolean potentialMiningStance(MaidTerrainWorldEvaluator evaluator,
+                                                  BlockPos standPos, BlockPos target) {
+        if (!evaluator.withinBounds(standPos)
+                || !evaluator.isLoaded(standPos)
+                || !evaluator.isLoaded(standPos.above())
+                || !evaluator.canStandOn(standPos.below())) {
+            return false;
         }
-        if (path.getNodeCount() == 0 || !path.canReach() || !targets.contains(path.getTarget())) {
-            unreachablePaths++;
-            return null;
+        double feetCost = evaluator.clearCost(standPos);
+        double headCost = evaluator.clearCost(standPos.above());
+        if (!Double.isFinite(feetCost) || !Double.isFinite(headCost)) {
+            return false;
         }
-        return path.getTarget().immutable();
+        int verticalOffset = standPos.getY() - target.getY();
+        if (verticalOffset < -1 || verticalOffset > 1) {
+            return false;
+        }
+        // A stance one block above can only see the target's top face when the
+        // cover is already open. Same-level/below stances expose a side face by
+        // clearing their own two body cells as part of the route.
+        return verticalOffset != 1 || evaluator.clearCost(target.above()) == 0.0D;
     }
 
     private static boolean hasSafeAdjacentStandPosition(MaidActionContext context, BlockPos target) {
@@ -595,16 +777,15 @@ public final class HarvestBlocksAction implements MaidAction {
         return false;
     }
 
-    private static int approachHeightRank(MaidActionContext context, BlockPos target) {
+    private static boolean sideApproachAvailable(MaidActionContext context, BlockPos target) {
         for (Direction direction : HORIZONTAL_DIRECTIONS) {
             BlockPos adjacent = target.relative(direction);
-            // Same-level and wall-face targets are safer than floor targets.
             if (isSafeStandPosition(context, adjacent)
                     || isSafeStandPosition(context, adjacent.below())) {
-                return 0;
+                return true;
             }
         }
-        return 1;
+        return false;
     }
 
     private static List<BlockPos> standPositionCandidates(BlockPos target) {

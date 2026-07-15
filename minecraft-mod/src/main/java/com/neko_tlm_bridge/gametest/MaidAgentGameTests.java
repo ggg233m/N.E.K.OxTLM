@@ -132,6 +132,58 @@ public final class MaidAgentGameTests {
         });
     }
 
+    @GameTest(template = "maid_agent_test", timeoutTicks = 800)
+    public static void harvestBuriedBaseStoneOpensShortTunnel(GameTestHelper helper) {
+        // A dirt cap covers an entire stone stratum. There is deliberately no
+        // pre-existing air cell beside any target, reproducing the old
+        // safe_stand_candidates=0 failure from a normal overworld surface.
+        for (int x = 0; x <= 10; x++) {
+            for (int z = 0; z <= 4; z++) {
+                helper.setBlock(new BlockPos(x, 0, z), Blocks.STONE);
+                helper.setBlock(new BlockPos(x, 1, z), Blocks.STONE);
+                helper.setBlock(new BlockPos(x, 2, z), Blocks.DIRT);
+                helper.setBlock(new BlockPos(x, 3, z), Blocks.AIR);
+                helper.setBlock(new BlockPos(x, 4, z), Blocks.AIR);
+            }
+        }
+        EntityMaid maid = helper.spawn(InitEntities.MAID.get(), new BlockPos(1, 3, 2));
+        maid.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(Items.IRON_PICKAXE));
+        UUID actionId = UUID.randomUUID();
+
+        JsonObject selector = new JsonObject();
+        selector.addProperty("type", "tag");
+        selector.addProperty("id", "minecraft:base_stone_overworld");
+        JsonObject args = new JsonObject();
+        args.add("selector", selector);
+        args.addProperty("search_radius", 7);
+        args.addProperty("max_blocks", 1);
+        args.addProperty("tool_policy", "require_correct");
+        args.addProperty("speed", 0.8D);
+        helper.runAfterDelay(5, () -> {
+            MaidActionStore.StartResult start = MaidActionStore.getInstance().start(
+                    actionId, maid, MaidActionKind.HARVEST_BLOCKS, args, 35_000L, true);
+            helper.assertTrue(start.accepted(), "buried harvest action should be accepted");
+        });
+
+        helper.succeedWhen(() -> {
+            var current = MaidActionStore.getInstance().getStatus(actionId);
+            helper.assertTrue(current.isPresent(), "buried harvest action has not started yet");
+            JsonObject status = current.orElseThrow();
+            helper.assertTrue("SUCCEEDED".equals(status.get("status").getAsString()),
+                    "terrain-aware harvest should reach buried stone, current=" + status);
+            boolean openedStone = false;
+            for (int x = 0; x <= 10 && !openedStone; x++) {
+                for (int z = 0; z <= 4; z++) {
+                    if (helper.getBlockState(new BlockPos(x, 1, z)).isAir()) {
+                        openedStone = true;
+                        break;
+                    }
+                }
+            }
+            helper.assertTrue(openedStone, "terrain-aware route should have mined one buried base-stone block");
+        });
+    }
+
     @GameTest(template = "maid_agent_test", timeoutTicks = 400)
     public static void activeLeaseSuppressesScheduleTeleport(GameTestHelper helper) {
         prepareFloor(helper, 1, 11, 1);

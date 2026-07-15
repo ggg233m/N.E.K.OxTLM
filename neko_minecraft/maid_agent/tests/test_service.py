@@ -126,6 +126,7 @@ class MaidActionServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("respond", kwargs["ai_behavior"])
         self.assertIn("selector", text)
         self.assertIn("不要让玩家靠近", text)
+        self.assertIn("不要强制加载区块", text)
 
     async def test_decision_required_uses_respond(self):
         plugin = FakePlugin()

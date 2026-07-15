@@ -185,13 +185,14 @@ MC_GAME_CONTEXT = {
 MC_START_MAID_ACTION = {
     "name": "mc_start_maid_action",
     "description": (
-        "让已绑定女仆开始一个服务端自主动作。navigate 会主动寻路到指定坐标；"
-        "harvest_blocks 会前往目标方块或搜索附近指定方块并采集。"
+        "让已绑定女仆开始一个服务端自主动作。navigate 会以非破坏方式主动寻路到指定坐标；"
+        "harvest_blocks 会前往目标方块或搜索附近指定方块，并可在 search_radius 内通过 Java 地形感知"
+        "规划清理安全、允许破坏且工具条件满足的阻挡，进行短距离下挖或开通道后采集。"
         "工具只返回是否接受，动作完成或失败会异步通知。新动作默认会覆盖旧动作。"
         "明确要求去某坐标、主动挖掘或采集时应调用本工具，不要用 mc_switch_task 假装挖矿。"
         "按名称采集资源（例如挖石头、挖煤、砍木头）必须使用 selector；"
         "target_pos 仅限玩家明确给出或可信工具返回的方块坐标，禁止使用玩家/女仆坐标或猜测坐标。"
-        "一期只采集具有安全可达站立面的暴露资源，不会自动挖开覆盖层或打通矿道。"
+        "普通 navigate 不会破坏地形；harvest_blocks 仍不会搭桥或垫方块，也不会强制加载未加载区块。"
     ),
     "parameters": {
         "type": "object",
@@ -208,8 +209,9 @@ MC_START_MAID_ACTION = {
                     "harvest_blocks: target_pos 与 selector 二选一。挖石头等按资源名称的请求必须传"
                     "selector，例如 {type:'tag', id:'minecraft:base_stone_overworld'}；target_pos 只能是玩家明确"
                     "指定或可信工具返回的方块坐标，不得猜测。selector 也可使用 tag；可传 search_radius、"
-                    "max_blocks、tool_policy(require_correct|allow_wrong)、speed。一期只采集有安全可达面的"
-                    "暴露资源，不会自动挖覆盖层、打通矿道、搭桥或垫方块"
+                    "max_blocks、tool_policy(require_correct|allow_wrong)、speed。harvest_blocks 可在 search_radius"
+                    "内清理安全可破坏阻挡并短距离下挖/开通道；navigate 始终非破坏性。两者都不会搭桥或"
+                    "垫方块，也不会强制加载未加载区块"
                 ),
                 "additionalProperties": True,
             },
