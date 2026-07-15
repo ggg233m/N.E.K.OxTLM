@@ -84,12 +84,68 @@ class ActionRegistryTests(unittest.TestCase):
         self.assertEqual("tag", args["selector"]["type"])
         self.assertEqual(8, args["search_radius"])
         self.assertEqual("require_correct", args["tool_policy"])
+        self.assertFalse(args["vein_mining"])
+
+    def test_ore_selectors_default_to_whole_vein(self):
+        selectors = (
+            {"type": "tag", "id": "minecraft:diamond_ores"},
+            {"type": "tag", "id": "c:ores/diamond"},
+            {"type": "block", "id": "minecraft:deepslate_diamond_ore"},
+        )
+        for selector in selectors:
+            with self.subTest(selector=selector):
+                args = self.registry.normalize("harvest_blocks", {
+                    "selector": selector,
+                })
+                self.assertTrue(args["vein_mining"])
+                self.assertEqual(64, args["max_blocks"])
+
+    def test_explicit_vein_count_and_single_block_override(self):
+        selector = {"type": "tag", "id": "minecraft:iron_ores"}
+        limited = self.registry.normalize("harvest_blocks", {
+            "selector": selector,
+            "max_blocks": 12,
+        })
+        self.assertTrue(limited["vein_mining"])
+        self.assertEqual(12, limited["max_blocks"])
+
+        single = self.registry.normalize("harvest_blocks", {
+            "selector": selector,
+            "vein_mining": False,
+            "max_blocks": 1,
+        })
+        self.assertFalse(single["vein_mining"])
+        self.assertEqual(1, single["max_blocks"])
+
+    def test_non_vein_targets_keep_eight_block_limit(self):
+        selector = {"type": "tag", "id": "minecraft:logs"}
+        args = self.registry.normalize("harvest_blocks", {"selector": selector})
+        self.assertFalse(args["vein_mining"])
+        self.assertEqual(1, args["max_blocks"])
+        with self.assertRaisesRegex(ActionValidationError, "between 1 and 8"):
+            self.registry.normalize("harvest_blocks", {
+                "selector": selector,
+                "max_blocks": 9,
+            })
+
+    def test_vein_mining_requires_boolean_and_selector(self):
+        with self.assertRaisesRegex(ActionValidationError, "must be a boolean"):
+            self.registry.normalize("harvest_blocks", {
+                "selector": {"type": "tag", "id": "minecraft:coal_ores"},
+                "vein_mining": "true",
+            })
+        with self.assertRaisesRegex(ActionValidationError, "requires selector"):
+            self.registry.normalize("harvest_blocks", {
+                "target_pos": {"x": 0, "y": 64, "z": 0},
+                "vein_mining": True,
+            })
 
     def test_harvest_without_mining_plan_preserves_legacy_shape(self):
         args = self.registry.normalize("harvest_blocks", {
             "selector": {"type": "tag", "id": "minecraft:coal_ores"},
         })
         self.assertNotIn("mining_plan", args)
+        self.assertTrue(args["vein_mining"])
 
     def test_normalizes_forward_tunnel_mining_plan_defaults(self):
         args = self.registry.normalize("harvest_blocks", {

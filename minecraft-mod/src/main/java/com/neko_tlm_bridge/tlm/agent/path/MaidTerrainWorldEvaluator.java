@@ -9,6 +9,7 @@ import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 
 import java.util.Objects;
+import java.util.function.Predicate;
 
 /**
  * Main-thread evaluator over the maid's live server world and leased held tool.
@@ -30,6 +31,7 @@ public final class MaidTerrainWorldEvaluator implements MaidTerrainNodeEvaluator
     private final int verticalRadius;
     private final long horizontalRadiusSquared;
     private final boolean requireCorrectTool;
+    private final Predicate<BlockPos> clearancePolicy;
 
     public MaidTerrainWorldEvaluator(ServerLevel level, EntityMaid maid, BlockPos origin) {
         this(level, maid, origin, DEFAULT_HORIZONTAL_RADIUS, DEFAULT_VERTICAL_RADIUS, true);
@@ -43,6 +45,14 @@ public final class MaidTerrainWorldEvaluator implements MaidTerrainNodeEvaluator
     public MaidTerrainWorldEvaluator(ServerLevel level, EntityMaid maid, BlockPos origin,
                                      int horizontalRadius, int verticalRadius,
                                      boolean requireCorrectTool) {
+        this(level, maid, origin, horizontalRadius, verticalRadius,
+                requireCorrectTool, ignored -> true);
+    }
+
+    public MaidTerrainWorldEvaluator(ServerLevel level, EntityMaid maid, BlockPos origin,
+                                     int horizontalRadius, int verticalRadius,
+                                     boolean requireCorrectTool,
+                                     Predicate<BlockPos> clearancePolicy) {
         this.level = Objects.requireNonNull(level, "level");
         this.maid = Objects.requireNonNull(maid, "maid");
         this.origin = Objects.requireNonNull(origin, "origin").immutable();
@@ -56,6 +66,7 @@ public final class MaidTerrainWorldEvaluator implements MaidTerrainNodeEvaluator
         this.verticalRadius = verticalRadius;
         this.horizontalRadiusSquared = (long) horizontalRadius * horizontalRadius;
         this.requireCorrectTool = requireCorrectTool;
+        this.clearancePolicy = Objects.requireNonNull(clearancePolicy, "clearancePolicy");
     }
 
     @Override
@@ -86,6 +97,9 @@ public final class MaidTerrainWorldEvaluator implements MaidTerrainNodeEvaluator
         if (state.getFluidState().isEmpty()
                 && state.getCollisionShape(level, pos).isEmpty()) {
             return 0.0D;
+        }
+        if (!clearancePolicy.test(pos)) {
+            return Double.POSITIVE_INFINITY;
         }
 
         float hardness = state.getDestroySpeed(level, pos);

@@ -55,13 +55,25 @@ class MaidActionGuidanceTests(unittest.TestCase):
         ):
             self.assertIn(value, tool_text)
             self.assertIn(value, _TLM_AI_INSTRUCTIONS)
-        self.assertIn("没找到继续", _TLM_AI_INSTRUCTIONS)
+        self.assertIn("附近没有目标", _TLM_AI_INSTRUCTIONS)
         self.assertIn("F8", _TLM_AI_INSTRUCTIONS)
         self.assertIn("mc_cancel_maid_action", _TLM_AI_INSTRUCTIONS)
+
+    def test_guidance_prefers_ore_tags_and_whole_veins(self):
+        tool_text = MC_START_MAID_ACTION["description"] + str(
+            MC_START_MAID_ACTION["parameters"]
+        )
+        for text in (tool_text, _TLM_AI_INSTRUCTIONS):
+            self.assertIn("minecraft:diamond_ores", text)
+            self.assertIn("vein_mining", text)
+            self.assertIn("max_blocks", text)
+            self.assertIn("64", text)
+        self.assertIn("只挖一块", _TLM_AI_INSTRUCTIONS)
+        self.assertIn("vein_mining=false", _TLM_AI_INSTRUCTIONS)
         self.assertIn("timeout_ms=120000", _TLM_AI_INSTRUCTIONS)
         self.assertIn("120000", tool_text)
         self.assertIn("no_matching_block_found", _TLM_AI_INSTRUCTIONS)
-        self.assertIn("最多自动重试一次", _TLM_AI_INSTRUCTIONS)
+        self.assertIn("不要自动重复", _TLM_AI_INSTRUCTIONS)
 
 
 if __name__ == "__main__":

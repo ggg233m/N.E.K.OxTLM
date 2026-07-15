@@ -39,22 +39,12 @@ class ActionRegistry:
             raise ActionValidationError(
                 "harvest_blocks requires exactly one of target_pos or selector"
             )
-        data = {
-            "search_radius": self._integer(
-                args.get("search_radius", 12), "search_radius", 1, 12
-            ),
-            "max_blocks": self._integer(
-                args.get("max_blocks", 1), "max_blocks", 1, 8
-            ),
-            "tool_policy": str(args.get("tool_policy", "require_correct") or "").lower(),
-            "speed": self._number(args.get("speed", 0.7), "speed", 0.4, 1.0),
-        }
-        if data["tool_policy"] not in ("require_correct", "allow_wrong"):
-            raise ActionValidationError(
-                "tool_policy must be require_correct or allow_wrong"
-            )
+
+        normalized_target = None
+        normalized_selector = None
+        ore_selector = False
         if has_target:
-            data["target_pos"] = self._position(args.get("target_pos"), "target_pos")
+            normalized_target = self._position(args.get("target_pos"), "target_pos")
         else:
             selector = args.get("selector")
             if not isinstance(selector, dict):
@@ -67,7 +57,49 @@ class ActionRegistry:
                 raise ActionValidationError(
                     "selector.id must be a namespaced Minecraft resource id"
                 )
-            data["selector"] = {"type": selector_type, "id": selector_id}
+            normalized_selector = {"type": selector_type, "id": selector_id}
+            selector_path = selector_id.split(":", 1)[1]
+            ore_selector = (
+                (
+                    selector_type == "tag"
+                    and (
+                        selector_path.endswith("_ores")
+                        or selector_path == "ores"
+                        or selector_path.startswith("ores/")
+                    )
+                )
+                or (selector_type == "block" and selector_path.endswith("_ore"))
+            )
+
+        if "vein_mining" in args:
+            vein_mining = self._boolean(args.get("vein_mining"), "vein_mining")
+        else:
+            vein_mining = ore_selector
+        if vein_mining and not has_selector:
+            raise ActionValidationError("vein_mining=true requires selector targeting")
+
+        max_blocks_limit = 64 if vein_mining else 8
+        max_blocks_default = 64 if vein_mining else 1
+        data = {
+            "search_radius": self._integer(
+                args.get("search_radius", 12), "search_radius", 1, 12
+            ),
+            "max_blocks": self._integer(
+                args.get("max_blocks", max_blocks_default),
+                "max_blocks", 1, max_blocks_limit,
+            ),
+            "vein_mining": vein_mining,
+            "tool_policy": str(args.get("tool_policy", "require_correct") or "").lower(),
+            "speed": self._number(args.get("speed", 0.7), "speed", 0.4, 1.0),
+        }
+        if data["tool_policy"] not in ("require_correct", "allow_wrong"):
+            raise ActionValidationError(
+                "tool_policy must be require_correct or allow_wrong"
+            )
+        if has_target:
+            data["target_pos"] = normalized_target
+        else:
+            data["selector"] = normalized_selector
         if args.get("mining_plan") is not None:
             data["mining_plan"] = self._mining_plan(
                 args.get("mining_plan"), has_selector=has_selector
@@ -164,6 +196,12 @@ class ActionRegistry:
         if number < minimum or number > maximum:
             raise ActionValidationError(f"{name} must be between {minimum} and {maximum}")
         return number
+
+    @staticmethod
+    def _boolean(value: Any, name: str) -> bool:
+        if not isinstance(value, bool):
+            raise ActionValidationError(f"{name} must be a boolean")
+        return value
 
     @staticmethod
     def _integer(value: Any, name: str, minimum: int, maximum: int) -> int:

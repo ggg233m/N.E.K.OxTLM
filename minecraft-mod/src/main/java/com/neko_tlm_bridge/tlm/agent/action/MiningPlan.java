@@ -53,10 +53,20 @@ public record MiningPlan(
                 DEFAULT_DISTANCE, 0, DEFAULT_EXCAVATION_BUDGET);
     }
 
+    public static MiningPlan automatic() {
+        return new MiningPlan(Mode.AUTO, Heading.MAID_FACING,
+                DEFAULT_DISTANCE, DEFAULT_DEPTH, DEFAULT_EXCAVATION_BUDGET);
+    }
+
     public static MiningPlan fromArgs(JsonObject args, boolean selectorTargeting) {
+        return fromArgs(args, selectorTargeting, false);
+    }
+
+    public static MiningPlan fromArgs(JsonObject args, boolean selectorTargeting,
+                                      boolean defaultAuto) {
         Objects.requireNonNull(args, "args");
         if (!args.has("mining_plan")) {
-            return nearby();
+            return defaultAuto ? automatic() : nearby();
         }
         if (!args.get("mining_plan").isJsonObject()) {
             throw new IllegalArgumentException("mining_plan must be an object");

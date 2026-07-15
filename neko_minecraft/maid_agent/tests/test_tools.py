@@ -84,11 +84,34 @@ class MaidActionToolTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(result["is_error"])
         plan = plugin.requests[0]["data"]["args"]["mining_plan"]
+        self.assertTrue(plugin.requests[0]["data"]["args"]["vein_mining"])
         self.assertEqual("staircase_down", plan["mode"])
         self.assertEqual("west", plan["direction"])
         self.assertEqual(12, plan["max_distance"])
         self.assertEqual(6, plan["max_depth"])
         self.assertEqual(48, plan["excavation_budget"])
+
+    async def test_default_ore_request_sends_whole_vein_contract(self):
+        plugin = FakePlugin({
+            "type": "maid_action_start_result",
+            "data": {
+                "accepted": True, "action_id": "vein", "maid_id": "maid-1",
+                "generation": 1, "sequence": 1, "kind": "harvest_blocks",
+                "status": "RUNNING", "stage": "SEARCHING",
+            },
+        })
+
+        result = await tools.do_start_maid_action(
+            plugin,
+            kind="harvest_blocks",
+            action_id="vein",
+            args={"selector": {"type": "tag", "id": "minecraft:diamond_ores"}},
+        )
+
+        self.assertFalse(result["is_error"])
+        normalized = plugin.requests[0]["data"]["args"]
+        self.assertTrue(normalized["vein_mining"])
+        self.assertEqual(64, normalized["max_blocks"])
 
     async def test_start_generates_action_id(self):
         plugin = FakePlugin({

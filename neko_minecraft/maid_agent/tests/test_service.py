@@ -128,7 +128,7 @@ class MaidActionServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("不要让玩家靠近", text)
         self.assertIn("不要强制加载区块", text)
 
-    async def test_missing_ore_feedback_offers_one_bounded_prospect_retry(self):
+    async def test_missing_ore_feedback_does_not_request_llm_retry(self):
         plugin = FakePlugin()
         service = MaidActionService(plugin)
         await service.handle_message({
@@ -140,15 +140,38 @@ class MaidActionServiceTests(unittest.IsolatedAsyncioTestCase):
                 "result": {
                     "message": "no_matching_block_found",
                     "selector": "tag:#minecraft:coal_ores",
+                    "retry_hint": "Refresh the target or retry",
                 },
             },
         })
 
         text = plugin.pushes[-1][0]
-        self.assertIn("mining_plan", text)
-        self.assertIn("max_distance=8", text)
-        self.assertIn("timeout_ms=120000", text)
-        self.assertIn("最多自动重试一次", text)
+        self.assertIn("不要自动重复", text)
+        self.assertIn("服务端", text)
+        self.assertIn("minecraft:*_ores", text)
+        self.assertNotIn("max_distance=8", text)
+        self.assertNotIn("Refresh the target or retry", text)
+
+    async def test_exhausted_server_prospect_does_not_invite_same_retry(self):
+        plugin = FakePlugin()
+        service = MaidActionService(plugin)
+        await service.handle_message({
+            "type": "maid_action_finished",
+            "data": {
+                "action_id": "exhausted", "maid_id": "maid", "generation": 1,
+                "sequence": 9, "kind": "harvest_blocks", "status": "FAILED",
+                "stage": "FAILED", "end_reason": "TARGET_CHANGED",
+                "result": {
+                    "message": "prospecting_budget_exhausted_without_match",
+                    "retry_hint": "Refresh the target or retry",
+                },
+            },
+        })
+
+        text = plugin.pushes[-1][0]
+        self.assertIn("有界探矿已经完成", text)
+        self.assertIn("不要自动重复", text)
+        self.assertNotIn("Refresh the target or retry", text)
 
     async def test_decision_required_uses_respond(self):
         plugin = FakePlugin()

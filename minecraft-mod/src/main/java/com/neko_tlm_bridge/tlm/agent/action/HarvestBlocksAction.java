@@ -15,6 +15,7 @@ import com.neko_tlm_bridge.tlm.agent.path.MaidTerrainSearch;
 import com.neko_tlm_bridge.tlm.agent.path.MaidTerrainWorldEvaluator;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.tags.TagKey;
@@ -45,6 +46,7 @@ import java.util.function.Predicate;
 /** Searches, approaches and harvests a bounded number of blocks. */
 public final class HarvestBlocksAction implements MaidAction {
     private static final int MAX_SEARCH_CANDIDATES = 64;
+    private static final int MAX_VEIN_BLOCKS = 64;
     private static final int MAX_TERRAIN_GOALS = 384;
     private static final int PATH_SEARCH_BUDGET_PER_TICK = 256;
     private static final int MAX_PATH_SEARCH_EXPANSIONS = 12_000;
@@ -55,6 +57,17 @@ public final class HarvestBlocksAction implements MaidAction {
             Direction.NORTH, Direction.SOUTH, Direction.WEST, Direction.EAST
     };
     private static final int[] STAND_Y_OFFSETS = {0, 1, -1};
+    private static final Set<String> VANILLA_ORE_BLOCKS = Set.of(
+            "coal_ore", "deepslate_coal_ore", "copper_ore", "deepslate_copper_ore",
+            "iron_ore", "deepslate_iron_ore", "gold_ore", "deepslate_gold_ore",
+            "redstone_ore", "deepslate_redstone_ore", "emerald_ore", "deepslate_emerald_ore",
+            "lapis_ore", "deepslate_lapis_ore", "diamond_ore", "deepslate_diamond_ore",
+            "nether_gold_ore", "nether_quartz_ore");
+    private static final Set<String> VANILLA_ORE_TAGS = Set.of(
+            "coal_ores", "copper_ores", "diamond_ores", "emerald_ores",
+            "gold_ores", "iron_ores", "lapis_ores", "redstone_ores");
+    private static final TagKey<Block> CONVENTIONAL_ORES = TagKey.create(
+            Registries.BLOCK, ResourceLocation.fromNamespaceAndPath("c", "ores"));
 
     private final BlockPos explicitTarget;
     private final Predicate<BlockState> selector;
@@ -64,10 +77,13 @@ public final class HarvestBlocksAction implements MaidAction {
     private final ToolPolicy toolPolicy;
     private final double speed;
     private final MiningPlan miningPlan;
+    private final boolean veinMining;
+    private final MaidVeinTracker veinTracker = new MaidVeinTracker();
 
     private Stage stage = Stage.VALIDATING;
     private final List<BlockPos> candidates = new ArrayList<>();
     private final Set<BlockPos> rejectedCandidates = new HashSet<>();
+    private final Set<BlockPos> harvestedPositions = new HashSet<>();
     private BlockPos searchOrigin;
     private BlockPos currentTarget;
     private BlockPos currentStandPos;
@@ -97,17 +113,27 @@ public final class HarvestBlocksAction implements MaidAction {
     private int prospectDescentSteps;
     private int prospectBlocksCleared;
     private int prospectRescans;
+    private BlockPos veinSeed;
+    private String veinStopReason;
 
     public HarvestBlocksAction(BlockPos explicitTarget, Predicate<BlockState> selector,
                                String selectorDescription, int searchRadius, int maxBlocks,
                                ToolPolicy toolPolicy, double speed) {
         this(explicitTarget, selector, selectorDescription, searchRadius, maxBlocks,
-                toolPolicy, speed, MiningPlan.nearby());
+                toolPolicy, speed, MiningPlan.nearby(), false);
     }
 
     public HarvestBlocksAction(BlockPos explicitTarget, Predicate<BlockState> selector,
                                String selectorDescription, int searchRadius, int maxBlocks,
                                ToolPolicy toolPolicy, double speed, MiningPlan miningPlan) {
+        this(explicitTarget, selector, selectorDescription, searchRadius, maxBlocks,
+                toolPolicy, speed, miningPlan, false);
+    }
+
+    public HarvestBlocksAction(BlockPos explicitTarget, Predicate<BlockState> selector,
+                               String selectorDescription, int searchRadius, int maxBlocks,
+                               ToolPolicy toolPolicy, double speed, MiningPlan miningPlan,
+                               boolean veinMining) {
         if ((explicitTarget == null) == (selector == null)) {
             throw new IllegalArgumentException("Exactly one of explicitTarget and selector is required");
         }
@@ -115,10 +141,15 @@ public final class HarvestBlocksAction implements MaidAction {
         this.selector = selector;
         this.selectorDescription = Objects.requireNonNull(selectorDescription, "selectorDescription");
         this.searchRadius = Math.max(1, Math.min(12, searchRadius));
-        this.maxBlocks = Math.max(1, Math.min(8, maxBlocks));
+        this.maxBlocks = Math.max(1, Math.min(
+                veinMining ? MAX_VEIN_BLOCKS : 8, maxBlocks));
         this.toolPolicy = Objects.requireNonNull(toolPolicy, "toolPolicy");
         this.speed = Math.max(0.4D, Math.min(1.0D, speed));
         this.miningPlan = Objects.requireNonNull(miningPlan, "miningPlan");
+        this.veinMining = veinMining;
+        if (veinMining && explicitTarget != null) {
+            throw new IllegalArgumentException("vein_mining requires selector targeting");
+        }
         if (explicitTarget != null && miningPlan.enabled()) {
             throw new IllegalArgumentException("mining_plan exploration requires selector targeting");
         }
@@ -134,6 +165,7 @@ public final class HarvestBlocksAction implements MaidAction {
 
         BlockPos targetPos = null;
         Predicate<BlockState> selectorPredicate = null;
+        boolean oreSelectorHint = false;
         String description;
         if (hasTarget) {
             JsonObject target = requireObject(args, "target_pos");
@@ -144,6 +176,7 @@ public final class HarvestBlocksAction implements MaidAction {
             JsonObject selectorJson = requireObject(args, "selector");
             String type = requireString(selectorJson, "type");
             ResourceLocation id = parseResourceLocation(requireString(selectorJson, "id"));
+            oreSelectorHint = looksLikeOreSelector(type, id);
             if ("block".equals(type)) {
                 selectorPredicate = state -> state.getBlock().builtInRegistryHolder().is(id);
                 description = "block:" + id;
@@ -156,16 +189,22 @@ public final class HarvestBlocksAction implements MaidAction {
             }
         }
 
+        boolean oreSelector = hasSelector
+                && (oreSelectorHint || isPureOreSelector(selectorPredicate));
+        boolean veinMining = optionalBoolean(args, "vein_mining", oreSelector);
+        if (veinMining && !hasSelector) {
+            throw new IllegalArgumentException("vein_mining requires selector targeting");
+        }
         int radius = optionalInt(args, "search_radius", 12);
-        int maxBlocks = optionalInt(args, "max_blocks", 1);
+        int maxBlocks = optionalInt(args, "max_blocks", veinMining ? MAX_VEIN_BLOCKS : 1);
         double speed = optionalDouble(args, "speed", 0.7D);
         requireRange(radius, "search_radius", 1, 12);
-        requireRange(maxBlocks, "max_blocks", 1, 8);
+        requireRange(maxBlocks, "max_blocks", 1, veinMining ? MAX_VEIN_BLOCKS : 8);
         requireRange(speed, "speed", 0.4D, 1.0D);
         ToolPolicy policy = ToolPolicy.fromWireName(optionalString(args, "tool_policy", "require_correct"));
-        MiningPlan miningPlan = MiningPlan.fromArgs(args, hasSelector);
+        MiningPlan miningPlan = MiningPlan.fromArgs(args, hasSelector, oreSelector);
         return new HarvestBlocksAction(targetPos, selectorPredicate, description,
-                radius, maxBlocks, policy, speed, miningPlan);
+                radius, maxBlocks, policy, speed, miningPlan, veinMining);
     }
 
     @Override
@@ -226,6 +265,15 @@ public final class HarvestBlocksAction implements MaidAction {
         }
 
         if (candidates.isEmpty()) {
+            if (veinMining && veinTracker.locked()) {
+                if (liveVeinRemaining(context) > 0 && veinStopReason == null) {
+                    veinStopReason = "remaining_vein_targets_rejected_or_disconnected";
+                }
+                return harvested > 0
+                        ? success(context)
+                        : failure(ActionEndReason.TARGET_CHANGED,
+                        "locked_vein_has_no_remaining_target");
+            }
             if (miningPlan.hasNextStep(prospectSteps, prospectDescentSteps)) {
                 return beginProspecting(context);
             }
@@ -262,15 +310,17 @@ public final class HarvestBlocksAction implements MaidAction {
             candidates.add(explicitTarget);
         } else {
             BlockPos origin = searchOrigin;
+            int discoveryRadius = veinMining && veinTracker.locked()
+                    ? Math.max(2, searchRadius) : searchRadius;
             List<BlockPos> discovered = new ArrayList<>();
             Map<BlockPos, Integer> approachRanks = new HashMap<>();
             for (BlockPos mutablePos : BlockPos.betweenClosed(
-                    origin.offset(-searchRadius, -searchRadius, -searchRadius),
-                    origin.offset(searchRadius, searchRadius, searchRadius))) {
+                    origin.offset(-discoveryRadius, -discoveryRadius, -discoveryRadius),
+                    origin.offset(discoveryRadius, discoveryRadius, discoveryRadius))) {
                 // The vanilla iterator reuses a MutableBlockPos, so freeze it
                 // before retaining it beyond this loop iteration.
                 BlockPos pos = mutablePos.immutable();
-                if (pos.distSqr(origin) > (double) searchRadius * searchRadius
+                if (pos.distSqr(origin) > (double) discoveryRadius * discoveryRadius
                         || !context.level().hasChunkAt(pos)) {
                     continue;
                 }
@@ -279,9 +329,10 @@ public final class HarvestBlocksAction implements MaidAction {
                     continue;
                 }
                 matchedBlocks++;
-                if (rejectedCandidates.contains(pos)
+                boolean excluded = rejectedCandidates.contains(pos)
                         || pos.equals(context.maid().getOnPos())
-                        || pos.equals(context.maid().blockPosition().below())) {
+                        || pos.equals(context.maid().blockPosition().below());
+                if (excluded && !(veinMining && veinTracker.locked())) {
                     continue;
                 }
                 boolean exposed = hasSafeAdjacentStandPosition(context, pos);
@@ -291,9 +342,33 @@ public final class HarvestBlocksAction implements MaidAction {
                 discovered.add(pos);
                 approachRanks.put(pos, sideApproachAvailable(context, pos) ? 0 : exposed ? 1 : 2);
             }
-            discovered.sort(Comparator
+            if (veinMining && veinTracker.locked()) {
+                veinTracker.pruneUnharvested(pos -> !context.level().hasChunkAt(pos)
+                        || selector.test(context.level().getBlockState(pos)));
+                for (BlockPos member : veinTracker.members()) {
+                    if (!context.level().hasChunkAt(member)
+                            || !selector.test(context.level().getBlockState(member))
+                            || discovered.contains(member)) {
+                        continue;
+                    }
+                    discovered.add(member);
+                    boolean exposed = hasSafeAdjacentStandPosition(context, member);
+                    approachRanks.put(member,
+                            sideApproachAvailable(context, member) ? 0 : exposed ? 1 : 2);
+                }
+            }
+            Comparator<BlockPos> priority = Comparator
                     .comparingInt((BlockPos pos) -> approachRanks.getOrDefault(pos, 2))
-                    .thenComparingDouble(pos -> miningSelectionScore(origin, pos)));
+                    .thenComparingDouble(pos -> miningSelectionScore(origin, pos));
+            discovered.sort(priority);
+            if (veinMining && veinTracker.locked()) {
+                discovered = veinTracker.retainConnected(discovered, priority);
+                discovered = discovered.stream()
+                        .filter(pos -> !rejectedCandidates.contains(pos))
+                        .filter(pos -> !pos.equals(context.maid().getOnPos()))
+                        .filter(pos -> !pos.equals(context.maid().blockPosition().below()))
+                        .toList();
+            }
             candidates.addAll(discovered.subList(0, Math.min(MAX_SEARCH_CANDIDATES, discovered.size())));
         }
         return null;
@@ -328,7 +403,8 @@ public final class HarvestBlocksAction implements MaidAction {
                 start, prospectDirection, prospectDescentSteps).immutable();
         MaidTerrainWorldEvaluator evaluator = new MaidTerrainWorldEvaluator(
                 context.level(), context.maid(), start, 4, 4,
-                toolPolicy == ToolPolicy.REQUIRE_CORRECT);
+                toolPolicy == ToolPolicy.REQUIRE_CORRECT,
+                pos -> isRouteClearanceAllowed(context, pos));
         Set<com.neko_tlm_bridge.tlm.agent.path.MaidTerrainStep.Kind> allowedKinds =
                 prospectStepMode == MiningPlan.StepMode.DESCEND
                         ? EnumSet.of(com.neko_tlm_bridge.tlm.agent.path.MaidTerrainStep.Kind.DESCEND)
@@ -346,11 +422,16 @@ public final class HarvestBlocksAction implements MaidAction {
     private MaidActionTickResult beginTerrainSearch(MaidActionContext context) {
         BlockPos start = context.maid().blockPosition().immutable();
         BlockState planningState = candidates.stream()
+                .filter(pos -> isEligibleTarget(pos, context.level().getBlockState(pos)))
                 .map(context.level()::getBlockState)
-                .filter(state -> !state.isAir() && matchesTarget(state))
                 .findFirst()
                 .orElse(null);
         if (planningState == null) {
+            MaidActionTickResult partial = finishLockedVeinPartial(
+                    context, "all_known_vein_targets_changed_before_planning");
+            if (partial != null) {
+                return partial;
+            }
             return failure(ActionEndReason.TARGET_CHANGED, "all_targets_changed_before_planning");
         }
         MaidActionTickResult toolFailure = ensureHeldTool(context, planningState);
@@ -359,13 +440,14 @@ public final class HarvestBlocksAction implements MaidAction {
         }
         MaidTerrainWorldEvaluator evaluator = new MaidTerrainWorldEvaluator(
                 context.level(), context.maid(), searchOrigin,
-                searchRadius + 2, searchRadius + 2,
-                toolPolicy == ToolPolicy.REQUIRE_CORRECT);
+                planningHorizontalRadius(start), planningVerticalRadius(start),
+                toolPolicy == ToolPolicy.REQUIRE_CORRECT,
+                pos -> isRouteClearanceAllowed(context, pos));
         LinkedHashMap<BlockPos, BlockPos> goals = new LinkedHashMap<>();
 
         for (BlockPos candidate : candidates) {
             BlockState candidateState = context.level().getBlockState(candidate);
-            if (candidateState.isAir() || !matchesTarget(candidateState)
+            if (!isEligibleTarget(candidate, candidateState)
                     || rejectedCandidates.contains(candidate)) {
                 continue;
             }
@@ -398,6 +480,11 @@ public final class HarvestBlocksAction implements MaidAction {
         }
 
         if (goals.isEmpty()) {
+            MaidActionTickResult partial = finishLockedVeinPartial(
+                    context, "remaining_vein_has_no_clearable_mining_stance");
+            if (partial != null) {
+                return partial;
+            }
             return failure(ActionEndReason.PATH_NOT_FOUND, "no_clearable_mining_stance_found");
         }
         terrainGoalTargets = Map.copyOf(goals);
@@ -435,6 +522,11 @@ public final class HarvestBlocksAction implements MaidAction {
         }
         if (status == MaidTerrainSearch.Status.FAILED) {
             unreachablePaths++;
+            MaidActionTickResult partial = finishLockedVeinPartial(
+                    context, "remaining_vein_terrain_search_exhausted");
+            if (partial != null) {
+                return partial;
+            }
             return failure(ActionEndReason.PATH_NOT_FOUND,
                     planningPurpose == PlanningPurpose.PROSPECT
                             ? "no_safe_prospecting_step_found"
@@ -470,9 +562,12 @@ public final class HarvestBlocksAction implements MaidAction {
             int plannedExcavation = plannedNonTargetExcavation(context, terrainPath);
             if (prospectBlocksCleared + plannedExcavation
                     > miningPlan.excavationBudget()) {
-                return harvested > 0
-                        ? success(context)
-                        : failure(ActionEndReason.PATH_NOT_FOUND,
+                if (harvested > 0) {
+                    MaidActionTickResult partial = finishLockedVeinPartial(
+                            context, "target_route_excavation_budget_would_be_exceeded");
+                    return partial != null ? partial : success(context);
+                }
+                return failure(ActionEndReason.PATH_NOT_FOUND,
                         "target_route_excavation_budget_would_be_exceeded");
             }
         }
@@ -482,7 +577,7 @@ public final class HarvestBlocksAction implements MaidAction {
             return failure(ActionEndReason.INTERNAL_ERROR, "terrain_goal_lost_target_mapping");
         }
         expectedState = context.level().getBlockState(currentTarget);
-        if (expectedState.isAir() || !matchesTarget(expectedState)) {
+        if (!isEligibleTarget(currentTarget, expectedState)) {
             return restartTerrainSearch(context, ActionEndReason.TARGET_CHANGED,
                     "target_changed_after_path_search");
         }
@@ -556,13 +651,19 @@ public final class HarvestBlocksAction implements MaidAction {
         MaidTerrainNavigator.TickResult result = navigation.tick(context);
         for (MaidTerrainNavigator.ClearedBlock cleared : navigation.drainClearedBlocks()) {
             routeBlocksCleared++;
-            if (matchesClearedTarget(cleared)) {
-                harvested++;
+            HarvestRecord record = recordHarvestedTarget(cleared.pos(), cleared.state());
+            if (record.harvested()) {
                 if (harvested >= maxBlocks) {
                     navigation.stop(context);
                     navigation = null;
                     return success(context);
                 }
+                if (record.newlyLocked()) {
+                    return restartAfterVeinLock(context);
+                }
+            } else if (isProtectedForeignOre(cleared.pos(), cleared.state())) {
+                return failure(ActionEndReason.INTERNAL_ERROR,
+                        "planner_cleared_unrequested_or_foreign_ore");
             } else if (miningPlan.enabled()) {
                 prospectBlocksCleared++;
             }
@@ -612,13 +713,19 @@ public final class HarvestBlocksAction implements MaidAction {
         MaidTerrainNavigator.TickResult result = navigation.tick(context);
         for (MaidTerrainNavigator.ClearedBlock cleared : navigation.drainClearedBlocks()) {
             routeBlocksCleared++;
-            if (matchesClearedTarget(cleared)) {
-                harvested++;
+            HarvestRecord record = recordHarvestedTarget(cleared.pos(), cleared.state());
+            if (record.harvested()) {
                 if (harvested >= maxBlocks) {
                     navigation.stop(context);
                     navigation = null;
                     return success(context);
                 }
+                if (record.newlyLocked()) {
+                    return restartAfterVeinLock(context);
+                }
+            } else if (isProtectedForeignOre(cleared.pos(), cleared.state())) {
+                return failure(ActionEndReason.INTERNAL_ERROR,
+                        "prospecting_cleared_unrequested_or_foreign_ore");
             } else {
                 prospectBlocksCleared++;
             }
@@ -721,8 +828,11 @@ public final class HarvestBlocksAction implements MaidAction {
         if (context.level().getBlockState(currentTarget).equals(expectedState)) {
             return failure(ActionEndReason.INTERNAL_ERROR, "block_remained_after_successful_break");
         }
-        harvested++;
-        rejectedCandidates.add(currentTarget.immutable());
+        HarvestRecord record = recordHarvestedTarget(currentTarget, expectedState);
+        if (!record.harvested()) {
+            return failure(ActionEndReason.INTERNAL_ERROR,
+                    "successfully_broken_block_was_not_an_eligible_target");
+        }
         currentTarget = null;
         currentStandPos = null;
         expectedState = null;
@@ -746,15 +856,22 @@ public final class HarvestBlocksAction implements MaidAction {
         if (currentTarget != null) {
             rejectedCandidates.add(currentTarget.immutable());
         }
+        if (veinMining && veinTracker.locked()) {
+            veinStopReason = message;
+        }
         resetTerrainPlan();
         currentTarget = null;
         currentStandPos = null;
         expectedState = null;
-        if (explicitTarget == null && harvested > 0
+        if (!veinMining && explicitTarget == null && harvested > 0
                 && !miningPlan.hasNextStep(prospectSteps, prospectDescentSteps)) {
             return success(context);
         }
         if (explicitTarget != null || rejectedCandidates.size() >= MAX_SEARCH_CANDIDATES) {
+            MaidActionTickResult partial = finishLockedVeinPartial(context, message);
+            if (partial != null) {
+                return partial;
+            }
             return failure(reason, message);
         }
         searchOrigin = context.maid().blockPosition().immutable();
@@ -779,6 +896,10 @@ public final class HarvestBlocksAction implements MaidAction {
         currentStandPos = null;
         expectedState = null;
         if (terrainReplans > MAX_TERRAIN_REPLANS) {
+            MaidActionTickResult partial = finishLockedVeinPartial(context, message);
+            if (partial != null) {
+                return partial;
+            }
             return failure(reason, message);
         }
         searchOrigin = context.maid().blockPosition().immutable();
@@ -815,25 +936,85 @@ public final class HarvestBlocksAction implements MaidAction {
         return new ToolCandidate(slot, score);
     }
 
-    private boolean matchesTarget(BlockState state) {
+    private boolean isEligibleTarget(BlockPos pos, BlockState state) {
         if (explicitTarget != null) {
-            return !state.isAir();
+            return pos.equals(explicitTarget) && !state.isAir();
         }
-        return selector.test(state);
+        return selector.test(state)
+                && (!veinMining || !veinTracker.locked() || veinTracker.contains(pos));
     }
 
-    private boolean matchesClearedTarget(MaidTerrainNavigator.ClearedBlock cleared) {
-        return explicitTarget != null
-                ? cleared.pos().equals(explicitTarget)
-                : selector.test(cleared.state());
+    private boolean isProtectedForeignOre(BlockPos pos, BlockState state) {
+        return isAnyOre(state) && !isEligibleTarget(pos, state);
+    }
+
+    private boolean isRouteClearanceAllowed(MaidActionContext context, BlockPos pos) {
+        return !isProtectedForeignOre(pos, context.level().getBlockState(pos));
+    }
+
+    static boolean isAnyOre(BlockState state) {
+        if (state.is(CONVENTIONAL_ORES)) {
+            return true;
+        }
+        ResourceLocation id = BuiltInRegistries.BLOCK.getKey(state.getBlock());
+        return "minecraft".equals(id.getNamespace())
+                && VANILLA_ORE_BLOCKS.contains(id.getPath());
+    }
+
+    private HarvestRecord recordHarvestedTarget(BlockPos pos, BlockState originalState) {
+        BlockPos immutable = pos.immutable();
+        if (!isEligibleTarget(immutable, originalState)
+                || !harvestedPositions.add(immutable)) {
+            return HarvestRecord.NOT_HARVESTED;
+        }
+        boolean newlyLocked = veinMining && !veinTracker.locked();
+        if (veinMining) {
+            if (!veinTracker.rememberHarvested(immutable)) {
+                harvestedPositions.remove(immutable);
+                return HarvestRecord.NOT_HARVESTED;
+            }
+            if (newlyLocked) {
+                veinSeed = immutable;
+            }
+        }
+        harvested++;
+        rejectedCandidates.add(immutable);
+        return new HarvestRecord(true, newlyLocked);
+    }
+
+    private MaidActionTickResult finishLockedVeinPartial(MaidActionContext context,
+                                                          String stopReason) {
+        if (!veinMining || !veinTracker.locked() || harvested <= 0) {
+            return null;
+        }
+        veinStopReason = stopReason;
+        return success(context);
+    }
+
+    private MaidActionTickResult restartAfterVeinLock(MaidActionContext context) {
+        if (navigation != null) {
+            navigation.stop(context);
+            navigation = null;
+        }
+        resetTerrainPlan();
+        currentTarget = null;
+        currentStandPos = null;
+        expectedState = null;
+        prospectGoal = null;
+        prospectStepMode = null;
+        planningPurpose = PlanningPurpose.HARVEST;
+        searchOrigin = context.maid().blockPosition().immutable();
+        candidates.clear();
+        searchPrepared = false;
+        stage = Stage.SEARCHING;
+        return MaidActionTickResult.running();
     }
 
     private int plannedNonTargetExcavation(MaidActionContext context, MaidTerrainPath path) {
         return (int) path.steps().stream()
                 .flatMap(step -> step.toBreak().stream())
                 .distinct()
-                .map(context.level()::getBlockState)
-                .filter(state -> !matchesTarget(state))
+                .filter(pos -> !isEligibleTarget(pos, context.level().getBlockState(pos)))
                 .count();
     }
 
@@ -842,13 +1023,74 @@ public final class HarvestBlocksAction implements MaidAction {
         JsonObject result = new JsonObject();
         result.addProperty("harvested", harvested);
         result.addProperty("requested", maxBlocks);
-        boolean partial = harvested < maxBlocks;
+        int veinRemaining = liveVeinRemaining(context);
+        int veinRejected = veinRejectedCount(context);
+        boolean countLimitReached = harvested >= maxBlocks;
+        boolean veinTruncated = veinTracker.truncated();
+        boolean veinComplete = veinMining && !veinTruncated
+                && veinRemaining == 0 && veinRejected == 0 && veinStopReason == null;
+        boolean requestSatisfied = veinMining
+                ? veinComplete || countLimitReached : countLimitReached;
+        boolean veinLimitReached = veinMining && countLimitReached && !veinComplete;
+        boolean partial = veinMining
+                ? !veinComplete && (!countLimitReached || maxBlocks == MAX_VEIN_BLOCKS)
+                : harvested < maxBlocks;
         result.addProperty("partial", partial);
+        result.addProperty("request_satisfied", requestSatisfied);
         if (partial) {
-            result.addProperty("message", "partial_harvest_completed_before_search_or_budget_limit");
+            result.addProperty("message", veinMining
+                    ? "connected_vein_partially_harvested"
+                    : "partial_harvest_completed_before_search_or_budget_limit");
         }
         addSearchDiagnostics(result, "none");
+        addVeinDiagnostics(result, veinRemaining, veinRejected, veinTruncated,
+                veinComplete, veinLimitReached);
         return MaidActionTickResult.succeeded(result);
+    }
+
+    private int liveVeinRemaining(MaidActionContext context) {
+        if (!veinMining) {
+            return 0;
+        }
+        return (int) veinTracker.members().stream()
+                .filter(pos -> !context.level().hasChunkAt(pos)
+                        || selector.test(context.level().getBlockState(pos)))
+                .count();
+    }
+
+    private int veinRejectedCount(MaidActionContext context) {
+        if (!veinMining) {
+            return 0;
+        }
+        return (int) rejectedCandidates.stream()
+                .filter(veinTracker::contains)
+                .filter(pos -> context.level().hasChunkAt(pos)
+                        && selector.test(context.level().getBlockState(pos)))
+                .count();
+    }
+
+    private void addVeinDiagnostics(JsonObject result, int remaining,
+                                    int rejected, boolean truncated,
+                                    boolean complete, boolean limitReached) {
+        result.addProperty("collection_scope", veinMining ? "connected_vein" : "nearest");
+        result.addProperty("vein_mining", veinMining);
+        if (!veinMining) {
+            return;
+        }
+        if (veinSeed != null) {
+            result.add("vein_seed", positionDetail(veinSeed));
+        }
+        result.addProperty("vein_discovered", veinTracker.knownMembers());
+        result.addProperty("vein_harvested", harvested);
+        result.addProperty("vein_remaining", remaining);
+        result.addProperty("vein_rejected", rejected);
+        result.addProperty("vein_limit", Math.min(maxBlocks, veinTracker.limit()));
+        result.addProperty("vein_truncated", truncated);
+        result.addProperty("vein_complete", complete);
+        result.addProperty("vein_limit_reached", limitReached);
+        if (veinStopReason != null) {
+            result.addProperty("vein_stop_reason", veinStopReason);
+        }
     }
 
     private void clearBreakingAnimation(MaidActionContext context) {
@@ -863,6 +1105,12 @@ public final class HarvestBlocksAction implements MaidAction {
         detail.addProperty("harvested", harvested);
         detail.addProperty("max_blocks", maxBlocks);
         detail.addProperty("selector", selectorDescription);
+        detail.addProperty("collection_scope", veinMining ? "connected_vein" : "nearest");
+        if (veinMining) {
+            detail.addProperty("vein_discovered", veinTracker.knownMembers());
+            detail.addProperty("vein_harvested", harvested);
+            detail.addProperty("vein_truncated", veinTracker.truncated());
+        }
         if (miningPlan.enabled()) {
             addProspectingDiagnostics(detail);
         }
@@ -892,6 +1140,17 @@ public final class HarvestBlocksAction implements MaidAction {
         result.addProperty("route_blocks_cleared", routeBlocksCleared);
         result.addProperty("search_radius", searchRadius);
         result.addProperty("selector", selectorDescription);
+        result.addProperty("collection_scope", veinMining ? "connected_vein" : "nearest");
+        result.addProperty("vein_mining", veinMining);
+        if (veinMining) {
+            if (veinSeed != null) {
+                result.add("vein_seed", positionDetail(veinSeed));
+            }
+            result.addProperty("vein_discovered", veinTracker.knownMembers());
+            result.addProperty("vein_harvested", harvested);
+            result.addProperty("vein_limit", Math.min(maxBlocks, veinTracker.limit()));
+            result.addProperty("vein_truncated", veinTracker.truncated());
+        }
         addProspectingDiagnostics(result);
         result.addProperty("retry_hint", retryHint);
     }
@@ -957,10 +1216,69 @@ public final class HarvestBlocksAction implements MaidAction {
         return parent.has(name) ? requireInt(parent, name) : fallback;
     }
 
+    private static boolean optionalBoolean(JsonObject parent, String name, boolean fallback) {
+        if (!parent.has(name)) {
+            return fallback;
+        }
+        if (!parent.get(name).isJsonPrimitive()
+                || !parent.getAsJsonPrimitive(name).isBoolean()) {
+            throw new IllegalArgumentException(name + " must be a boolean");
+        }
+        return parent.get(name).getAsBoolean();
+    }
+
+    private static boolean isPureOreSelector(Predicate<BlockState> selector) {
+        if (selector == null) {
+            return false;
+        }
+        boolean matched = false;
+        for (Block block : BuiltInRegistries.BLOCK) {
+            BlockState state = block.defaultBlockState();
+            if (!selector.test(state)) {
+                continue;
+            }
+            matched = true;
+            if (!state.is(CONVENTIONAL_ORES)) {
+                return false;
+            }
+        }
+        return matched;
+    }
+
+    static boolean looksLikeOreSelector(String type, ResourceLocation id) {
+        String namespace = id.getNamespace();
+        String path = id.getPath();
+        if ("block".equals(type)) {
+            return "minecraft".equals(namespace) && VANILLA_ORE_BLOCKS.contains(path);
+        }
+        return "tag".equals(type) && (("minecraft".equals(namespace)
+                && VANILLA_ORE_TAGS.contains(path))
+                || ("c".equals(namespace)
+                && (path.equals("ores") || path.startsWith("ores/"))));
+    }
+
     private static double miningSelectionScore(BlockPos origin, BlockPos target) {
         double distance = Math.sqrt(origin.distSqr(target));
         double depthPenalty = Math.max(0, origin.getY() - target.getY()) * 3.0D;
         return distance + depthPenalty;
+    }
+
+    private int planningHorizontalRadius(BlockPos start) {
+        int radius = searchRadius + 2;
+        for (BlockPos candidate : candidates) {
+            long dx = (long) candidate.getX() - start.getX();
+            long dz = (long) candidate.getZ() - start.getZ();
+            radius = Math.max(radius, (int) Math.ceil(Math.sqrt(dx * dx + dz * dz)) + 2);
+        }
+        return radius;
+    }
+
+    private int planningVerticalRadius(BlockPos start) {
+        int radius = searchRadius + 2;
+        for (BlockPos candidate : candidates) {
+            radius = Math.max(radius, Math.abs(candidate.getY() - start.getY()) + 2);
+        }
+        return radius;
     }
 
     private static boolean potentialMiningStance(MaidTerrainWorldEvaluator evaluator,
@@ -1076,6 +1394,10 @@ public final class HarvestBlocksAction implements MaidAction {
     }
 
     private record ToolCandidate(int slot, double score) {
+    }
+
+    private record HarvestRecord(boolean harvested, boolean newlyLocked) {
+        private static final HarvestRecord NOT_HARVESTED = new HarvestRecord(false, false);
     }
 
     public enum ToolPolicy {

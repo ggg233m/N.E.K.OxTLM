@@ -21,6 +21,30 @@ class MiningPlanTest {
     }
 
     @Test
+    void oreDefaultUsesBoundedAutomaticProspecting() {
+        MiningPlan plan = MiningPlan.fromArgs(new JsonObject(), true, true);
+
+        assertEquals(MiningPlan.Mode.AUTO, plan.mode());
+        assertTrue(plan.enabled());
+        assertEquals(8, plan.maxDistance());
+        assertEquals(4, plan.maxDepth());
+        assertEquals(24, plan.excavationBudget());
+    }
+
+    @Test
+    void explicitNearbyOverridesAutomaticOreDefault() {
+        JsonObject value = new JsonObject();
+        value.addProperty("mode", "nearby");
+        JsonObject args = new JsonObject();
+        args.add("mining_plan", value);
+
+        MiningPlan plan = MiningPlan.fromArgs(args, true, true);
+
+        assertEquals(MiningPlan.Mode.NEARBY, plan.mode());
+        assertFalse(plan.enabled());
+    }
+
+    @Test
     void autoDescendsThenContinuesForwardOneCellAtATime() {
         JsonObject args = argsWithPlan("auto", "east", 6, 2, 12);
         MiningPlan plan = MiningPlan.fromArgs(args, true);
