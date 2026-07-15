@@ -5,7 +5,7 @@ import net.neoforged.neoforge.network.event.RegisterPayloadHandlersEvent;
 import net.neoforged.neoforge.network.registration.PayloadRegistrar;
 
 public final class MaidAgentNetwork {
-    private static final String VERSION = "1.0.0";
+    private static final String VERSION = "1.1.0";
 
     private MaidAgentNetwork() {
     }
@@ -20,5 +20,9 @@ public final class MaidAgentNetwork {
                 EmergencyStopMaidActionsPayload.TYPE,
                 EmergencyStopMaidActionsPayload.STREAM_CODEC,
                 EmergencyStopMaidActionsPayload::handle);
+        registrar.playToClient(
+                MaidPathNodesPayload.TYPE,
+                MaidPathNodesPayload.STREAM_CODEC,
+                MaidPathNodesPayload::handle);
     }
 }

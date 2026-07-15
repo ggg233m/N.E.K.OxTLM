@@ -3,10 +3,9 @@ package com.neko_tlm_bridge.network.debug;
 import com.github.tartaricacid.touhoulittlemaid.entity.passive.EntityMaid;
 import com.neko_tlm_bridge.tlm.agent.MaidActionResource;
 import com.neko_tlm_bridge.tlm.agent.runtime.MaidActionStore;
-import net.minecraft.network.protocol.common.ClientboundCustomPayloadPacket;
-import net.minecraft.network.protocol.common.custom.PathfindingDebugPayload;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.pathfinder.Path;
+import net.neoforged.neoforge.network.PacketDistributor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -107,8 +106,8 @@ public final class MaidPathDebugService {
             if (player == null || !mayView(player, maid)) {
                 continue;
             }
-            player.connection.send(new ClientboundCustomPayloadPacket(
-                    new PathfindingDebugPayload(maid.getId(), path, 0.5F)));
+            PacketDistributor.sendToPlayer(player,
+                    MaidPathNodesPayload.fromPath(maid.getId(), path, 0.5F));
         }
     }
 
