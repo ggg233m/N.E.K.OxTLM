@@ -298,6 +298,61 @@ class MaidActionServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("禁止再次自动提交相同或等价参数", text)
         self.assertIn("必须改用不同方案", text)
 
+    async def test_exhausted_prospect_directions_require_new_geometry(self):
+        plugin = FakePlugin()
+        service = MaidActionService(plugin)
+        await service.handle_message({
+            "type": "maid_action_finished",
+            "data": {
+                "action_id": "directions-exhausted", "maid_id": "maid",
+                "generation": 1, "sequence": 41,
+                "kind": "harvest_blocks", "status": "FAILED",
+                "stage": "FAILED", "end_reason": "PATH_NOT_FOUND",
+                "result": {
+                    "message": "all_auto_prospect_directions_exhausted",
+                    "selector": "tag:#minecraft:diamond_ores",
+                    "prospect_directions_exhausted": True,
+                    "prospect_attempted_directions": [
+                        "south", "west", "north", "east",
+                    ],
+                    "prospect_direction_attempts": 4,
+                    "prospect_origin": {"x": 12, "y": 24, "z": -8},
+                    "last_prospect_step_mode": "forward",
+                    "retry_hint": "Move closer or increase search_radius",
+                },
+            },
+        })
+
+        text, kwargs = plugin.pushes[-1]
+        self.assertEqual("respond", kwargs["ai_behavior"])
+        self.assertIn("尝试或排除四个水平方向", text)
+        self.assertIn("净空、支撑、危险地形或局部执行受阻", text)
+        self.assertIn("几何上不同的方案", text)
+        self.assertIn("保留原 selector", text)
+        self.assertNotIn("Move closer or increase search_radius", text)
+
+    async def test_legacy_prospect_dead_end_does_not_claim_four_directions(self):
+        plugin = FakePlugin()
+        service = MaidActionService(plugin)
+        await service.handle_message({
+            "type": "maid_action_finished",
+            "data": {
+                "action_id": "legacy-dead-end", "maid_id": "maid",
+                "generation": 1, "sequence": 42,
+                "kind": "harvest_blocks", "status": "FAILED",
+                "stage": "FAILED", "end_reason": "PATH_NOT_FOUND",
+                "result": {
+                    "message": "no_safe_prospecting_step_found",
+                    "retry_hint": "Increase search_radius and retry",
+                },
+            },
+        })
+
+        text = plugin.pushes[-1][0]
+        self.assertIn("当前探矿方向没有安全下一步", text)
+        self.assertNotIn("尝试四个水平方向", text)
+        self.assertNotIn("Increase search_radius and retry", text)
+
     async def test_decision_required_uses_respond(self):
         plugin = FakePlugin()
         service = MaidActionService(plugin)

@@ -165,8 +165,13 @@ class ActionFeedbackHandler:
             "native_navigation_finished_before_terrain_step",
             "controlled_descend_made_no_progress",
         }
+        prospect_dead_end = message in {
+            "no_safe_prospecting_step_found",
+            "all_auto_prospect_directions_exhausted",
+        }
         if retry_hint and not selector_missing and not prospect_safety_limit \
-                and not path_origin_drift and not local_navigation_edge:
+                and not path_origin_drift and not local_navigation_edge \
+                and not prospect_dead_end:
             text += f" 重试提示：{retry_hint}。"
         if message == "target_chunk_not_loaded":
             text += (
@@ -226,6 +231,32 @@ class ActionFeedbackHandler:
                 text += (
                     "服务端已耗尽本轮可执行候选路线；不要增大 search_radius 或原样重试，"
                     "应选择其他附近目标或提出不同的安全清障方案。"
+                )
+        if prospect_dead_end:
+            result = record.result if isinstance(record.result, dict) else {}
+            exhausted = result.get("prospect_directions_exhausted") is True
+            attempted = result.get("prospect_attempted_directions")
+            origin = result.get("prospect_origin")
+            attempt_count = result.get("prospect_direction_attempts")
+            cardinal_directions = {"north", "east", "south", "west"}
+            if exhausted and isinstance(attempted, list) \
+                    and all(isinstance(value, str) for value in attempted) \
+                    and set(attempted) == cardinal_directions \
+                    and attempt_count == 4 \
+                    and isinstance(origin, dict) \
+                    and all(axis in origin for axis in ("x", "y", "z")):
+                text += (
+                    " 服务端已从同一实时起点尝试或排除四个水平方向，在当前安全与执行约束下"
+                    "都未产生可执行的下一探矿步；具体原因可能是净空、支撑、危险地形或局部"
+                    "执行受阻。这不是 selector 或 search_radius 问题。禁止扩大"
+                    "search_radius、轮换同一组方向或原样重启。必须采用几何上不同的方案："
+                    "若世界感知能确认安全新起点，先导航过去再保留原 selector 继续；否则说明"
+                    "具体阻挡和拟清除位置，并在扩大破坏范围前请求玩家确认。"
+                )
+            else:
+                text += (
+                    " 当前探矿方向没有安全下一步；这不是 selector 或 search_radius 问题。"
+                    "不要增大 search_radius 或原样重试，应安全重定位，或提出具体清障方案。"
                 )
         if record.status not in {"SUCCEEDED", "CANCELLED", "SUPERSEDED"}:
             if isinstance(record.result, dict) and record.result:

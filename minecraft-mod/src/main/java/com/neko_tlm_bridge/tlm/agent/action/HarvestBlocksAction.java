@@ -1,6 +1,7 @@
 package com.neko_tlm_bridge.tlm.agent.action;
 
 import com.github.tartaricacid.touhoulittlemaid.entity.passive.EntityMaid;
+import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.neko_tlm_bridge.tlm.agent.ActionEndReason;
 import com.neko_tlm_bridge.tlm.agent.MaidAction;
@@ -79,6 +80,10 @@ public final class HarvestBlocksAction implements MaidAction {
     private final MiningPlan miningPlan;
     private final boolean veinMining;
     private final MaidVeinTracker veinTracker = new MaidVeinTracker();
+    private final EnumSet<Direction> prospectDirectionsTried =
+            EnumSet.noneOf(Direction.class);
+    private final List<Direction> prospectDirectionAttemptOrder = new ArrayList<>();
+    private boolean prospectDirectionsExhausted;
 
     private Stage stage = Stage.VALIDATING;
     private final List<BlockPos> candidates = new ArrayList<>();
@@ -108,6 +113,7 @@ public final class HarvestBlocksAction implements MaidAction {
     private long routeBlocksCleared;
     private PlanningPurpose planningPurpose = PlanningPurpose.HARVEST;
     private Direction prospectDirection;
+    private BlockPos prospectDirectionOrigin;
     private BlockPos prospectGoal;
     private MiningPlan.StepMode prospectStepMode;
     private long prospectSteps;
@@ -409,6 +415,7 @@ public final class HarvestBlocksAction implements MaidAction {
         }
 
         BlockPos start = context.maid().blockPosition().immutable();
+        alignProspectDirectionSweep(start);
         prospectStepMode = miningPlan.mode() == MiningPlan.Mode.AUTO
                 && prospectDescentBlocked
                 ? MiningPlan.StepMode.FORWARD
@@ -450,6 +457,7 @@ public final class HarvestBlocksAction implements MaidAction {
     }
 
     private MaidActionTickResult beginTerrainSearch(MaidActionContext context) {
+        clearProspectDirectionSweep();
         BlockPos start = context.maid().blockPosition().immutable();
         BlockState planningState = candidates.stream()
                 .filter(pos -> isEligibleTarget(pos, context.level().getBlockState(pos)))
@@ -570,14 +578,30 @@ public final class HarvestBlocksAction implements MaidAction {
                 stage = Stage.SEARCHING;
                 return MaidActionTickResult.running();
             }
+            if (planningPurpose == PlanningPurpose.PROSPECT
+                    && prospectStepMode == MiningPlan.StepMode.FORWARD) {
+                MaidActionTickResult alternate = tryAlternateAutoDirection(
+                        context, "no_safe_forward_step_found");
+                if (alternate != null) {
+                    return alternate;
+                }
+            }
             MaidActionTickResult partial = finishLockedVeinPartial(
                     context, "remaining_vein_terrain_search_exhausted");
             if (partial != null) {
                 return partial;
             }
+            boolean exhaustedAutoDirections = planningPurpose == PlanningPurpose.PROSPECT
+                    && prospectStepMode == MiningPlan.StepMode.FORWARD
+                    && prospectDirectionsTried.size() == 4
+                    && miningPlan.mode() == MiningPlan.Mode.AUTO
+                    && miningPlan.heading() == MiningPlan.Heading.MAID_FACING;
+            prospectDirectionsExhausted = exhaustedAutoDirections;
             return failure(ActionEndReason.PATH_NOT_FOUND,
                     planningPurpose == PlanningPurpose.PROSPECT
-                            ? "no_safe_prospecting_step_found"
+                            ? (exhaustedAutoDirections
+                            ? "all_auto_prospect_directions_exhausted"
+                            : "no_safe_prospecting_step_found")
                             : "terrain_search_exhausted");
         }
 
@@ -795,6 +819,7 @@ public final class HarvestBlocksAction implements MaidAction {
                 segmentDescentSteps++;
             }
             prospectRescans++;
+            clearProspectDirectionSweep();
             prospectGoal = null;
             prospectStepMode = null;
             planningPurpose = PlanningPurpose.HARVEST;
@@ -846,12 +871,101 @@ public final class HarvestBlocksAction implements MaidAction {
      */
     private MaidActionTickResult fallbackFromAutoDescent(
             MaidActionContext context, String message) {
-        Direction previous = prospectDirection;
-        prospectDirection = prospectDirection.getClockWise();
         prospectDescentBlocked = true;
-        recordProspectFallback(message, true, previous);
+        MaidActionTickResult alternate = tryAlternateAutoDirection(context, message);
+        return alternate != null
+                ? alternate
+                : failure(ActionEndReason.STUCK, message);
+    }
+
+    private MaidActionTickResult tryAlternateAutoDirection(
+            MaidActionContext context, String reason) {
+        if (miningPlan.mode() != MiningPlan.Mode.AUTO
+                || miningPlan.heading() != MiningPlan.Heading.MAID_FACING) {
+            return null;
+        }
+        BlockPos liveOrigin = context.maid().blockPosition().immutable();
+        if (prospectDirectionOrigin == null
+                || !liveOrigin.equals(prospectDirectionOrigin)
+                || !isSafeProspectSweepAnchor(context, liveOrigin)) {
+            return null;
+        }
+        if (prospectDirectionsTried.add(prospectDirection)) {
+            prospectDirectionAttemptOrder.add(prospectDirection);
+        }
+        Direction previous = prospectDirection;
+        Direction alternate = nextUntriedHorizontalDirection(
+                prospectDirection, prospectDirectionsTried);
+        if (alternate == null) {
+            return null;
+        }
+        prospectDirection = alternate;
+        prospectDescentBlocked = true;
+        recordProspectFallback(reason, true, previous);
         consecutiveTerrainReplans = 0;
         return restartProspectingFromActualPosition(context);
+    }
+
+    private static boolean isSafeProspectSweepAnchor(
+            MaidActionContext context, BlockPos origin) {
+        BlockPos headPos = origin.above();
+        BlockPos supportPos = origin.below();
+        if (!context.maid().onGround()
+                || !context.level().hasChunkAt(origin)
+                || !context.level().hasChunkAt(headPos)
+                || !context.level().hasChunkAt(supportPos)) {
+            return false;
+        }
+        BlockState feet = context.level().getBlockState(origin);
+        BlockState head = context.level().getBlockState(headPos);
+        BlockState support = context.level().getBlockState(supportPos);
+        Vec3 center = Vec3.atBottomCenterOf(origin);
+        double dx = context.maid().getX() - center.x;
+        double dz = context.maid().getZ() - center.z;
+        return dx * dx + dz * dz <= 0.45D * 0.45D
+                && feet.getFluidState().isEmpty()
+                && head.getFluidState().isEmpty()
+                && feet.getCollisionShape(context.level(), origin).isEmpty()
+                && head.getCollisionShape(context.level(), headPos).isEmpty()
+                && MaidTerrainWorldEvaluator.isSafeStandSupport(
+                context.level(), supportPos, support);
+    }
+
+    private void alignProspectDirectionSweep(BlockPos liveOrigin) {
+        BlockPos immutable = liveOrigin.immutable();
+        if (prospectDirectionOrigin == null || !prospectDirectionOrigin.equals(immutable)) {
+            prospectDirectionOrigin = immutable;
+            prospectDirectionsTried.clear();
+            prospectDirectionAttemptOrder.clear();
+            prospectDirectionsExhausted = false;
+        }
+        if (prospectDirectionsTried.add(prospectDirection)) {
+            prospectDirectionAttemptOrder.add(prospectDirection);
+        }
+    }
+
+    private void clearProspectDirectionSweep() {
+        prospectDirectionOrigin = null;
+        prospectDirectionsTried.clear();
+        prospectDirectionAttemptOrder.clear();
+        prospectDirectionsExhausted = false;
+    }
+
+    static Direction nextUntriedHorizontalDirection(
+            Direction current, Set<Direction> tried) {
+        Objects.requireNonNull(current, "current");
+        Objects.requireNonNull(tried, "tried");
+        if (!current.getAxis().isHorizontal()) {
+            throw new IllegalArgumentException("current direction must be horizontal");
+        }
+        Direction candidate = current;
+        for (int index = 0; index < 3; index++) {
+            candidate = candidate.getClockWise();
+            if (!tried.contains(candidate)) {
+                return candidate;
+            }
+        }
+        return null;
     }
 
     private void recordProspectFallback(String reason, boolean directionChanged) {
@@ -889,6 +1003,7 @@ public final class HarvestBlocksAction implements MaidAction {
         segmentSteps = 0;
         segmentDescentSteps = 0;
         prospectDescentBlocked = prospectWorldBottomReached;
+        clearProspectDirectionSweep();
         prospectGoal = null;
         prospectStepMode = null;
         planningPurpose = PlanningPurpose.HARVEST;
@@ -973,6 +1088,7 @@ public final class HarvestBlocksAction implements MaidAction {
         currentStandPos = null;
         expectedState = null;
         resetTerrainPlan();
+        clearProspectDirectionSweep();
         if (harvested >= maxBlocks || explicitTarget != null) {
             return success(context);
         }
@@ -1150,6 +1266,7 @@ public final class HarvestBlocksAction implements MaidAction {
         prospectGoal = null;
         prospectStepMode = null;
         planningPurpose = PlanningPurpose.HARVEST;
+        clearProspectDirectionSweep();
         searchOrigin = context.maid().blockPosition().immutable();
         candidates.clear();
         searchPrepared = false;
@@ -1343,10 +1460,40 @@ public final class HarvestBlocksAction implements MaidAction {
             result.addProperty("prospect_fallback_direction", lastProspectFallbackDirection);
         }
         result.addProperty("prospect_fallbacks", prospectFallbacks);
+        result.addProperty("prospect_directions_tried",
+                prospectDirectionAttemptOrder.stream()
+                        .map(Direction::getName)
+                        .collect(java.util.stream.Collectors.joining(",")));
+        result.addProperty("prospect_directions_tried_count", prospectDirectionsTried.size());
+        result.addProperty("prospect_direction_attempts", prospectDirectionsTried.size());
+        JsonArray attemptedDirections = new JsonArray();
+        for (Direction attempted : prospectDirectionAttemptOrder) {
+            attemptedDirections.add(attempted.getName());
+        }
+        result.add("prospect_attempted_directions", attemptedDirections);
+        result.addProperty("prospect_directions_exhausted",
+                prospectDirectionsExhausted);
+        if (prospectDirectionOrigin != null) {
+            result.add("prospect_origin", positionDetail(prospectDirectionOrigin));
+        }
+        if (prospectStepMode != null) {
+            result.addProperty("prospect_step_mode",
+                    prospectStepMode.name().toLowerCase(java.util.Locale.ROOT));
+            result.addProperty("last_prospect_step_mode",
+                    prospectStepMode.name().toLowerCase(java.util.Locale.ROOT));
+        }
         result.addProperty("prospect_rescans", prospectRescans);
     }
 
     private String retryHint(ActionEndReason reason, String message) {
+        if ("no_safe_prospecting_step_found".equals(message)
+                || "all_auto_prospect_directions_exhausted".equals(message)) {
+            return miningPlan.mode() == MiningPlan.Mode.AUTO
+                    && miningPlan.heading() == MiningPlan.Heading.MAID_FACING
+                    && prospectDirectionsExhausted
+                    ? "All four horizontal directions were evaluated at the current origin; do not increase search_radius or repeat the same plan, and inspect hazards, two-block clearance, support, and loaded chunks before proposing a different authorized route"
+                    : "The requested mining direction has no safe executable step; inspect hazards, support, and loaded chunks before changing the plan";
+        }
         if (isLocalNavigationEdgeFailure(message)) {
             if (miningPlan.enabled()) {
                 return "The terrain route was found but its local movement edge could not be executed; choose a different safe mining direction instead of increasing search_radius";

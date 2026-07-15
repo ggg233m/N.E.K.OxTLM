@@ -359,6 +359,58 @@ public final class MaidAgentGameTests {
         });
     }
 
+    @GameTest(template = "maid_agent_test", timeoutTicks = 1000)
+    public static void autoProspectingTurnsWhenFirstHeadingHasNoSafeStep(GameTestHelper helper) {
+        BlockPos start = new BlockPos(2, 2, 2);
+        helper.setBlock(start.below(), Blocks.STONE);
+        helper.setBlock(start, Blocks.AIR);
+        helper.setBlock(start.above(), Blocks.AIR);
+
+        // South has neither a safe diagonal-down support nor a supported
+        // horizontal destination. AUTO must test another direction rather
+        // than ending after these two planner failures.
+        helper.setBlock(new BlockPos(2, 0, 3), Blocks.MAGMA_BLOCK);
+        helper.setBlock(new BlockPos(2, 1, 3), Blocks.AIR);
+        helper.setBlock(new BlockPos(2, 2, 3), Blocks.AIR);
+        helper.setBlock(new BlockPos(2, 3, 3), Blocks.AIR);
+
+        helper.setBlock(new BlockPos(1, 1, 2), Blocks.STONE);
+        helper.setBlock(new BlockPos(1, 2, 2), Blocks.AIR);
+        helper.setBlock(new BlockPos(1, 3, 2), Blocks.AIR);
+        BlockPos ore = new BlockPos(0, 2, 2);
+        helper.setBlock(ore.below(), Blocks.STONE);
+        helper.setBlock(ore, Blocks.COAL_ORE);
+        helper.setBlock(ore.above(), Blocks.AIR);
+
+        EntityMaid maid = helper.spawn(InitEntities.MAID.get(), start);
+        maid.setYRot(0.0F); // south
+        maid.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(Items.IRON_PICKAXE));
+        UUID actionId = UUID.randomUUID();
+        JsonObject args = selectorHarvestArgs("block", "minecraft:coal_ore", 1);
+        args.add("mining_plan", miningPlan(
+                "auto", "maid_facing", 2, 1, 8));
+
+        helper.runAfterDelay(5, () -> {
+            maid.setYRot(0.0F);
+            MaidActionStore.StartResult action = MaidActionStore.getInstance().start(
+                    actionId, maid, MaidActionKind.HARVEST_BLOCKS, args, 30_000L, true);
+            helper.assertTrue(action.accepted(), "AUTO direction sweep should start");
+        });
+        helper.succeedWhen(() -> {
+            JsonObject status = MaidActionStore.getInstance().getStatus(actionId).orElseThrow();
+            helper.assertTrue("SUCCEEDED".equals(status.get("status").getAsString()),
+                    "AUTO should turn west and harvest the coal, current=" + status);
+            JsonObject result = status.getAsJsonObject("result");
+            helper.assertTrue(result.get("prospect_fallbacks").getAsLong() >= 2L,
+                    "descent fallback and horizontal turn should both be diagnosed");
+            helper.assertTrue("south->west".equals(
+                            result.get("prospect_fallback_direction").getAsString()),
+                    "AUTO should rotate once from south to west");
+            helper.assertTrue(helper.getBlockState(ore).isAir(),
+                    "coal reached through the alternate direction should be harvested");
+        });
+    }
+
     @GameTest(template = "maid_agent_test", timeoutTicks = 500)
     public static void prospectingRechecksFluidBeforeBreakCommit(GameTestHelper helper) {
         prepareFloorArea(helper, 0, 4, 0, 4, Blocks.STONE);

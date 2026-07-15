@@ -2,8 +2,10 @@ package com.neko_tlm_bridge.tlm.agent.action;
 
 import com.neko_tlm_bridge.tlm.agent.path.MaidTerrainStep;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import org.junit.jupiter.api.Test;
 
+import java.util.EnumSet;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -39,6 +41,26 @@ class MaidTerrainNavigatorTest {
                 "controlled_descend_made_no_progress"));
         assertFalse(HarvestBlocksAction.isLocalNavigationEdgeFailure(
                 "no_safe_prospecting_step_found"));
+    }
+
+    @Test
+    void automaticProspectingVisitsEveryDirectionOnceBeforeExhaustion() {
+        EnumSet<Direction> tried = EnumSet.of(Direction.SOUTH);
+        Direction next =
+                HarvestBlocksAction.nextUntriedHorizontalDirection(
+                        Direction.SOUTH, tried);
+        assertTrue(next == Direction.WEST);
+        tried.add(next);
+
+        next = HarvestBlocksAction.nextUntriedHorizontalDirection(next, tried);
+        assertTrue(next == Direction.NORTH);
+        tried.add(next);
+
+        next = HarvestBlocksAction.nextUntriedHorizontalDirection(next, tried);
+        assertTrue(next == Direction.EAST);
+        tried.add(next);
+
+        assertTrue(HarvestBlocksAction.nextUntriedHorizontalDirection(next, tried) == null);
     }
 
     private static MaidTerrainStep step(
