@@ -114,6 +114,7 @@ class MaidActionToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(normalized["vein_mining"])
         self.assertEqual(64, normalized["max_blocks"])
         self.assertNotIn("mining_plan", normalized)
+        self.assertEqual(0, plugin.requests[0]["data"]["timeout_ms"])
 
     async def test_multi_segment_plan_uses_safe_default_budget(self):
         plugin = FakePlugin({
@@ -149,6 +150,45 @@ class MaidActionToolTests(unittest.IsolatedAsyncioTestCase):
             args={"target": {"x": 1, "y": 64, "z": 1}},
         )
         self.assertTrue(plugin.requests[0]["data"]["action_id"])
+        self.assertEqual(60000, plugin.requests[0]["data"]["timeout_ms"])
+
+    async def test_timeout_zero_is_accepted_but_subsecond_positive_is_rejected(self):
+        response = {
+            "type": "maid_action_start_result",
+            "data": {"accepted": True, "generation": 1, "status": "RUNNING"},
+        }
+        plugin = FakePlugin(response)
+        result = await tools.do_start_maid_action(
+            plugin,
+            kind="navigate",
+            timeout_ms=0,
+            args={"target": {"x": 1, "y": 64, "z": 1}},
+        )
+        self.assertFalse(result["is_error"])
+        self.assertEqual(0, plugin.requests[0]["data"]["timeout_ms"])
+
+        rejected = await tools.do_start_maid_action(
+            FakePlugin(response),
+            kind="navigate",
+            timeout_ms=999,
+            args={"target": {"x": 1, "y": 64, "z": 1}},
+        )
+        self.assertTrue(rejected["is_error"])
+        self.assertIn("0 (no deadline)", rejected["output"]["error"])
+
+    async def test_ore_selector_forces_no_deadline_over_model_timeout(self):
+        plugin = FakePlugin({
+            "type": "maid_action_start_result",
+            "data": {"accepted": True, "generation": 1, "status": "RUNNING"},
+        })
+        result = await tools.do_start_maid_action(
+            plugin,
+            kind="harvest_blocks",
+            timeout_ms=120000,
+            args={"selector": {"type": "tag", "id": "minecraft:diamond_ores"}},
+        )
+        self.assertFalse(result["is_error"])
+        self.assertEqual(0, plugin.requests[0]["data"]["timeout_ms"])
 
     async def test_cancel_without_id_uses_latest_active(self):
         plugin = FakePlugin({

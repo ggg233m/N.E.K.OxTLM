@@ -511,7 +511,7 @@ async def do_start_maid_action(
     kind="",
     args=None,
     action_id="",
-    timeout_ms=60000,
+    timeout_ms=None,
     replace_existing=True,
     maid_id=None,
 ):
@@ -526,12 +526,31 @@ async def do_start_maid_action(
     service = _maid_action_service(plugin)
     try:
         normalized_args = service.registry.normalize(kind, args or {})
+        selector = normalized_args.get("selector")
+        selector_type = str((selector or {}).get("type") or "").lower()
+        selector_id = str((selector or {}).get("id") or "").lower()
+        selector_path = selector_id.split(":", 1)[-1]
+        ore_selector = (
+            selector_type == "tag"
+            and (
+                selector_path.endswith("_ores")
+                or selector_path == "ores"
+                or selector_path.startswith("ores/")
+            )
+        ) or (selector_type == "block" and selector_path.endswith("_ore"))
+        if str(kind or "").strip().lower() == "harvest_blocks" and ore_selector:
+            # Ore prospecting is explicitly continuous. Do not let an LLM-
+            # invented finite timeout silently reintroduce a mining cap.
+            timeout_ms = 0
+        elif timeout_ms is None:
+            timeout_ms = 60000
         timeout_ms = int(timeout_ms)
     except (ActionValidationError, TypeError, ValueError) as exc:
         return _action_error("INVALID_ACTION_ARGUMENTS", str(exc))
-    if timeout_ms < 1000 or timeout_ms > 120000:
+    if timeout_ms != 0 and (timeout_ms < 1000 or timeout_ms > 120000):
         return _action_error(
-            "INVALID_ACTION_ARGUMENTS", "timeout_ms must be between 1000 and 120000"
+            "INVALID_ACTION_ARGUMENTS",
+            "timeout_ms must be 0 (no deadline) or between 1000 and 120000",
         )
     action_id = str(action_id or uuid.uuid4())
     logger = getattr(plugin, "logger", None)

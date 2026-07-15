@@ -188,15 +188,15 @@ MC_START_MAID_ACTION = {
         "让已绑定女仆开始一个服务端自主动作。navigate 会以非破坏方式主动寻路到指定坐标；"
         "harvest_blocks 会前往目标方块或搜索附近指定方块，并可在 search_radius 内通过 Java 地形感知"
         "规划清理安全、允许破坏且工具条件满足的阻挡，进行短距离下挖或开通道后采集；"
-        "普通挖矿石或找矿石只传 selector 并省略 mining_plan，由服务端使用安全默认；只有玩家明确要求"
-        "方向、挖掘方案、继续段数或具体限制时才传 mining_plan。"
+        "普通挖矿石或找矿石只传 selector 并省略 mining_plan，由服务端持续探矿；只有玩家明确要求"
+        "方向或挖掘方案时才传 mining_plan。探矿不再因总步数、段数、深度或开凿方块总量停止。"
         "工具只返回是否接受，动作完成或失败会异步通知。新动作默认会覆盖旧动作。"
         "明确要求去某坐标、主动挖掘或采集时应调用本工具，不要用 mc_switch_task 假装挖矿。"
         "按名称采集资源（例如挖石头、挖煤、砍木头）必须使用 selector；"
         "target_pos 仅限玩家明确给出或可信工具返回的方块坐标，禁止使用玩家/女仆坐标或猜测坐标。"
         "矿石优先使用 minecraft:*_ores 标签选择器；矿石 selector 默认 vein_mining=true 并尝试采完整矿脉。"
-        "纯矿石 selector 附近无目标时服务端默认执行有界 auto 探矿；显式 mining_plan.mode=nearby 可关闭。"
-        "主动探矿通常应把 timeout_ms 设为 120000，避免长矿道沿用普通动作的 60 秒默认超时。"
+        "纯矿石 selector 附近无目标时服务端默认执行持续 auto 探矿；显式 mining_plan.mode=nearby 可关闭。"
+        "矿石持续探矿会强制使用 timeout_ms=0（无常规截止时间），直到完成、急停或安全故障。"
         "普通 navigate 不会破坏地形；harvest_blocks 仍不会搭桥或垫方块，也不会强制加载未加载区块。"
     ),
     "parameters": {
@@ -219,18 +219,16 @@ MC_START_MAID_ACTION = {
                     "以 _ores 结尾或 block id 以 _ore 结尾时，省略 vein_mining 会默认 true、max_blocks 默认"
                     "64 且允许 1..64，按连通矿脉采集。vein_mining=false 时 max_blocks 默认 1、范围 1..8。"
                     "玩家明确说数量时设置对应 max_blocks；说只挖一块时设置 vein_mining=false,max_blocks=1。"
-                    "纯矿石 selector 附近无目标时默认有界 auto 探矿；显式 mode=nearby 可关闭。普通‘挖/找"
-                    "某种矿石’必须省略 mining_plan。只有玩家明确要求向前、向下、某种方案、持续若干段或"
-                    "具体数字时才传 mining_plan：{mode:nearby|forward_tunnel|staircase_down|auto,"
+                    "纯矿石 selector 附近无目标时默认持续 auto 探矿；显式 mode=nearby 可关闭。普通‘挖/找"
+                    "某种矿石’必须省略 mining_plan。只有玩家明确要求向前、向下或某种方案时才传"
+                    "mining_plan：{mode:nearby|forward_tunnel|staircase_down|auto,"
                     "direction:maid_facing|north|south|east|west,max_distance:1..16,max_depth:0..12,"
-                    "max_segments:1..4,excavation_budget:0..256}。非 nearby 模式只允许与 selector 搭配；forward_tunnel 的"
+                    "max_segments:1..4,excavation_budget:0..256}。max_segments/excavation_budget 是旧协议"
+                    "兼容字段，服务端不再用它们终止动作。非 nearby 模式只允许与 selector 搭配；forward_tunnel 的"
                     "max_depth 必须为 0；staircase_down 要求 max_distance>=max_depth，auto 要求"
-                    "max_distance>max_depth。显式 plan 默认 direction=maid_facing、max_distance=8、"
-                    "max_segments=1；staircase_down/auto 默认 max_depth=4，其余默认 0；max_segments>1 且"
-                    "未给 excavation_budget 时预算默认64，否则默认24。玩家没有给出具体数字时，禁止模型"
-                    "自行填写 max_distance/max_depth/max_segments/excavation_budget，必须省略对应字段并使用"
-                    "服务端默认。只有玩家明确要求持续寻找 max_segments=2..4 时才传对应字段。未传 mining_plan 时，纯矿石"
-                    "selector 默认有界 auto，其它资源保持仅搜索附近。harvest_blocks 可清理安全可破坏"
+                    "max_distance>max_depth。max_distance/max_depth 只定义每段矿道形状，段结束后会从女仆"
+                    "实际位置继续；不构成总上限。未传 mining_plan 时，纯矿石 selector 默认持续 auto，"
+                    "其它资源保持仅搜索附近。harvest_blocks 可清理安全可破坏"
                     "阻挡；navigate 始终非破坏性。两者都"
                     "不会搭桥或垫方块，也不会强制加载未加载区块"
                 ),
@@ -242,9 +240,9 @@ MC_START_MAID_ACTION = {
             },
             "timeout_ms": {
                 "type": "integer",
-                "minimum": 1000,
+                "minimum": 0,
                 "maximum": 120000,
-                "description": "服务端动作超时，默认 60000 毫秒",
+                "description": "0=无常规截止时间；矿石 selector 会强制使用0，其它动作默认60000",
             },
             "replace_existing": {
                 "type": "boolean",

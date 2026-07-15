@@ -35,7 +35,7 @@ public final class StartMaidActionHandler implements MessageHandlerInterface {
                 return result(requestId, false, "MAID_NOT_FOUND", null);
             }
             long timeout = data.has("timeout_ms") ? data.get("timeout_ms").getAsLong() : 60_000L;
-            if (timeout < 1_000L || timeout > 120_000L) {
+            if (timeout != 0L && (timeout < 1_000L || timeout > 120_000L)) {
                 return result(requestId, false, "INVALID_TIMEOUT_MS", null);
             }
             boolean replace = !data.has("replace_existing") || data.get("replace_existing").getAsBoolean();

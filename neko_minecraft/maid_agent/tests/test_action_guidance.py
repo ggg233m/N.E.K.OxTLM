@@ -45,7 +45,7 @@ class MaidActionGuidanceTests(unittest.TestCase):
             parameters["properties"]["kind"]["enum"],
         )
 
-    def test_guidance_exposes_bounded_mining_plans_and_emergency_stop(self):
+    def test_guidance_exposes_continuous_mining_plans_and_emergency_stop(self):
         tool_text = MC_START_MAID_ACTION["description"] + str(
             MC_START_MAID_ACTION["parameters"]
         )
@@ -58,17 +58,24 @@ class MaidActionGuidanceTests(unittest.TestCase):
         self.assertIn("附近没有目标", _TLM_AI_INSTRUCTIONS)
         self.assertIn("F8", _TLM_AI_INSTRUCTIONS)
         self.assertIn("mc_cancel_maid_action", _TLM_AI_INSTRUCTIONS)
+        self.assertIn("不再因总步数", _TLM_AI_INSTRUCTIONS)
+        self.assertIn("不再用它们终止动作", tool_text)
 
-    def test_guidance_does_not_let_model_invent_mining_budgets(self):
+    def test_guidance_marks_old_mining_limits_as_compatibility_only(self):
         tool_text = MC_START_MAID_ACTION["description"] + str(
             MC_START_MAID_ACTION["parameters"]
         )
         for text in (tool_text, _TLM_AI_INSTRUCTIONS):
             self.assertIn("省略 mining_plan", text)
-            self.assertIn("禁止", text)
             self.assertIn("max_segments", text)
-            self.assertIn("2..4", text)
+            self.assertIn("兼容", text)
             self.assertIn("256", text)
+
+    def test_guidance_requires_a_concrete_llm_recovery_plan(self):
+        self.assertIn("具体解决方案", _TLM_AI_INSTRUCTIONS)
+        self.assertIn("禁止只道歉", _TLM_AI_INSTRUCTIONS)
+        self.assertIn("立即调用", _TLM_AI_INSTRUCTIONS)
+        self.assertIn("禁止相同参数无限重试", _TLM_AI_INSTRUCTIONS)
 
     def test_guidance_prefers_ore_tags_and_whole_veins(self):
         tool_text = MC_START_MAID_ACTION["description"] + str(
@@ -81,7 +88,7 @@ class MaidActionGuidanceTests(unittest.TestCase):
             self.assertIn("64", text)
         self.assertIn("只挖一块", _TLM_AI_INSTRUCTIONS)
         self.assertIn("vein_mining=false", _TLM_AI_INSTRUCTIONS)
-        self.assertIn("timeout_ms=120000", _TLM_AI_INSTRUCTIONS)
+        self.assertIn("timeout_ms=0", _TLM_AI_INSTRUCTIONS)
         self.assertIn("120000", tool_text)
         self.assertIn("no_matching_block_found", _TLM_AI_INSTRUCTIONS)
         self.assertIn("不要自动重复", _TLM_AI_INSTRUCTIONS)

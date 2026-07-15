@@ -105,18 +105,19 @@ public final class HarvestBlocksAction implements MaidAction {
     private int plannerExpandedNodes;
     private int terrainReplans;
     private int consecutiveTerrainReplans;
-    private int routeBlocksCleared;
+    private long routeBlocksCleared;
     private PlanningPurpose planningPurpose = PlanningPurpose.HARVEST;
     private Direction prospectDirection;
     private BlockPos prospectGoal;
     private MiningPlan.StepMode prospectStepMode;
-    private int prospectSteps;
-    private int prospectDescentSteps;
-    private int segmentIndex;
+    private long prospectSteps;
+    private long prospectDescentSteps;
+    private long segmentIndex;
     private int segmentSteps;
     private int segmentDescentSteps;
-    private int prospectBlocksCleared;
-    private int prospectRescans;
+    private boolean prospectDescentBlocked;
+    private long prospectBlocksCleared;
+    private long prospectRescans;
     private BlockPos veinSeed;
     private String veinStopReason;
     private JsonObject lastNavigationFailureDetail;
@@ -394,13 +395,6 @@ public final class HarvestBlocksAction implements MaidAction {
                     : failure(ActionEndReason.PATH_NOT_FOUND,
                     "prospecting_distance_or_depth_budget_exhausted");
         }
-        if (prospectBlocksCleared >= miningPlan.excavationBudget()) {
-            return harvested > 0
-                    ? success(context)
-                    : failure(ActionEndReason.PATH_NOT_FOUND,
-                    "prospecting_excavation_budget_exhausted");
-        }
-
         // A prospecting route has no known ore state yet. Lease the best real
         // tool for ordinary stone so the terrain evaluator cannot promise a
         // tunnel that the held item is unable to clear safely.
@@ -411,11 +405,26 @@ public final class HarvestBlocksAction implements MaidAction {
         }
 
         BlockPos start = context.maid().blockPosition().immutable();
-        prospectStepMode = miningPlan.nextStepMode(
-                prospectDescentSteps, segmentDescentSteps);
-        prospectGoal = miningPlan.nextDestination(
-                start, prospectDirection, prospectDescentSteps,
-                segmentDescentSteps).immutable();
+        prospectStepMode = miningPlan.mode() == MiningPlan.Mode.AUTO
+                && prospectDescentBlocked
+                ? MiningPlan.StepMode.FORWARD
+                : miningPlan.nextStepMode(segmentDescentSteps);
+        BlockPos forward = start.relative(prospectDirection);
+        prospectGoal = (prospectStepMode == MiningPlan.StepMode.DESCEND
+                ? forward.below() : forward).immutable();
+        if (prospectStepMode == MiningPlan.StepMode.DESCEND
+                && prospectGoal.getY() <= context.level().getMinBuildHeight()) {
+            if (miningPlan.mode() == MiningPlan.Mode.AUTO) {
+                prospectDescentBlocked = true;
+                prospectStepMode = MiningPlan.StepMode.FORWARD;
+                prospectGoal = forward.immutable();
+            } else {
+                return harvested > 0
+                        ? success(context)
+                        : failure(ActionEndReason.PATH_NOT_FOUND,
+                        "world_bottom_reached");
+            }
+        }
         MaidTerrainWorldEvaluator evaluator = new MaidTerrainWorldEvaluator(
                 context.level(), context.maid(), start, 4, 4,
                 toolPolicy == ToolPolicy.REQUIRE_CORRECT,
@@ -537,6 +546,23 @@ public final class HarvestBlocksAction implements MaidAction {
         }
         if (status == MaidTerrainSearch.Status.FAILED) {
             unreachablePaths++;
+            if (planningPurpose == PlanningPurpose.PROSPECT
+                    && prospectStepMode == MiningPlan.StepMode.DESCEND
+                    && miningPlan.mode() == MiningPlan.Mode.AUTO
+                    && !prospectDescentBlocked) {
+                // Bedrock or an unsafe descent can occur above the formal
+                // build floor. AUTO keeps prospecting horizontally instead
+                // of treating the failed downward branch as terminal.
+                prospectDescentBlocked = true;
+                prospectGoal = null;
+                prospectStepMode = null;
+                resetTerrainPlan();
+                searchOrigin = context.maid().blockPosition().immutable();
+                candidates.clear();
+                searchPrepared = false;
+                stage = Stage.SEARCHING;
+                return MaidActionTickResult.running();
+            }
             MaidActionTickResult partial = finishLockedVeinPartial(
                     context, "remaining_vein_terrain_search_exhausted");
             if (partial != null) {
@@ -557,14 +583,6 @@ public final class HarvestBlocksAction implements MaidAction {
                 return failure(ActionEndReason.INTERNAL_ERROR,
                         "prospecting_search_returned_wrong_goal");
             }
-            int plannedExcavation = plannedNonTargetExcavation(context, terrainPath);
-            if (prospectBlocksCleared + plannedExcavation
-                    > miningPlan.excavationBudget()) {
-                return harvested > 0
-                        ? success(context)
-                        : failure(ActionEndReason.PATH_NOT_FOUND,
-                        "prospecting_excavation_budget_would_be_exceeded");
-            }
             terrainSearch = null;
             navigation = new MaidTerrainNavigator(
                     terrainPath, handLease, speed,
@@ -572,19 +590,6 @@ public final class HarvestBlocksAction implements MaidAction {
             navigation.start(context);
             report(context, Stage.PROSPECTING, overallProgress(), prospectGoal);
             return MaidActionTickResult.running();
-        }
-        if (miningPlan.enabled()) {
-            int plannedExcavation = plannedNonTargetExcavation(context, terrainPath);
-            if (prospectBlocksCleared + plannedExcavation
-                    > miningPlan.excavationBudget()) {
-                if (harvested > 0) {
-                    MaidActionTickResult partial = finishLockedVeinPartial(
-                            context, "target_route_excavation_budget_would_be_exceeded");
-                    return partial != null ? partial : success(context);
-                }
-                return failure(ActionEndReason.PATH_NOT_FOUND,
-                        "target_route_excavation_budget_would_be_exceeded");
-            }
         }
         currentStandPos = terrainPath.target();
         currentTarget = terrainGoalTargets.get(currentStandPos);
@@ -801,8 +806,8 @@ public final class HarvestBlocksAction implements MaidAction {
 
     /**
      * Rolls into another bounded prospecting segment from the maid's live
-     * position. Action-wide counters, leases, timeout and excavation budget
-     * deliberately remain untouched.
+     * position. Action-wide counters, leases and timeout deliberately remain
+     * untouched. Segment count is diagnostic only and never stops mining.
      */
     private MaidActionTickResult advanceProspectingSegment(MaidActionContext context) {
         if (!miningPlan.canAdvanceSegment(
@@ -817,7 +822,7 @@ public final class HarvestBlocksAction implements MaidAction {
             navigation = null;
         }
 
-        segmentIndex++;
+        segmentIndex = segmentIndex == Long.MAX_VALUE ? Long.MAX_VALUE : segmentIndex + 1L;
         segmentSteps = 0;
         segmentDescentSteps = 0;
         prospectGoal = null;
@@ -1088,14 +1093,6 @@ public final class HarvestBlocksAction implements MaidAction {
         return MaidActionTickResult.running();
     }
 
-    private int plannedNonTargetExcavation(MaidActionContext context, MaidTerrainPath path) {
-        return (int) path.steps().stream()
-                .flatMap(step -> step.toBreak().stream())
-                .distinct()
-                .filter(pos -> !isEligibleTarget(pos, context.level().getBlockState(pos)))
-                .count();
-    }
-
     private MaidActionTickResult success(MaidActionContext context) {
         report(context, Stage.VERIFYING, 1.0D, null);
         JsonObject result = new JsonObject();
@@ -1118,7 +1115,7 @@ public final class HarvestBlocksAction implements MaidAction {
         if (partial) {
             result.addProperty("message", veinMining
                     ? "connected_vein_partially_harvested"
-                    : "partial_harvest_completed_before_search_or_budget_limit");
+                    : "partial_harvest_completed_before_search_ended");
         }
         addSearchDiagnostics(result, "none");
         addVeinDiagnostics(result, veinRemaining, veinRejected, veinTruncated,
@@ -1202,8 +1199,24 @@ public final class HarvestBlocksAction implements MaidAction {
     private MaidActionTickResult failure(ActionEndReason reason, String message) {
         JsonObject result = new JsonObject();
         result.addProperty("message", message);
+        result.addProperty("diagnostic_code", message);
+        result.addProperty("decision_required", true);
+        result.addProperty("recoverability", recoverability(reason));
         addSearchDiagnostics(result, retryHint(reason));
         return MaidActionTickResult.failed(reason, result);
+    }
+
+    private static String recoverability(ActionEndReason reason) {
+        return switch (reason) {
+            case PATH_NOT_FOUND, STUCK, TARGET_CHANGED, VALIDATION_FAILED, TIMEOUT ->
+                    "llm_decision";
+            case TOOL_NOT_FOUND, HAND_CONFLICT -> "needs_resource";
+            case BLOCK_PROTECTED, USER_OVERRIDE, SAFETY_PREEMPTED ->
+                    "player_confirmation";
+            case ENTITY_UNLOADED, ENTITY_DEAD, SERVER_STATE_LOST, INTERNAL_ERROR ->
+                    "fatal";
+            case COMPLETED, REQUESTED, SUPERSEDED -> "none";
+        };
     }
 
     private void addSearchDiagnostics(JsonObject result, String retryHint) {
@@ -1245,16 +1258,19 @@ public final class HarvestBlocksAction implements MaidAction {
         result.addProperty("prospect_max_distance", miningPlan.maxDistance());
         result.addProperty("prospect_descent_steps", prospectDescentSteps);
         result.addProperty("prospect_max_depth", miningPlan.maxDepth());
-        result.addProperty("prospect_segment", segmentIndex + 1);
+        result.addProperty("prospect_segment",
+                segmentIndex == Long.MAX_VALUE ? Long.MAX_VALUE : segmentIndex + 1L);
+        result.addProperty("prospect_unbounded", miningPlan.enabled());
+        result.addProperty("prospect_limit_mode", "unbounded");
         result.addProperty("prospect_max_segments", miningPlan.maxSegments());
         result.addProperty("prospect_segment_steps", segmentSteps);
         result.addProperty("prospect_segment_descent_steps", segmentDescentSteps);
-        result.addProperty("prospect_total_step_limit", miningPlan.totalStepLimit());
-        result.addProperty("prospect_total_descent_limit", miningPlan.totalDescentLimit());
+        result.addProperty("prospect_total_step_limit", -1);
+        result.addProperty("prospect_total_descent_limit", -1);
         result.addProperty("prospect_blocks_cleared", prospectBlocksCleared);
-        result.addProperty("prospect_excavation_budget", miningPlan.excavationBudget());
-        result.addProperty("prospect_remaining_excavation_budget", Math.max(
-                0, miningPlan.excavationBudget() - prospectBlocksCleared));
+        result.addProperty("prospect_excavation_budget", -1);
+        result.addProperty("prospect_remaining_excavation_budget", -1);
+        result.addProperty("prospect_descent_blocked", prospectDescentBlocked);
         result.addProperty("prospect_rescans", prospectRescans);
     }
 

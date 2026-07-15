@@ -896,7 +896,7 @@ class NekoMinecraftPlugin(NekoPluginBase):
 
     @llm_tool(**MC_START_MAID_ACTION)
     async def mc_start_maid_action(self, *, kind="", args=None, action_id="",
-                                   timeout_ms=60000, replace_existing=True, **_):
+                                   timeout_ms=None, replace_existing=True, **_):
         return await _tools.do_start_maid_action(
             self,
             kind=kind,

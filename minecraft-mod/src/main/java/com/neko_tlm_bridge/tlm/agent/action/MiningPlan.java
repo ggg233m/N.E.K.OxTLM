@@ -26,8 +26,6 @@ public record MiningPlan(
     private static final int DEFAULT_EXCAVATION_BUDGET = 24;
     private static final int AUTOMATIC_EXCAVATION_BUDGET = 64;
     private static final int AUTOMATIC_MAX_SEGMENTS = 4;
-    private static final int TOTAL_STEP_HARD_LIMIT = 64;
-    private static final int TOTAL_DESCENT_HARD_LIMIT = 32;
 
     public MiningPlan {
         Objects.requireNonNull(mode, "mode");
@@ -127,51 +125,55 @@ public record MiningPlan(
                 : Direction.NORTH;
     }
 
-    /** Maximum number of prospecting steps across every segment. */
+    /**
+     * Compatibility diagnostic. Prospecting no longer has an action-wide
+     * step cap; cancellation, deadline and live-world safety remain the
+     * terminal boundaries.
+     */
     public int totalStepLimit() {
-        return Math.min(TOTAL_STEP_HARD_LIMIT, maxDistance * maxSegments);
+        return Integer.MAX_VALUE;
     }
 
-    /** Maximum number of descending steps across every segment. */
+    /** Compatibility diagnostic for the removed action-wide descent cap. */
     public int totalDescentLimit() {
-        return Math.min(TOTAL_DESCENT_HARD_LIMIT, maxDepth * maxSegments);
+        return Integer.MAX_VALUE;
     }
 
     /**
      * Returns whether the current segment may execute one more step while
-     * respecting both its soft limits and the action-wide hard limits.
+     * respecting the shape of the current segment. Segment exhaustion rolls
+     * into another segment instead of terminating the action.
      */
-    public boolean hasNextStep(int totalSteps, int totalDescent,
+    public boolean hasNextStep(long totalSteps, long totalDescent,
                                int segmentSteps, int segmentDescent) {
-        if (!enabled() || totalSteps >= totalStepLimit()
-                || segmentSteps >= maxDistance) {
+        if (!enabled() || segmentSteps >= maxDistance) {
             return false;
         }
-        if (nextStepMode(totalDescent, segmentDescent) != StepMode.DESCEND) {
+        if (nextStepMode(segmentDescent) != StepMode.DESCEND) {
             return true;
         }
-        return totalDescent < totalDescentLimit() && segmentDescent < maxDepth;
+        return segmentDescent < maxDepth;
     }
 
     /**
      * Backwards-compatible single-segment query. Multi-segment executors
      * should use the four-counter overload and {@link #canAdvanceSegment}.
      */
-    public boolean hasNextStep(int completedSteps, int descentSteps) {
-        return hasNextStep(completedSteps, descentSteps, completedSteps, descentSteps);
+    public boolean hasNextStep(long completedSteps, long descentSteps) {
+        int segmentSteps = (int) Math.max(0L,
+                Math.min((long) Integer.MAX_VALUE, completedSteps));
+        int segmentDescent = (int) Math.max(0L,
+                Math.min((long) Integer.MAX_VALUE, descentSteps));
+        return hasNextStep(completedSteps, descentSteps, segmentSteps, segmentDescent);
     }
 
     /**
-     * Returns whether a zero-based current segment may roll over to the next
-     * one without exceeding the action-wide step or descent hard limits.
+     * Segment count is retained in the wire contract for compatibility, but
+     * no longer terminates prospecting. Enabled plans always roll over from
+     * the maid's live position.
      */
-    public boolean canAdvanceSegment(int segmentIndex, int totalSteps, int totalDescent) {
-        if (!enabled() || segmentIndex < 0 || segmentIndex + 1 >= maxSegments
-                || totalSteps >= totalStepLimit()) {
-            return false;
-        }
-        return mode != Mode.STAIRCASE_DOWN
-                || totalDescent < totalDescentLimit();
+    public boolean canAdvanceSegment(long segmentIndex, long totalSteps, long totalDescent) {
+        return enabled() && segmentIndex >= 0;
     }
 
     public StepMode nextStepMode(int segmentDescentSteps) {
@@ -179,17 +181,15 @@ public record MiningPlan(
     }
 
     /**
-     * Resolves the next mode with both segment and action-wide descent
-     * limits. AUTO becomes a forward tunnel after the total descent limit;
-     * it does not terminate while safe horizontal steps remain.
+     * Compatibility overload. Total descent no longer caps the action;
+     * AUTO repeats its descend-then-forward pattern for each segment.
      */
     public StepMode nextStepMode(int totalDescentSteps, int segmentDescentSteps) {
         return switch (mode) {
             case NEARBY -> throw new IllegalStateException("nearby mode has no prospecting step");
             case FORWARD_TUNNEL -> StepMode.FORWARD;
             case STAIRCASE_DOWN -> StepMode.DESCEND;
-            case AUTO -> totalDescentSteps >= totalDescentLimit()
-                    || segmentDescentSteps >= maxDepth
+            case AUTO -> segmentDescentSteps >= maxDepth
                     ? StepMode.FORWARD : StepMode.DESCEND;
         };
     }

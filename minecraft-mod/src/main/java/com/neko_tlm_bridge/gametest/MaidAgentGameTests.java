@@ -293,7 +293,7 @@ public final class MaidAgentGameTests {
         UUID actionId = UUID.randomUUID();
         JsonObject args = selectorHarvestArgs("block", "minecraft:coal_ore", 1);
         args.add("mining_plan", miningPlan(
-                "forward_tunnel", "east", 8, 0, 24, 2));
+                "forward_tunnel", "east", 8, 0, 24, 1));
 
         helper.runAfterDelay(5, () -> {
             MaidActionStore.StartResult start = MaidActionStore.getInstance().start(
@@ -310,8 +310,8 @@ public final class MaidAgentGameTests {
                     "ore must only become visible after ten completed prospecting steps");
             helper.assertTrue(result.get("prospect_segment").getAsInt() == 2,
                     "terminal diagnostics should report the second prospecting segment");
-            helper.assertTrue(result.get("prospect_max_segments").getAsInt() == 2,
-                    "terminal diagnostics should preserve the configured segment count");
+            helper.assertTrue(result.get("prospect_unbounded").getAsBoolean(),
+                    "legacy one-segment limit must not terminate continuous prospecting");
             helper.assertTrue(helper.getBlockState(ore).isAir(),
                     "coal beyond the first eight-step segment should be harvested");
         });
@@ -390,12 +390,14 @@ public final class MaidAgentGameTests {
     }
 
     @GameTest(template = "maid_agent_test", timeoutTicks = 300)
-    public static void prospectingBudgetRejectsWholeStepWithoutPartialBreak(GameTestHelper helper) {
+    public static void legacyExcavationBudgetDoesNotStopProspecting(GameTestHelper helper) {
         prepareFloorArea(helper, 0, 4, 0, 4, Blocks.STONE);
         BlockPos feet = new BlockPos(2, 1, 2);
         BlockPos head = feet.above();
+        BlockPos ore = new BlockPos(3, 1, 2);
         helper.setBlock(feet, Blocks.STONE);
         helper.setBlock(head, Blocks.STONE);
+        helper.setBlock(ore, Blocks.COAL_ORE);
         EntityMaid maid = helper.spawn(InitEntities.MAID.get(), new BlockPos(1, 1, 2));
         maid.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(Items.IRON_PICKAXE));
         UUID actionId = UUID.randomUUID();
@@ -406,16 +408,21 @@ public final class MaidAgentGameTests {
         helper.runAfterDelay(5, () -> {
             MaidActionStore.StartResult start = MaidActionStore.getInstance().start(
                     actionId, maid, MaidActionKind.HARVEST_BLOCKS, args, 10_000L, true);
-            helper.assertTrue(start.accepted(), "budget boundary action should be accepted");
+            helper.assertTrue(start.accepted(), "legacy budget action should be accepted");
         });
         helper.succeedWhen(() -> {
             JsonObject status = MaidActionStore.getInstance().getStatus(actionId).orElseThrow();
-            helper.assertTrue("FAILED".equals(status.get("status").getAsString()),
-                    "two-block step must fail against a one-block excavation budget, current=" + status);
-            helper.assertTrue(helper.getBlockState(feet).is(Blocks.STONE),
-                    "feet block must not be partially cleared before budget rejection");
-            helper.assertTrue(helper.getBlockState(head).is(Blocks.STONE),
-                    "head block must not be partially cleared before budget rejection");
+            helper.assertTrue("SUCCEEDED".equals(status.get("status").getAsString()),
+                    "legacy one-block budget must not stop a two-block tunnel step, current=" + status);
+            helper.assertTrue(helper.getBlockState(feet).isAir(),
+                    "feet clearance should be excavated without a total block cap");
+            helper.assertTrue(helper.getBlockState(head).isAir(),
+                    "head clearance should be excavated without a total block cap");
+            helper.assertTrue(helper.getBlockState(ore).isAir(),
+                    "target beyond the former excavation budget should be harvested");
+            JsonObject result = status.getAsJsonObject("result");
+            helper.assertTrue(result.get("prospect_excavation_budget").getAsInt() == -1,
+                    "terminal diagnostics should report unbounded excavation");
         });
     }
 
@@ -446,8 +453,8 @@ public final class MaidAgentGameTests {
         args.addProperty("speed", 0.7D);
         helper.runAfterDelay(5, () -> {
             MaidActionStore.StartResult start = MaidActionStore.getInstance().start(
-                    actionId, maid, MaidActionKind.HARVEST_BLOCKS, args, 20_000L, true);
-            helper.assertTrue(start.accepted(), "long harvest action should be accepted");
+                    actionId, maid, MaidActionKind.HARVEST_BLOCKS, args, 0L, true);
+            helper.assertTrue(start.accepted(), "no-deadline harvest action should be accepted");
             // SchedulePos.tick runs every 40 entity ticks. Force the very next
             // tick onto that boundary while the Agent lease is live.
             maid.tickCount = 39;

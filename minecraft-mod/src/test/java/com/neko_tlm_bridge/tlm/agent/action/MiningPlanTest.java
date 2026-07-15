@@ -30,8 +30,8 @@ class MiningPlanTest {
         assertEquals(4, plan.maxDepth());
         assertEquals(64, plan.excavationBudget());
         assertEquals(4, plan.maxSegments());
-        assertEquals(32, plan.totalStepLimit());
-        assertEquals(16, plan.totalDescentLimit());
+        assertEquals(Integer.MAX_VALUE, plan.totalStepLimit());
+        assertEquals(Integer.MAX_VALUE, plan.totalDescentLimit());
     }
 
     @Test
@@ -73,32 +73,33 @@ class MiningPlanTest {
     }
 
     @Test
-    void multiSegmentPlanRollsOverWithoutResettingActionHardLimits() {
+    void segmentShapeRollsOverWithoutTerminatingTheAction() {
         JsonObject args = argsWithPlan("auto", "east", 8, 4, 64);
         args.getAsJsonObject("mining_plan").addProperty("max_segments", 2);
         MiningPlan plan = MiningPlan.fromArgs(args, true);
 
         assertEquals(2, plan.maxSegments());
-        assertEquals(16, plan.totalStepLimit());
-        assertEquals(8, plan.totalDescentLimit());
+        assertEquals(Integer.MAX_VALUE, plan.totalStepLimit());
+        assertEquals(Integer.MAX_VALUE, plan.totalDescentLimit());
         assertFalse(plan.hasNextStep(8, 4, 8, 4));
         assertTrue(plan.canAdvanceSegment(0, 8, 4));
         assertTrue(plan.hasNextStep(8, 4, 0, 0));
-        assertFalse(plan.canAdvanceSegment(1, 16, 8));
+        assertTrue(plan.canAdvanceSegment(1, 16, 8));
+        assertTrue(plan.canAdvanceSegment(100, 808, 404));
     }
 
     @Test
-    void autoContinuesForwardAfterActionWideDescentLimit() {
+    void autoRepeatsItsDescendThenForwardShapeForEverySegment() {
         JsonObject args = argsWithPlan("auto", "east", 16, 12, 128);
         args.getAsJsonObject("mining_plan").addProperty("max_segments", 4);
         MiningPlan plan = MiningPlan.fromArgs(args, true);
 
-        assertEquals(32, plan.totalDescentLimit());
-        assertEquals(MiningPlan.StepMode.FORWARD,
+        assertEquals(Integer.MAX_VALUE, plan.totalDescentLimit());
+        assertEquals(MiningPlan.StepMode.DESCEND,
                 plan.nextStepMode(32, 0));
         assertTrue(plan.hasNextStep(40, 32, 0, 0));
         assertTrue(plan.canAdvanceSegment(2, 40, 32));
-        assertEquals(new BlockPos(1, -55, 0), plan.nextDestination(
+        assertEquals(new BlockPos(1, -56, 0), plan.nextDestination(
                 new BlockPos(0, -55, 0), Direction.EAST, 32, 0));
     }
 

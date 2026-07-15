@@ -112,8 +112,13 @@ public final class MaidActionStore {
 
         long generation = generationsByMaid.merge(maid.getUUID(), 1L, Long::sum);
         long started = maid.level().getGameTime();
-        long clampedTimeout = Math.max(MIN_TIMEOUT_MS, Math.min(MAX_TIMEOUT_MS, timeoutMs));
-        long deadline = started + Math.max(1L, (clampedTimeout + 49L) / 50L);
+        long deadline;
+        if (timeoutMs == 0L) {
+            deadline = Long.MAX_VALUE;
+        } else {
+            long clampedTimeout = Math.max(MIN_TIMEOUT_MS, Math.min(MAX_TIMEOUT_MS, timeoutMs));
+            deadline = started + Math.max(1L, (clampedTimeout + 49L) / 50L);
+        }
         MaidBodyLease lease;
         try {
             lease = MaidBodyLease.acquire(maid, actionId, generation,

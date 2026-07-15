@@ -169,9 +169,9 @@ class MaidActionServiceTests(unittest.IsolatedAsyncioTestCase):
         })
 
         text = plugin.pushes[-1][0]
-        self.assertIn("安全上限", text)
         self.assertIn("不表示资源 selector 错误", text)
-        self.assertIn("玩家明确授权", text)
+        self.assertIn("旧版服务端", text)
+        self.assertIn("必须给出一个具体方案", text)
         self.assertNotIn("minecraft:*_ores", text)
         self.assertNotIn("Refresh the target or retry", text)
 
@@ -215,7 +215,9 @@ class MaidActionServiceTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("开凿预算=64", text)
                 self.assertIn("剩余开凿预算=0", text)
                 self.assertIn("不表示资源 selector 错误", text)
-                self.assertIn("只有玩家明确授权", text)
+                self.assertIn("当前实现已取消这些总量上限", text)
+                self.assertIn("结构化诊断", text)
+                self.assertIn("立即调用工具执行一次不同的恢复方案", text)
                 self.assertNotIn("Increase search_radius or retry", text)
                 self.assertNotIn("minecraft:*_ores", text)
 
@@ -240,6 +242,29 @@ class MaidActionServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("不要改变 selector", text)
         self.assertNotIn("broader selector", text)
 
+    async def test_repeated_complex_failure_forbids_equivalent_auto_retry(self):
+        plugin = FakePlugin()
+        service = MaidActionService(plugin)
+        for sequence, action_id in enumerate(("blocked-1", "blocked-2"), start=30):
+            await service.handle_message({
+                "type": "maid_action_finished",
+                "data": {
+                    "action_id": action_id, "maid_id": "maid",
+                    "generation": 1, "sequence": sequence,
+                    "kind": "harvest_blocks", "status": "FAILED",
+                    "stage": "FAILED", "end_reason": "PATH_NOT_FOUND",
+                    "result": {
+                        "message": "no_safe_prospecting_step_found",
+                        "recoverability": "llm_decision",
+                    },
+                },
+            })
+
+        text = plugin.pushes[-1][0]
+        self.assertIn("连续第2次出现", text)
+        self.assertIn("禁止再次自动提交相同或等价参数", text)
+        self.assertIn("必须改用不同方案", text)
+
     async def test_decision_required_uses_respond(self):
         plugin = FakePlugin()
         service = MaidActionService(plugin)
@@ -252,6 +277,8 @@ class MaidActionServiceTests(unittest.IsolatedAsyncioTestCase):
             },
         })
         self.assertEqual("respond", plugin.pushes[0][1]["ai_behavior"])
+        self.assertIn("必须基于服务端事实给出", plugin.pushes[0][0])
+        self.assertIn("立即调用相应工具执行", plugin.pushes[0][0])
 
     async def test_reconcile_adopts_server_action_and_marks_missing_local_lost(self):
         plugin = FakePlugin(responses=[
