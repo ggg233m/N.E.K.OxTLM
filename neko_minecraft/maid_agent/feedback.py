@@ -159,7 +159,14 @@ class ActionFeedbackHandler:
             "maid_is_no_longer_at_terrain_step_origin",
             "terrain_origin_drift_replan_exhausted",
         }
-        if retry_hint and not selector_missing and not prospect_safety_limit and not path_origin_drift:
+        local_navigation_edge = message in {
+            "native_navigation_cannot_reach_terrain_step",
+            "native_navigation_rejected_terrain_step",
+            "native_navigation_finished_before_terrain_step",
+            "controlled_descend_made_no_progress",
+        }
+        if retry_hint and not selector_missing and not prospect_safety_limit \
+                and not path_origin_drift and not local_navigation_edge:
             text += f" 重试提示：{retry_hint}。"
         if message == "target_chunk_not_loaded":
             text += (
@@ -201,6 +208,25 @@ class ActionFeedbackHandler:
                 " 这是路径执行位置偏移，不是矿石 selector 或目标方块选择错误；服务端已经耗尽"
                 "本次有界重规划。不要改变 selector 或自动原样重试，可让玩家确认女仆没有被推挤后再决定。"
             )
+        if local_navigation_edge:
+            mining_plan = record.result.get("mining_plan") \
+                if isinstance(record.result, dict) else None
+            selector = record.result.get("selector") \
+                if isinstance(record.result, dict) else None
+            text += " 自定义地形路线已经找到，但当前局部移动边无法执行；这不是扫描范围问题。"
+            if mining_plan and mining_plan != "nearby":
+                text += (
+                    "不要增大 search_radius 或原样重试；持续探矿应根据实时位置改选安全开掘方向。"
+                )
+            elif isinstance(selector, str) and selector.startswith("position:"):
+                text += (
+                    "保留玩家指定方块，不要换目标；应先安全重定位女仆，或说明局部清障方案并在需要时请求确认。"
+                )
+            else:
+                text += (
+                    "服务端已耗尽本轮可执行候选路线；不要增大 search_radius 或原样重试，"
+                    "应选择其他附近目标或提出不同的安全清障方案。"
+                )
         if record.status not in {"SUCCEEDED", "CANCELLED", "SUPERSEDED"}:
             if isinstance(record.result, dict) and record.result:
                 safe_result = {

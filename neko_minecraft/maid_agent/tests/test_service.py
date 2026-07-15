@@ -242,6 +242,39 @@ class MaidActionServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("不要改变 selector", text)
         self.assertNotIn("broader selector", text)
 
+    async def test_local_navigation_edge_feedback_requires_a_different_route(self):
+        messages = (
+            "native_navigation_cannot_reach_terrain_step",
+            "native_navigation_rejected_terrain_step",
+            "native_navigation_finished_before_terrain_step",
+            "controlled_descend_made_no_progress",
+        )
+        for sequence, message in enumerate(messages, start=13):
+            with self.subTest(message=message):
+                plugin = FakePlugin()
+                service = MaidActionService(plugin)
+                await service.handle_message({
+                    "type": "maid_action_finished",
+                    "data": {
+                        "action_id": f"local-edge-{sequence}", "maid_id": "maid",
+                        "generation": 1, "sequence": sequence,
+                        "kind": "harvest_blocks", "status": "FAILED",
+                        "stage": "FAILED", "end_reason": "PATH_NOT_FOUND",
+                        "result": {
+                            "message": message,
+                            "mining_plan": "auto",
+                            "selector": "tag:#minecraft:diamond_ores",
+                            "retry_hint": "Move closer or increase search_radius",
+                        },
+                    },
+                })
+
+                text = plugin.pushes[-1][0]
+                self.assertIn("局部移动边无法执行", text)
+                self.assertIn("改选安全开掘方向", text)
+                self.assertIn("必须给出一个具体方案", text)
+                self.assertNotIn("Move closer or increase search_radius", text)
+
     async def test_repeated_complex_failure_forbids_equivalent_auto_retry(self):
         plugin = FakePlugin()
         service = MaidActionService(plugin)

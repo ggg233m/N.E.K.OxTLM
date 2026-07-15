@@ -7,9 +7,9 @@ import com.neko_tlm_bridge.tlm.agent.ActionEndReason;
 import com.neko_tlm_bridge.tlm.agent.MaidActionContext;
 import com.neko_tlm_bridge.tlm.agent.path.MaidTerrainPath;
 import com.neko_tlm_bridge.tlm.agent.path.MaidTerrainStep;
+import com.neko_tlm_bridge.tlm.agent.path.MaidTerrainWorldEvaluator;
 import com.neko_tlm_bridge.tlm.agent.runtime.HandLease;
 import net.minecraft.core.BlockPos;
-import net.minecraft.core.Direction;
 import net.minecraft.world.entity.ai.behavior.BlockPosTracker;
 import net.minecraft.world.entity.ai.memory.MemoryModuleType;
 import net.minecraft.world.level.block.state.BlockState;
@@ -38,6 +38,9 @@ public final class MaidTerrainNavigator {
     private static final long STUCK_WINDOW_TICKS = 40L;
     private static final double REQUIRED_STEP_PROGRESS = 0.25D;
     private static final long ARRIVAL_SETTLE_TIMEOUT_TICKS = 40L;
+    private static final double MIN_CONTROLLED_DESCEND_SPEED = 0.10D;
+    private static final double MAX_CONTROLLED_DESCEND_SPEED = 0.18D;
+    private static final double DESCEND_CENTER_TOLERANCE = 0.12D;
 
     private final MaidTerrainPath terrainPath;
     private final HandLease handLease;
@@ -147,6 +150,7 @@ public final class MaidTerrainNavigator {
             breaker = null;
         }
         stopNativeNavigation(context);
+        stopHorizontalMovement(context);
         MaidPathDebugService.clear(context.maid().getUUID());
         terminal = true;
         phase = "stopped";
@@ -260,7 +264,10 @@ public final class MaidTerrainNavigator {
         // travel, so the logical path could run ahead into an uncleared wall.
         // Completing only after the entity really occupies the destination
         // also verifies the correct elevation for ascend/descend steps.
-        if (context.maid().blockPosition().equals(step.to())) {
+        if (context.maid().blockPosition().equals(step.to())
+                && (step.kind() != MaidTerrainStep.Kind.DESCEND
+                || horizontalDistance(context.maid(), step.to())
+                <= DESCEND_CENTER_TOLERANCE)) {
             TickResult settling = settleAtDestination(context, step);
             if (settling != null) {
                 return settling;
@@ -272,11 +279,14 @@ public final class MaidTerrainNavigator {
             return running(stepDetail(step));
         }
 
-        // Vanilla/TLM ground path finding has no same-X/Z vertical edge. Once
-        // DIG_DOWN removes the support block, let normal gravity perform this
-        // one-cell descent instead of treating createPath(null) as a replan.
+        // TLM/vanilla path finding does not reliably expose either vertical
+        // or diagonal-down adjacent edges. Execute those two terrain edges
+        // directly while leaving all vertical motion to normal gravity.
         if (step.kind() == MaidTerrainStep.Kind.DIG_DOWN) {
             return descendByGravity(context, step, distance);
+        }
+        if (step.kind() == MaidTerrainStep.Kind.DESCEND) {
+            return descendDiagonallyControlled(context, step, distance);
         }
 
         if (!movementStarted) {
@@ -388,6 +398,115 @@ public final class MaidTerrainNavigator {
         return running(detail);
     }
 
+    /**
+     * Walks off a one-block ledge without asking native navigation to create
+     * a path for an edge it commonly rejects. Only X/Z velocity is controlled;
+     * gravity and collision remain authoritative for the one-block fall.
+     */
+    private TickResult descendDiagonallyControlled(
+            MaidActionContext context, MaidTerrainStep step, double distance) {
+        if (!isControlledDescendGeometry(step)) {
+            return fail(context, ActionEndReason.INTERNAL_ERROR,
+                    "invalid_controlled_descend_geometry", false);
+        }
+        BlockPos live = context.maid().blockPosition();
+        if (sameHorizontalColumn(live, step.from())) {
+            if (live.getY() != step.from().getY()) {
+                return fail(context, ActionEndReason.STUCK,
+                        live.getY() < step.from().getY()
+                                ? "maid_fell_below_controlled_descend_origin"
+                                : "maid_moved_above_controlled_descend_origin",
+                        true);
+            }
+            BlockPos sourceSupportPos = step.from().below();
+            if (!isLoadedBuildPosition(context, sourceSupportPos)
+                    || !MaidTerrainWorldEvaluator.isSafeStandSupport(
+                    context.level(), sourceSupportPos,
+                    context.level().getBlockState(sourceSupportPos))) {
+                return fail(context, ActionEndReason.TARGET_CHANGED,
+                        "controlled_descend_origin_support_changed", true);
+            }
+        }
+        if (!isControlledDescendPosition(step, live)) {
+            return fail(context, ActionEndReason.STUCK,
+                    live.getY() < step.to().getY()
+                            ? "maid_fell_below_controlled_descend_destination"
+                            : "maid_left_controlled_descend_columns",
+                    true);
+        }
+
+        phase = "descending_diagonally";
+        if (!movementStarted) {
+            if (!live.equals(step.from()) || !context.maid().onGround()) {
+                return fail(context, ActionEndReason.STUCK,
+                        "maid_not_grounded_at_controlled_descend_origin", true);
+            }
+            stopNativeNavigation(context);
+            movementStarted = true;
+            movementStartDistance = distance;
+            windowStartDistance = distance;
+            windowStartedAt = context.gameTime();
+        } else {
+            context.maid().getNavigation().stop();
+        }
+
+        Vec3 target = Vec3.atBottomCenterOf(step.to());
+        double dx = target.x - context.maid().getX();
+        double dz = target.z - context.maid().getZ();
+        double horizontalDistance = Math.sqrt(dx * dx + dz * dz);
+        Vec3 velocity = context.maid().getDeltaMovement();
+        if (horizontalDistance <= DESCEND_CENTER_TOLERANCE) {
+            context.maid().setDeltaMovement(0.0D, velocity.y, 0.0D);
+        } else {
+            double controlledSpeed = Math.max(MIN_CONTROLLED_DESCEND_SPEED,
+                    Math.min(MAX_CONTROLLED_DESCEND_SPEED, 0.08D + speed * 0.10D));
+            double horizontalSpeed = Math.min(controlledSpeed, horizontalDistance);
+            context.maid().setDeltaMovement(
+                    dx / horizontalDistance * horizontalSpeed,
+                    velocity.y,
+                    dz / horizontalDistance * horizontalSpeed);
+        }
+        context.maid().getBrain().setMemory(MemoryModuleType.LOOK_TARGET,
+                new BlockPosTracker(step.to()));
+
+        if (context.gameTime() - windowStartedAt >= STUCK_WINDOW_TICKS) {
+            if (windowStartDistance - distance < REQUIRED_STEP_PROGRESS) {
+                return fail(context, ActionEndReason.STUCK,
+                        "controlled_descend_made_no_progress", true);
+            }
+            windowStartDistance = distance;
+            windowStartedAt = context.gameTime();
+        }
+        JsonObject detail = stepDetail(step);
+        detail.addProperty("movement_controller", "controlled_descend");
+        detail.addProperty("distance", distance);
+        detail.addProperty("horizontal_distance", horizontalDistance);
+        detail.addProperty("step_progress", progress(distance));
+        return running(detail);
+    }
+
+    static boolean isControlledDescendGeometry(MaidTerrainStep step) {
+        int dx = Math.abs(step.to().getX() - step.from().getX());
+        int dy = step.to().getY() - step.from().getY();
+        int dz = Math.abs(step.to().getZ() - step.from().getZ());
+        return step.kind() == MaidTerrainStep.Kind.DESCEND
+                && dy == -1
+                && dx + dz == 1;
+    }
+
+    private static boolean isControlledDescendPosition(MaidTerrainStep step, BlockPos live) {
+        if (live.getY() < step.to().getY() || live.getY() > step.from().getY()) {
+            return false;
+        }
+        boolean inFromColumn = sameHorizontalColumn(live, step.from());
+        boolean inToColumn = sameHorizontalColumn(live, step.to());
+        return inFromColumn || inToColumn;
+    }
+
+    private static boolean sameHorizontalColumn(BlockPos first, BlockPos second) {
+        return first.getX() == second.getX() && first.getZ() == second.getZ();
+    }
+
     private void completeStep(MaidActionContext context) {
         context.maid().getNavigation().stop();
         context.maid().setDeltaMovement(Vec3.ZERO);
@@ -419,6 +538,7 @@ public final class MaidTerrainNavigator {
             breaker = null;
         }
         stopNativeNavigation(context);
+        stopHorizontalMovement(context);
         MaidPathDebugService.clear(context.maid().getUUID());
         terminal = true;
         phase = "failed";
@@ -483,6 +603,11 @@ public final class MaidTerrainNavigator {
         context.maid().getBrain().eraseMemory(MemoryModuleType.WALK_TARGET);
     }
 
+    private static void stopHorizontalMovement(MaidActionContext context) {
+        Vec3 velocity = context.maid().getDeltaMovement();
+        context.maid().setDeltaMovement(0.0D, velocity.y, 0.0D);
+    }
+
     private static Path createDebugPath(MaidTerrainPath path) {
         if (path.steps().isEmpty()) {
             return null;
@@ -511,7 +636,8 @@ public final class MaidTerrainNavigator {
                 && head.getCollisionShape(context.level(), destination.above()).isEmpty()
                 && feet.getFluidState().isEmpty()
                 && head.getFluidState().isEmpty()
-                && support.isFaceSturdy(context.level(), supportPos, Direction.UP);
+                && MaidTerrainWorldEvaluator.isSafeStandSupport(
+                context.level(), supportPos, support);
     }
 
     private static boolean isStepClearanceOpen(MaidActionContext context, MaidTerrainStep step) {
@@ -544,6 +670,13 @@ public final class MaidTerrainNavigator {
 
     private static double distance(EntityMaid maid, BlockPos pos) {
         return maid.position().distanceTo(Vec3.atBottomCenterOf(pos));
+    }
+
+    private static double horizontalDistance(EntityMaid maid, BlockPos pos) {
+        Vec3 target = Vec3.atBottomCenterOf(pos);
+        double dx = target.x - maid.getX();
+        double dz = target.z - maid.getZ();
+        return Math.sqrt(dx * dx + dz * dz);
     }
 
     private static void addPosition(JsonObject detail, String prefix, BlockPos pos) {

@@ -103,7 +103,7 @@ public final class HarvestBlocksAction implements MaidAction {
     private int nullPaths;
     private int unreachablePaths;
     private int plannerExpandedNodes;
-    private int terrainReplans;
+    private long terrainReplans;
     private int consecutiveTerrainReplans;
     private long routeBlocksCleared;
     private PlanningPurpose planningPurpose = PlanningPurpose.HARVEST;
@@ -116,8 +116,12 @@ public final class HarvestBlocksAction implements MaidAction {
     private int segmentSteps;
     private int segmentDescentSteps;
     private boolean prospectDescentBlocked;
+    private boolean prospectWorldBottomReached;
     private long prospectBlocksCleared;
     private long prospectRescans;
+    private String lastProspectFallbackReason;
+    private String lastProspectFallbackDirection;
+    private long prospectFallbacks;
     private BlockPos veinSeed;
     private String veinStopReason;
     private JsonObject lastNavigationFailureDetail;
@@ -415,7 +419,9 @@ public final class HarvestBlocksAction implements MaidAction {
         if (prospectStepMode == MiningPlan.StepMode.DESCEND
                 && prospectGoal.getY() <= context.level().getMinBuildHeight()) {
             if (miningPlan.mode() == MiningPlan.Mode.AUTO) {
+                prospectWorldBottomReached = true;
                 prospectDescentBlocked = true;
+                recordProspectFallback("world_bottom_reached", false);
                 prospectStepMode = MiningPlan.StepMode.FORWARD;
                 prospectGoal = forward.immutable();
             } else {
@@ -554,6 +560,7 @@ public final class HarvestBlocksAction implements MaidAction {
                 // build floor. AUTO keeps prospecting horizontally instead
                 // of treating the failed downward branch as terminal.
                 prospectDescentBlocked = true;
+                recordProspectFallback("no_safe_descend_step_found", false);
                 prospectGoal = null;
                 prospectStepMode = null;
                 resetTerrainPlan();
@@ -769,6 +776,9 @@ public final class HarvestBlocksAction implements MaidAction {
                 consecutiveTerrainReplans++;
                 return restartProspectingFromActualPosition(context);
             }
+            if (canFallbackFromAutoDescent(context, result, message)) {
+                return fallbackFromAutoDescent(context, message);
+            }
             if ("maid_is_no_longer_at_terrain_step_origin".equals(message)) {
                 return failure(ActionEndReason.STUCK,
                         "terrain_origin_drift_replan_exhausted");
@@ -804,6 +814,59 @@ public final class HarvestBlocksAction implements MaidAction {
         return MaidActionTickResult.running();
     }
 
+    private boolean canFallbackFromAutoDescent(
+            MaidActionContext context,
+            MaidTerrainNavigator.TickResult result,
+            String message) {
+        return miningPlan.mode() == MiningPlan.Mode.AUTO
+                && miningPlan.heading() == MiningPlan.Heading.MAID_FACING
+                && prospectStepMode == MiningPlan.StepMode.DESCEND
+                && result.reason() == ActionEndReason.STUCK
+                && "controlled_descend_made_no_progress".equals(message)
+                && context.maid().onGround()
+                && result.detail().has("actual_x")
+                && result.detail().has("actual_y")
+                && result.detail().has("actual_z")
+                && result.detail().has("from_x")
+                && result.detail().has("from_y")
+                && result.detail().has("from_z")
+                && result.detail().get("actual_x").getAsInt()
+                == result.detail().get("from_x").getAsInt()
+                && result.detail().get("actual_y").getAsInt()
+                == result.detail().get("from_y").getAsInt()
+                && result.detail().get("actual_z").getAsInt()
+                == result.detail().get("from_z").getAsInt();
+    }
+
+    /**
+     * AUTO may continue on a new horizontal branch only after bounded attempts
+     * to execute a safe descent have failed. Rotate away from the cleared
+     * staircase column: its support may already have been removed while the
+     * terrain step was prepared, so walking straight ahead would be unsafe.
+     */
+    private MaidActionTickResult fallbackFromAutoDescent(
+            MaidActionContext context, String message) {
+        Direction previous = prospectDirection;
+        prospectDirection = prospectDirection.getClockWise();
+        prospectDescentBlocked = true;
+        recordProspectFallback(message, true, previous);
+        consecutiveTerrainReplans = 0;
+        return restartProspectingFromActualPosition(context);
+    }
+
+    private void recordProspectFallback(String reason, boolean directionChanged) {
+        recordProspectFallback(reason, directionChanged, prospectDirection);
+    }
+
+    private void recordProspectFallback(
+            String reason, boolean directionChanged, Direction previousDirection) {
+        lastProspectFallbackReason = reason;
+        Direction previous = previousDirection == null ? prospectDirection : previousDirection;
+        Direction current = directionChanged ? prospectDirection : previous;
+        lastProspectFallbackDirection = previous.getName() + "->" + current.getName();
+        prospectFallbacks++;
+    }
+
     /**
      * Rolls into another bounded prospecting segment from the maid's live
      * position. Action-wide counters, leases and timeout deliberately remain
@@ -825,6 +888,7 @@ public final class HarvestBlocksAction implements MaidAction {
         segmentIndex = segmentIndex == Long.MAX_VALUE ? Long.MAX_VALUE : segmentIndex + 1L;
         segmentSteps = 0;
         segmentDescentSteps = 0;
+        prospectDescentBlocked = prospectWorldBottomReached;
         prospectGoal = null;
         prospectStepMode = null;
         planningPurpose = PlanningPurpose.HARVEST;
@@ -1202,7 +1266,7 @@ public final class HarvestBlocksAction implements MaidAction {
         result.addProperty("diagnostic_code", message);
         result.addProperty("decision_required", true);
         result.addProperty("recoverability", recoverability(reason));
-        addSearchDiagnostics(result, retryHint(reason));
+        addSearchDiagnostics(result, retryHint(reason, message));
         return MaidActionTickResult.failed(reason, result);
     }
 
@@ -1271,10 +1335,27 @@ public final class HarvestBlocksAction implements MaidAction {
         result.addProperty("prospect_excavation_budget", -1);
         result.addProperty("prospect_remaining_excavation_budget", -1);
         result.addProperty("prospect_descent_blocked", prospectDescentBlocked);
+        result.addProperty("prospect_world_bottom_reached", prospectWorldBottomReached);
+        if (lastProspectFallbackReason != null) {
+            result.addProperty("prospect_fallback_reason", lastProspectFallbackReason);
+        }
+        if (lastProspectFallbackDirection != null) {
+            result.addProperty("prospect_fallback_direction", lastProspectFallbackDirection);
+        }
+        result.addProperty("prospect_fallbacks", prospectFallbacks);
         result.addProperty("prospect_rescans", prospectRescans);
     }
 
-    private static String retryHint(ActionEndReason reason) {
+    private String retryHint(ActionEndReason reason, String message) {
+        if (isLocalNavigationEdgeFailure(message)) {
+            if (miningPlan.enabled()) {
+                return "The terrain route was found but its local movement edge could not be executed; choose a different safe mining direction instead of increasing search_radius";
+            }
+            if (explicitTarget != null) {
+                return "Keep the specified target and safely reposition the maid or request clearance for the blocked local edge; increasing search_radius will not help";
+            }
+            return "The server exhausted executable routes to this candidate set; choose another nearby target or a different safe terrain-clearance plan instead of increasing search_radius";
+        }
         return switch (reason) {
             case PATH_NOT_FOUND, STUCK ->
                     "Move the maid closer, provide the required tools, or increase search_radius within loaded chunks";
@@ -1283,6 +1364,13 @@ public final class HarvestBlocksAction implements MaidAction {
             case VALIDATION_FAILED -> "Check the target coordinates and loaded area before retrying";
             default -> "Refresh world state and retry the action";
         };
+    }
+
+    static boolean isLocalNavigationEdgeFailure(String message) {
+        return "native_navigation_cannot_reach_terrain_step".equals(message)
+                || "native_navigation_rejected_terrain_step".equals(message)
+                || "native_navigation_finished_before_terrain_step".equals(message)
+                || "controlled_descend_made_no_progress".equals(message);
     }
 
     private static JsonObject positionDetail(BlockPos pos) {

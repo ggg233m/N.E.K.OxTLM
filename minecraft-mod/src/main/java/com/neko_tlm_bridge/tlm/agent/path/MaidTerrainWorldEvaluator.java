@@ -124,6 +124,17 @@ public final class MaidTerrainWorldEvaluator implements MaidTerrainNodeEvaluator
             return false;
         }
         BlockState state = level.getBlockState(pos);
+        return isSafeStandSupport(level, pos, state);
+    }
+
+    /**
+     * Revalidates a planned standing surface immediately before movement.
+     * Kept public so the terrain executor uses the same hazard rules as A*.
+     */
+    public static boolean isSafeStandSupport(ServerLevel level, BlockPos pos, BlockState state) {
+        Objects.requireNonNull(level, "level");
+        Objects.requireNonNull(pos, "pos");
+        Objects.requireNonNull(state, "state");
         return state.getFluidState().isEmpty()
                 && !isHazard(state)
                 && state.isFaceSturdy(level, pos, Direction.UP);
