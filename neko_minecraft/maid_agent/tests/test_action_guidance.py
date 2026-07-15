@@ -5,7 +5,13 @@ from _bootstrap import bootstrap
 bootstrap()
 
 from neko_minecraft.instructions import _TLM_AI_INSTRUCTIONS
-from neko_minecraft.tool_defs import MC_START_MAID_ACTION
+from neko_minecraft.tool_defs import (
+    MC_CANCEL_SKILL,
+    MC_GET_SKILL_STATUS,
+    MC_LIST_SKILLS,
+    MC_START_MAID_ACTION,
+    MC_START_SKILL,
+)
 
 
 class MaidActionGuidanceTests(unittest.TestCase):
@@ -45,7 +51,7 @@ class MaidActionGuidanceTests(unittest.TestCase):
             parameters["properties"]["kind"]["enum"],
         )
 
-    def test_guidance_exposes_continuous_mining_plans_and_emergency_stop(self):
+    def test_guidance_routes_high_level_mining_and_emergency_stop_to_skill(self):
         tool_text = MC_START_MAID_ACTION["description"] + str(
             MC_START_MAID_ACTION["parameters"]
         )
@@ -55,21 +61,43 @@ class MaidActionGuidanceTests(unittest.TestCase):
         ):
             self.assertIn(value, tool_text)
             self.assertIn(value, _TLM_AI_INSTRUCTIONS)
-        self.assertIn("附近没有目标", _TLM_AI_INSTRUCTIONS)
+        self.assertIn("mc_start_skill", _TLM_AI_INSTRUCTIONS)
+        self.assertIn("fishbone", _TLM_AI_INSTRUCTIONS)
+        self.assertIn("staircase_down", _TLM_AI_INSTRUCTIONS)
         self.assertIn("F8", _TLM_AI_INSTRUCTIONS)
+        self.assertIn("mc_cancel_skill", _TLM_AI_INSTRUCTIONS)
         self.assertIn("mc_cancel_maid_action", _TLM_AI_INSTRUCTIONS)
-        self.assertIn("不再因总步数", _TLM_AI_INSTRUCTIONS)
-        self.assertIn("不再用它们终止动作", tool_text)
+        self.assertIn("底层兼容能力", _TLM_AI_INSTRUCTIONS)
+        self.assertIn("协议兼容能力", tool_text)
 
-    def test_guidance_marks_old_mining_limits_as_compatibility_only(self):
+    def test_guidance_keeps_low_level_mining_plan_as_compatibility_only(self):
         tool_text = MC_START_MAID_ACTION["description"] + str(
             MC_START_MAID_ACTION["parameters"]
         )
         for text in (tool_text, _TLM_AI_INSTRUCTIONS):
-            self.assertIn("省略 mining_plan", text)
             self.assertIn("max_segments", text)
             self.assertIn("兼容", text)
             self.assertIn("256", text)
+        self.assertIn("不是默认高层方案", tool_text)
+        self.assertIn("不要用它代替普通高级找矿 Skill", _TLM_AI_INSTRUCTIONS)
+
+    def test_guidance_exposes_frozen_skill_contract(self):
+        self.assertEqual("mc_start_skill", MC_START_SKILL["name"])
+        self.assertEqual("mc_cancel_skill", MC_CANCEL_SKILL["name"])
+        self.assertEqual("mc_get_skill_status", MC_GET_SKILL_STATUS["name"])
+        self.assertEqual("mc_list_skills", MC_LIST_SKILLS["name"])
+        parameters = MC_START_SKILL["parameters"]
+        self.assertEqual(["skill", "args"], parameters["required"])
+        self.assertNotIn("skill_name", parameters["properties"])
+        skill_text = MC_START_SKILL["description"] + str(parameters)
+        for value in (
+            "mine_ore", "target_count", "blocks_harvested", "fishbone",
+            "staircase_down",
+        ):
+            self.assertIn(value, skill_text)
+            self.assertIn(value, _TLM_AI_INSTRUCTIONS)
+        self.assertIn("完整采集", skill_text)
+        self.assertIn("完整连通矿脉", _TLM_AI_INSTRUCTIONS)
 
     def test_guidance_requires_a_concrete_llm_recovery_plan(self):
         self.assertIn("具体解决方案", _TLM_AI_INSTRUCTIONS)

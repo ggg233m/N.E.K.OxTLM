@@ -18,6 +18,9 @@ from . import plan as _plan
 from . import diagnostics as _diagnostics
 from .awareness import AwarenessManager
 from .maid_agent import MaidActionService
+from .maid_agent.skill_feedback import SkillFeedbackHandler
+from .maid_agent.skills import SkillRunner
+from .maid_agent.skills.mine_ore import MineOreSkill
 from . import tools as _tools
 from .playmate import PlaymateContextManager, MinecraftPushRouter
 from .playmate.debug_log import PlaymateDebugLogger
@@ -28,6 +31,7 @@ from .tool_defs import (
     MC_SEND_CHAT, MC_GAME_CONTEXT, MC_USE_SKILL, MC_EXECUTE_COMMAND,
     MC_SET_PLAN, MC_START_MAID_ACTION, MC_CANCEL_MAID_ACTION,
     MC_GET_MAID_ACTION_STATUS, MC_LIST_ACTIVE_MAID_ACTIONS,
+    MC_START_SKILL, MC_CANCEL_SKILL, MC_GET_SKILL_STATUS, MC_LIST_SKILLS,
 )
 
 # respond 事件的 coalesce_key 映射：相同 key 的新推送覆盖旧的未消费推送
@@ -166,6 +170,7 @@ class NekoMinecraftPlugin(NekoPluginBase):
         self._playmate = PlaymateContextManager(self)
         self._awareness = AwarenessManager(self)
         self._maid_action_service = MaidActionService(self)
+        self._skill_runner = None
 
     async def _load_config(self):
         await _config.load_config(self)
@@ -220,6 +225,7 @@ class NekoMinecraftPlugin(NekoPluginBase):
     async def on_startup(self, **_):
         await self._load_config()
         self._refresh_playmate_modules()
+        await self._initialize_skill_runner()
         self.logger.info(f"Python {sys.version}")
         self.logger.info(f"Event loop: {type(asyncio.get_event_loop())}")
         if self._assigned_maid_id:
@@ -274,6 +280,8 @@ class NekoMinecraftPlugin(NekoPluginBase):
 
     @lifecycle(id="shutdown")
     async def on_shutdown(self, **_):
+        if self._skill_runner is not None:
+            await self._skill_runner.close()
         if self._poll_task:
             self._poll_task.cancel()
             try:
@@ -303,6 +311,19 @@ class NekoMinecraftPlugin(NekoPluginBase):
             self._bridge.stop()
         await self._minecraft_push.flush()
         return Ok({"status": "stopped"})
+
+    async def _initialize_skill_runner(self):
+        if self._skill_runner is not None:
+            await self._skill_runner.close()
+        runner = SkillRunner(
+            self,
+            self._maid_action_service,
+            self.data_path("skills"),
+            feedback=SkillFeedbackHandler(self),
+        )
+        runner.register(MineOreSkill())
+        await runner.load()
+        self._skill_runner = runner
 
     async def _poll_messages(self):
         was_connected = False
@@ -361,9 +382,27 @@ class NekoMinecraftPlugin(NekoPluginBase):
             if delay:
                 await asyncio.sleep(delay)
             try:
-                result = await self._maid_action_service.reconcile()
+                expected_action_ids = []
+                expected_maid_ids = []
+                if self._skill_runner is not None:
+                    for skill in self._skill_runner.list_skills(include_terminal=False):
+                        action_id = str(skill.get("current_action_id") or "")
+                        maid_id = str(skill.get("maid_id") or "")
+                        if action_id:
+                            expected_action_ids.append(action_id)
+                        if maid_id:
+                            expected_maid_ids.append(maid_id)
+                result = await self._maid_action_service.reconcile(
+                    expected_action_ids=expected_action_ids,
+                    maid_ids=expected_maid_ids,
+                )
                 if result.get("success", False) and not result.get("unresolved"):
-                    return
+                    if self._skill_runner is None:
+                        return
+                    skill_result = await self._skill_runner.reconcile()
+                    if skill_result.get("success", False):
+                        return
+                    result = {**result, "skill_reconcile": skill_result}
                 self.logger.warning(
                     f"[MaidAgent] Reconcile attempt {attempt} deferred: {result}")
             except asyncio.CancelledError:
@@ -917,6 +956,31 @@ class NekoMinecraftPlugin(NekoPluginBase):
     @llm_tool(**MC_LIST_ACTIVE_MAID_ACTIONS)
     async def mc_list_active_maid_actions(self, **_):
         return await _tools.do_list_active_maid_actions(self)
+
+    @llm_tool(**MC_START_SKILL)
+    async def mc_start_skill(self, *, skill="", args=None, skill_id="",
+                             replace_existing=True, **_):
+        return await _tools.do_start_skill(
+            self,
+            skill=skill,
+            args=args,
+            skill_id=skill_id,
+            replace_existing=replace_existing,
+        )
+
+    @llm_tool(**MC_CANCEL_SKILL)
+    async def mc_cancel_skill(self, *, skill_id="", **_):
+        return await _tools.do_cancel_skill(self, skill_id=skill_id)
+
+    @llm_tool(**MC_GET_SKILL_STATUS)
+    async def mc_get_skill_status(self, *, skill_id="", **_):
+        return await _tools.do_get_skill_status(self, skill_id=skill_id)
+
+    @llm_tool(**MC_LIST_SKILLS)
+    async def mc_list_skills(self, *, include_terminal=True, **_):
+        return await _tools.do_list_skills(
+            self, include_terminal=include_terminal
+        )
 
     @llm_tool(**MC_USE_SKILL)
     async def use_skill(self, *, skill_name="", **_):

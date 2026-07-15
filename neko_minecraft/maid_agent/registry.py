@@ -9,7 +9,7 @@ class ActionValidationError(ValueError):
 
 
 class ActionRegistry:
-    SUPPORTED_KINDS = frozenset({"navigate", "harvest_blocks"})
+    SUPPORTED_KINDS = frozenset({"navigate", "harvest_blocks", "excavate_segment"})
 
     def normalize(self, kind: str, args: Dict[str, Any]) -> Dict[str, Any]:
         kind = str(kind or "").strip().lower()
@@ -20,7 +20,36 @@ class ActionRegistry:
             )
         if not isinstance(args, dict):
             raise ActionValidationError("args must be an object")
-        return self._navigate(args) if kind == "navigate" else self._harvest(args)
+        if kind == "navigate":
+            return self._navigate(args)
+        if kind == "excavate_segment":
+            return self._excavate_segment(args)
+        return self._harvest(args)
+
+    def _excavate_segment(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        allowed = {"direction", "shape", "length"}
+        unknown = sorted(set(args) - allowed)
+        if unknown:
+            raise ActionValidationError(
+                f"excavate_segment has unsupported fields: {', '.join(unknown)}"
+            )
+        direction = str(args.get("direction") or "").strip().lower()
+        if direction not in {"north", "south", "east", "west"}:
+            raise ActionValidationError(
+                "excavate_segment.direction must be north, south, east or west"
+            )
+        shape = str(args.get("shape", "level") or "").strip().lower()
+        if shape not in {"level", "staircase_down"}:
+            raise ActionValidationError(
+                "excavate_segment.shape must be level or staircase_down"
+            )
+        return {
+            "direction": direction,
+            "shape": shape,
+            "length": self._integer(
+                args.get("length", 1), "excavate_segment.length", 1, 8
+            ),
+        }
 
     def _navigate(self, args: Dict[str, Any]) -> Dict[str, Any]:
         target = self._position(args.get("target"), "target")

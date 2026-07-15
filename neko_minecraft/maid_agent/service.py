@@ -1,10 +1,11 @@
-"""Coordinates action tracking, feedback and reconnect reconciliation."""
+"""Coordinates action transport, tracking, feedback and reconnect recovery."""
 
-from typing import Any, Dict, Iterable
+import uuid
+from typing import Any, Dict, Iterable, Optional
 
 from .feedback import ActionFeedbackHandler
 from .models import ActionRecord, ActionTracker, TERMINAL_STATUSES
-from .registry import ActionRegistry
+from .registry import ActionRegistry, ActionValidationError
 
 
 ACTION_EVENT_TYPES = frozenset({"maid_action_progress", "maid_action_finished"})
@@ -18,6 +19,40 @@ class MaidActionService:
         self.feedback = ActionFeedbackHandler(
             plugin, progress_interval=progress_interval, clock=clock
         )
+        self._event_consumer = None
+        self._owners: Dict[str, tuple[str, str]] = {}
+
+    def register_event_consumer(self, consumer) -> None:
+        """Install the high-level skill event consumer.
+
+        There is intentionally only one body-orchestration consumer.  Child
+        actions claimed with the ``internal`` feedback policy still update the
+        tracker, but never wake the main LLM independently of their skill.
+        """
+        self._event_consumer = consumer
+
+    def unregister_event_consumer(self, consumer=None) -> None:
+        if consumer is None or self._event_consumer is consumer:
+            self._event_consumer = None
+
+    def claim_action(self, action_id: str, owner_id: str, *, feedback_policy: str = "internal") -> None:
+        action_id = str(action_id or "").strip()
+        owner_id = str(owner_id or "").strip()
+        policy = str(feedback_policy or "internal").strip().lower()
+        if not action_id or not owner_id:
+            raise ValueError("action_id and owner_id are required")
+        if policy not in {"internal", "external"}:
+            raise ValueError("feedback_policy must be internal or external")
+        self._owners[action_id] = (owner_id, policy)
+
+    def release_action(self, action_id: str, owner_id: str = "") -> None:
+        action_id = str(action_id or "").strip()
+        current = self._owners.get(action_id)
+        if current is None:
+            return
+        if owner_id and current[0] != str(owner_id):
+            return
+        self._owners.pop(action_id, None)
 
     async def handle_message(self, message: Dict[str, Any]) -> bool:
         msg_type = str((message or {}).get("type") or "")
@@ -27,13 +62,172 @@ class MaidActionService:
         record, accepted = self.tracker.apply(payload)
         if not accepted or record is None:
             return True
-        if msg_type == "maid_action_finished" or record.status in TERMINAL_STATUSES:
-            await self.feedback.finished(record)
-        elif bool(payload.get("requires_decision", False)):
-            await self.feedback.decision_required(record)
-        else:
-            await self.feedback.progress(record)
+        await self._dispatch_record(msg_type, record, payload)
         return True
+
+    async def _dispatch_record(
+        self, event_type: str, record: ActionRecord, payload: Dict[str, Any]
+    ) -> None:
+        owner = self._owners.get(record.action_id)
+        consumer = self._event_consumer
+        claimed = owner is not None
+        if not claimed and consumer is not None:
+            claims = getattr(consumer, "claims", None)
+            if callable(claims):
+                claimed = bool(claims(record.action_id))
+
+        if claimed and consumer is not None:
+            callback = getattr(consumer, "on_action_event", None)
+            if callable(callback):
+                await callback(event_type, record.as_dict(), dict(payload or {}))
+
+        internal = claimed and (owner is None or owner[1] == "internal")
+        if not internal:
+            if event_type == "maid_action_finished" or record.status in TERMINAL_STATUSES:
+                await self.feedback.finished(record)
+            elif bool(payload.get("requires_decision", False)):
+                await self.feedback.decision_required(record)
+            else:
+                await self.feedback.progress(record)
+
+        if record.terminal:
+            self.release_action(record.action_id)
+
+    async def start_action(
+        self,
+        *,
+        action_id: str,
+        maid_id: str,
+        kind: str,
+        args: Dict[str, Any],
+        timeout_ms: Optional[int] = None,
+        replace_existing: bool = True,
+        owner_id: str = "",
+        feedback_policy: str = "external",
+    ) -> Dict[str, Any]:
+        """Start an action without passing through an LLM tool wrapper."""
+        if not getattr(self.plugin, "connected", False):
+            return self._error("NOT_CONNECTED", "Not connected to Minecraft")
+        if not getattr(self.plugin, "_maid_agent_enabled", True):
+            return self._error("MAID_AGENT_DISABLED", "Maid Agent actions are disabled")
+        maid_id = str(maid_id or "").strip()
+        if not maid_id:
+            return self._error("NO_MAID_ASSIGNED", "No maid assigned")
+        action_id = str(action_id or uuid.uuid4()).strip()
+        kind = str(kind or "").strip().lower()
+        try:
+            normalized_args = self.registry.normalize(kind, args or {})
+            if timeout_ms is None:
+                timeout_ms = 60000
+            timeout_ms = int(timeout_ms)
+        except (ActionValidationError, TypeError, ValueError) as exc:
+            return self._error("INVALID_ACTION_ARGUMENTS", str(exc), action_id=action_id)
+        if timeout_ms != 0 and not 1000 <= timeout_ms <= 120000:
+            return self._error(
+                "INVALID_ACTION_ARGUMENTS",
+                "timeout_ms must be 0 or between 1000 and 120000",
+                action_id=action_id,
+            )
+
+        if owner_id:
+            self.claim_action(
+                action_id, owner_id, feedback_policy=feedback_policy
+            )
+        request = {
+            "type": "start_maid_action",
+            "data": {
+                "action_id": action_id,
+                "maid_id": maid_id,
+                "kind": kind,
+                "timeout_ms": timeout_ms,
+                "replace_existing": bool(replace_existing),
+                "args": normalized_args,
+            },
+        }
+        try:
+            response = await self.plugin._send_request(request)
+        except Exception as exc:
+            self.release_action(action_id, owner_id)
+            return self._error("REQUEST_FAILED", str(exc), action_id=action_id)
+        if response.get("type") == "error":
+            self.release_action(action_id, owner_id)
+            return self._error(
+                "REQUEST_FAILED", str(response.get("data", {})), action_id=action_id
+            )
+        records = self.observe_response(response)
+        data = self._payload(response)
+        accepted = data.get("accepted", data.get("success", True))
+        if not accepted:
+            self.release_action(action_id, owner_id)
+            return self._error(
+                str(data.get("error_code") or "ACTION_REJECTED"),
+                str(data.get("error") or data.get("message")
+                    or data.get("rejection_reason") or "Action rejected"),
+                action_id=action_id,
+                response=data,
+            )
+        snapshot = records[0].as_dict() if records else {}
+        return {"success": True, "accepted": True, "action_id": action_id, **data, **snapshot}
+
+    async def cancel_action(self, action_id: str, *, maid_id: str = "") -> Dict[str, Any]:
+        if not getattr(self.plugin, "connected", False):
+            return self._error("NOT_CONNECTED", "Not connected to Minecraft")
+        action_id = str(action_id or "").strip()
+        if not action_id:
+            return self._error("INVALID_ACTION_ARGUMENTS", "action_id is required")
+        data = {"action_id": action_id}
+        if maid_id:
+            data["maid_id"] = str(maid_id)
+        response = await self.plugin._send_request(
+            {"type": "cancel_maid_action", "data": data}
+        )
+        if response.get("type") == "error":
+            return self._error("REQUEST_FAILED", str(response.get("data", {})), action_id=action_id)
+        self.observe_response(response)
+        result = self._payload(response)
+        if not result.get("accepted", result.get("success", True)):
+            return self._error(
+                str(result.get("error_code") or "CANCEL_REJECTED"),
+                str(result.get("error") or result.get("message")
+                    or result.get("rejection_reason") or "Cancel rejected"),
+                action_id=action_id,
+                response=result,
+            )
+        return {"success": True, "accepted": True, "action_id": action_id, **result}
+
+    async def get_action_status(self, action_id: str) -> Optional[Dict[str, Any]]:
+        action_id = str(action_id or "").strip()
+        if not action_id or not getattr(self.plugin, "connected", False):
+            return None
+        response = await self.plugin._send_request({
+            "type": "get_maid_action_status",
+            "data": {"action_id": action_id},
+        }, timeout=5)
+        if self._is_not_found(response):
+            return None
+        if response.get("type") == "error":
+            return {
+                "action_id": action_id,
+                "_query_error": True,
+                "error": self._payload(response),
+            }
+        records = self.observe_response(response)
+        if records:
+            return records[0].as_dict()
+        data = self._payload(response)
+        return data or None
+
+    async def list_active_actions(self, *, maid_id: str = "") -> list[Dict[str, Any]]:
+        if not getattr(self.plugin, "connected", False):
+            return []
+        data = {"maid_id": str(maid_id)} if maid_id else {}
+        response = await self.plugin._send_request(
+            {"type": "list_active_maid_actions", "data": data}, timeout=5
+        )
+        if response.get("type") == "error":
+            return []
+        self.observe_response(response)
+        return [dict(item) for item in self._extract_actions(self._payload(response))]
 
     def observe_response(self, message: Dict[str, Any]) -> list:
         """Update local snapshots from request responses without emitting feedback."""
@@ -56,12 +250,17 @@ class MaidActionService:
                 records.append(record)
         return records
 
-    async def reconcile(self) -> Dict[str, Any]:
+    async def reconcile(
+        self, *, expected_action_ids: Iterable[str] = (), maid_ids: Iterable[str] = ()
+    ) -> Dict[str, Any]:
         """Adopt server actions and recover terminal states after a reconnect."""
         maid_id = ""
         resolver = getattr(self.plugin, "_resolve_maid_id", None)
         if callable(resolver):
             maid_id = str(resolver() or "")
+        explicit_maids = [str(value) for value in maid_ids if str(value or "").strip()]
+        if explicit_maids and not maid_id:
+            maid_id = explicit_maids[0]
         list_data = {"maid_id": maid_id} if maid_id else {}
         response = await self.plugin._send_request(
             {"type": "list_active_maid_actions", "data": list_data}, timeout=5
@@ -86,28 +285,42 @@ class MaidActionService:
         recovered = []
         lost = []
         unresolved = []
-        local_active = list(self.tracker.active())
-        for record in local_active:
-            if record.action_id in server_ids:
+        expected = {
+            str(action_id) for action_id in expected_action_ids
+            if str(action_id or "").strip()
+        }
+        local_by_id = {record.action_id: record for record in self.tracker.active()}
+        ids_to_query = set(local_by_id) | expected
+        for action_id in sorted(ids_to_query):
+            if action_id in server_ids:
                 continue
             status_response = await self.plugin._send_request({
                 "type": "get_maid_action_status",
-                "data": {"action_id": record.action_id},
+                "data": {"action_id": action_id},
             }, timeout=5)
             if self._is_not_found(status_response):
-                lost_record, accepted = self.tracker.mark_server_state_lost(record)
-                if accepted:
-                    lost.append(record.action_id)
-                    await self.feedback.finished(lost_record)
+                record = local_by_id.get(action_id)
+                if record is not None:
+                    lost_record, accepted = self.tracker.mark_server_state_lost(record)
+                    if accepted:
+                        lost.append(action_id)
+                        await self._dispatch_record(
+                            "maid_action_finished", lost_record, lost_record.as_dict()
+                        )
+                else:
+                    lost.append(action_id)
             elif status_response.get("type") != "error":
                 status_data = self._payload(status_response)
                 updated, accepted = self.tracker.apply(status_data)
                 if accepted and updated is not None:
-                    recovered.append(record.action_id)
-                    if updated.terminal:
-                        await self.feedback.finished(updated)
+                    recovered.append(action_id)
+                    await self._dispatch_record(
+                        "maid_action_finished" if updated.terminal else "maid_action_progress",
+                        updated,
+                        status_data,
+                    )
             else:
-                unresolved.append(record.action_id)
+                unresolved.append(action_id)
 
         return {
             "success": True,
@@ -139,3 +352,12 @@ class MaidActionService:
             return True
         text = str(payload.get("message") or payload.get("error") or "").lower()
         return "not found" in text or "unknown action" in text
+
+    @staticmethod
+    def _error(code: str, message: str, **details: Any) -> Dict[str, Any]:
+        return {
+            "success": False,
+            "error_code": str(code or "REQUEST_FAILED"),
+            "error": str(message or "Request failed"),
+            **details,
+        }

@@ -66,6 +66,27 @@ class ActionRegistryTests(unittest.TestCase):
         self.assertEqual(0.7, args["speed"])
         self.assertEqual(1.5, args["stop_distance"])
 
+    def test_normalizes_excavate_segment_contract(self):
+        args = self.registry.normalize(
+            "excavate_segment",
+            {"direction": "WEST", "shape": "staircase_down", "length": 8},
+        )
+        self.assertEqual({
+            "direction": "west",
+            "shape": "staircase_down",
+            "length": 8,
+        }, args)
+
+    def test_rejects_invalid_excavate_segment_geometry(self):
+        invalid = (
+            {"direction": "up", "shape": "level", "length": 1},
+            {"direction": "north", "shape": "shaft", "length": 1},
+            {"direction": "north", "shape": "level", "length": 9},
+        )
+        for args in invalid:
+            with self.subTest(args=args), self.assertRaises(ActionValidationError):
+                self.registry.normalize("excavate_segment", args)
+
     def test_harvest_requires_exactly_one_targeting_mode(self):
         with self.assertRaises(ActionValidationError):
             self.registry.normalize("harvest_blocks", {})

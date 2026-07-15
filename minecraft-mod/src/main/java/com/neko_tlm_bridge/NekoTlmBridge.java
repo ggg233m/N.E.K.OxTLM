@@ -11,6 +11,7 @@ import com.neko_tlm_bridge.network.debug.MaidPathDebugService;
 import com.neko_tlm_bridge.tlm.NekoWebSocketServerHolder;
 import com.neko_tlm_bridge.tlm.agent.MaidActionKind;
 import com.neko_tlm_bridge.tlm.agent.action.HarvestBlocksAction;
+import com.neko_tlm_bridge.tlm.agent.action.ExcavateSegmentAction;
 import com.neko_tlm_bridge.tlm.agent.action.LegacyAttackAction;
 import com.neko_tlm_bridge.tlm.agent.action.NavigateAction;
 import com.neko_tlm_bridge.tlm.agent.runtime.MaidActionStore;
@@ -177,6 +178,8 @@ public class NekoTlmBridge {
                 (maid, args) -> NavigateAction.fromArgs(args));
         store.registerFactory(MaidActionKind.HARVEST_BLOCKS,
                 (maid, args) -> HarvestBlocksAction.fromArgs(args));
+        store.registerFactory(MaidActionKind.EXCAVATE_SEGMENT,
+                (maid, args) -> ExcavateSegmentAction.fromArgs(args));
         IMaidTask attackTask = TaskManager.findTask(
                         net.minecraft.resources.ResourceLocation.parse("touhou_little_maid:attack"))
                 .orElse(TaskManager.getIdleTask());

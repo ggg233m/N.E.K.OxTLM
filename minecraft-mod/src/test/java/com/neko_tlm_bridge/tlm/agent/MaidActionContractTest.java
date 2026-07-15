@@ -33,6 +33,8 @@ class MaidActionContractTest {
     void publicKindsRoundTripAndLegacyKindStaysInternal() {
         assertEquals(MaidActionKind.NAVIGATE, MaidActionKind.fromWireName("navigate"));
         assertEquals(MaidActionKind.HARVEST_BLOCKS, MaidActionKind.fromWireName("HARVEST_BLOCKS"));
+        assertEquals(MaidActionKind.EXCAVATE_SEGMENT,
+                MaidActionKind.fromWireName("excavate_segment"));
         assertEquals(MaidActionKind.LEGACY_ATTACK, MaidActionKind.fromWireName("legacy_attack"));
         assertThrows(IllegalArgumentException.class, () -> MaidActionKind.fromWireName("mine_down"));
     }

@@ -32,7 +32,38 @@ class Clock:
         return self.value
 
 
+class FakeSkillConsumer:
+    def __init__(self, action_id="a"):
+        self.action_id = action_id
+        self.events = []
+
+    def claims(self, action_id):
+        return action_id == self.action_id
+
+    async def on_action_event(self, event_type, record, payload):
+        self.events.append((event_type, record, payload))
+
+
 class MaidActionServiceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_skill_owned_child_action_suppresses_regular_llm_feedback(self):
+        plugin = FakePlugin()
+        service = MaidActionService(plugin)
+        consumer = FakeSkillConsumer()
+        service.register_event_consumer(consumer)
+        service.claim_action("a", "skill-1", feedback_policy="internal")
+
+        await service.handle_message({
+            "type": "maid_action_finished",
+            "data": {
+                "action_id": "a", "maid_id": "m", "generation": 1,
+                "sequence": 2, "kind": "harvest_blocks", "status": "FAILED",
+                "stage": "FAILED", "end_reason": "PATH_NOT_FOUND",
+            },
+        })
+
+        self.assertEqual(1, len(consumer.events))
+        self.assertEqual([], plugin.pushes)
+
     async def test_progress_is_throttled_but_stage_change_is_immediate(self):
         plugin = FakePlugin()
         clock = Clock()

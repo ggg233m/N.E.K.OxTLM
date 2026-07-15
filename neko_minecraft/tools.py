@@ -662,6 +662,103 @@ async def do_list_active_maid_actions(plugin, *, maid_id=None):
     return Ok({"actions": actions if isinstance(actions, list) else []})
 
 
+def _skill_runner(plugin):
+    return getattr(plugin, "_skill_runner", None)
+
+
+def _skill_snapshot(value):
+    if isinstance(value, dict):
+        return dict(value)
+    converter = getattr(value, "as_dict", None)
+    if callable(converter):
+        converted = converter()
+        return dict(converted) if isinstance(converted, dict) else {}
+    return {}
+
+
+async def do_start_skill(
+    plugin,
+    *,
+    skill="",
+    args=None,
+    skill_id="",
+    replace_existing=True,
+    maid_id=None,
+):
+    """Start a checkpointed high-level skill through SkillRunner only."""
+    if not plugin.connected:
+        return _action_error("NOT_CONNECTED", "Not connected to Minecraft")
+    if not getattr(plugin, "_maid_agent_enabled", True):
+        return _action_error("MAID_AGENT_DISABLED", "Maid Agent skills are disabled")
+    runner = _skill_runner(plugin)
+    if runner is None:
+        return _action_error("SKILL_RUNNER_UNAVAILABLE", "Maid SkillRunner is not initialized")
+    resolved_id = plugin._resolve_maid_id(maid_id)
+    if not resolved_id:
+        return _action_error("NO_MAID_ASSIGNED", "No maid assigned")
+    try:
+        snapshot = _skill_snapshot(await runner.start(
+            skill_name=str(skill or "").strip().lower(),
+            maid_id=resolved_id,
+            args=dict(args or {}),
+            skill_id=str(skill_id or "").strip() or None,
+            replace_existing=bool(replace_existing),
+        ))
+    except (TypeError, ValueError) as exc:
+        return _action_error("INVALID_SKILL_ARGUMENTS", str(exc))
+    except RuntimeError as exc:
+        return _action_error("SKILL_START_REJECTED", str(exc))
+    if not snapshot:
+        return _action_error("SKILL_START_FAILED", "SkillRunner returned no skill snapshot")
+    return Ok({"accepted": True, **snapshot})
+
+
+async def do_cancel_skill(plugin, *, skill_id="", maid_id=None):
+    if not plugin.connected:
+        return _action_error("NOT_CONNECTED", "Not connected to Minecraft")
+    runner = _skill_runner(plugin)
+    if runner is None:
+        return _action_error("SKILL_RUNNER_UNAVAILABLE", "Maid SkillRunner is not initialized")
+    resolved_id = plugin._resolve_maid_id(maid_id)
+    try:
+        snapshot = _skill_snapshot(await runner.cancel(
+            skill_id=str(skill_id or "").strip(),
+            maid_id=str(resolved_id or ""),
+        ))
+    except ValueError as exc:
+        return _action_error("SKILL_NOT_FOUND", str(exc), skill_id=str(skill_id or ""))
+    except RuntimeError as exc:
+        return _action_error("SKILL_CANCEL_REJECTED", str(exc), skill_id=str(skill_id or ""))
+    if not snapshot:
+        return _action_error("SKILL_NOT_FOUND", "No matching skill", skill_id=str(skill_id or ""))
+    return Ok({"accepted": True, **snapshot})
+
+
+async def do_get_skill_status(plugin, *, skill_id=""):
+    runner = _skill_runner(plugin)
+    if runner is None:
+        return _action_error("SKILL_RUNNER_UNAVAILABLE", "Maid SkillRunner is not initialized")
+    skill_id = str(skill_id or "").strip()
+    if not skill_id:
+        return _action_error("INVALID_SKILL_ARGUMENTS", "skill_id is required")
+    snapshot = _skill_snapshot(runner.get_status(skill_id))
+    if not snapshot:
+        return _action_error("SKILL_NOT_FOUND", "Skill was not found", skill_id=skill_id)
+    return Ok(snapshot)
+
+
+async def do_list_skills(plugin, *, include_terminal=True, maid_id=None):
+    runner = _skill_runner(plugin)
+    if runner is None:
+        return _action_error("SKILL_RUNNER_UNAVAILABLE", "Maid SkillRunner is not initialized")
+    resolved_id = plugin._resolve_maid_id(maid_id)
+    skills = runner.list_skills(
+        maid_id=str(resolved_id or ""),
+        include_terminal=bool(include_terminal),
+    )
+    return Ok({"skills": list(skills or [])})
+
+
 async def do_use_skill(plugin, *, skill_name=""):
     plugin.logger.info(f"[Entry] use_skill called with skill_name='{skill_name}'")
     if not plugin.connected:

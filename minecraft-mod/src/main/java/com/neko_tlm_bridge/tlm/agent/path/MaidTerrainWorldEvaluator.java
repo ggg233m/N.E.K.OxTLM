@@ -4,6 +4,7 @@ import com.github.tartaricacid.touhoulittlemaid.entity.passive.EntityMaid;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.tags.FluidTags;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
@@ -132,12 +133,36 @@ public final class MaidTerrainWorldEvaluator implements MaidTerrainNodeEvaluator
      * Kept public so the terrain executor uses the same hazard rules as A*.
      */
     public static boolean isSafeStandSupport(ServerLevel level, BlockPos pos, BlockState state) {
+        return assessStandSupport(level, pos, state) == SupportAssessment.SAFE;
+    }
+
+    /** Classifies a prospective standing surface without loading terrain. */
+    public static SupportAssessment assessStandSupport(
+            ServerLevel level, BlockPos pos, BlockState expectedState) {
         Objects.requireNonNull(level, "level");
         Objects.requireNonNull(pos, "pos");
-        Objects.requireNonNull(state, "state");
+        Objects.requireNonNull(expectedState, "expectedState");
+        if (pos.getY() < level.getMinBuildHeight()
+                || pos.getY() >= level.getMaxBuildHeight()
+                || !level.hasChunkAt(pos)) {
+            return SupportAssessment.UNLOADED;
+        }
+        BlockState state = level.getBlockState(pos);
+        if (!state.equals(expectedState)) {
+            return SupportAssessment.TARGET_CHANGED;
+        }
+        FluidHazard fluid = classifyFluid(state);
+        if (fluid == FluidHazard.LAVA) {
+            return SupportAssessment.LAVA_HAZARD;
+        }
+        if (fluid == FluidHazard.WATER) {
+            return SupportAssessment.WATER_HAZARD;
+        }
         return state.getFluidState().isEmpty()
                 && !isHazard(state)
-                && state.isFaceSturdy(level, pos, Direction.UP);
+                && state.isFaceSturdy(level, pos, Direction.UP)
+                ? SupportAssessment.SAFE
+                : SupportAssessment.UNSAFE_SUPPORT;
     }
 
     public ServerLevel level() {
@@ -166,28 +191,61 @@ public final class MaidTerrainWorldEvaluator implements MaidTerrainNodeEvaluator
      * multi-tick progressive break when water/lava or a block entity appears.
      */
     public static boolean isSafeToClear(ServerLevel level, BlockPos pos, BlockState expectedState) {
+        ClearanceAssessment assessment = assessClearance(level, pos, expectedState);
+        return assessment == ClearanceAssessment.CLEAR
+                || assessment == ClearanceAssessment.BREAKABLE;
+    }
+
+    /**
+     * Classifies one clearance cell using the same rules as path evaluation and
+     * progressive breaking.  The method is read-only and never loads chunks.
+     */
+    public static ClearanceAssessment assessClearance(
+            ServerLevel level, BlockPos pos, BlockState expectedState) {
         Objects.requireNonNull(level, "level");
         Objects.requireNonNull(pos, "pos");
         Objects.requireNonNull(expectedState, "expectedState");
         if (pos.getY() < level.getMinBuildHeight()
                 || pos.getY() >= level.getMaxBuildHeight()
                 || !level.hasChunkAt(pos)) {
-            return false;
+            return ClearanceAssessment.UNLOADED;
         }
         BlockState state = level.getBlockState(pos);
-        if (!state.equals(expectedState)
-                || isHazard(state)
-                || !state.getFluidState().isEmpty()) {
-            return false;
+        if (!state.equals(expectedState)) {
+            return ClearanceAssessment.TARGET_CHANGED;
+        }
+        FluidHazard directFluid = classifyFluid(state);
+        if (directFluid == FluidHazard.LAVA) {
+            return ClearanceAssessment.LAVA_HAZARD;
+        }
+        if (directFluid == FluidHazard.WATER) {
+            return ClearanceAssessment.WATER_HAZARD;
+        }
+        if (isHazard(state) || !state.getFluidState().isEmpty()) {
+            return ClearanceAssessment.UNSAFE;
         }
         if (state.getCollisionShape(level, pos).isEmpty()) {
-            return true;
+            return ClearanceAssessment.CLEAR;
         }
         float hardness = state.getDestroySpeed(level, pos);
-        return hardness >= 0.0F
-                && Float.isFinite(hardness)
-                && !isProtectedBlock(level, pos, state)
-                && !wouldExposeFluid(level, pos);
+        if (hardness < 0.0F || !Float.isFinite(hardness)
+                || isProtectedBlock(level, pos, state)) {
+            return ClearanceAssessment.PROTECTED_BLOCK;
+        }
+        FluidHazard exposure = exposedFluidHazard(level, pos);
+        if (exposure == FluidHazard.LAVA) {
+            return ClearanceAssessment.LAVA_HAZARD;
+        }
+        if (exposure == FluidHazard.WATER) {
+            return ClearanceAssessment.WATER_HAZARD;
+        }
+        if (exposure == FluidHazard.UNKNOWN) {
+            return ClearanceAssessment.UNLOADED;
+        }
+        if (exposure == FluidHazard.OTHER) {
+            return ClearanceAssessment.UNSAFE;
+        }
+        return ClearanceAssessment.BREAKABLE;
     }
 
     private static boolean isProtectedBlock(ServerLevel level, BlockPos pos, BlockState state) {
@@ -195,17 +253,42 @@ public final class MaidTerrainWorldEvaluator implements MaidTerrainNodeEvaluator
         return state.hasBlockEntity() || level.getBlockEntity(pos) != null;
     }
 
-    private static boolean wouldExposeFluid(ServerLevel level, BlockPos pos) {
+    private static FluidHazard exposedFluidHazard(ServerLevel level, BlockPos pos) {
+        FluidHazard result = FluidHazard.NONE;
         for (Direction direction : FLUID_EXPOSURE_DIRECTIONS) {
             BlockPos adjacent = pos.relative(direction);
             // Unknown terrain is never assumed dry. This also guarantees that
             // evaluating a route cannot synchronously load a neighbouring chunk.
-            if (!level.hasChunkAt(adjacent)
-                    || !level.getBlockState(adjacent).getFluidState().isEmpty()) {
-                return true;
+            if (!level.hasChunkAt(adjacent)) {
+                if (result == FluidHazard.NONE || result == FluidHazard.OTHER) {
+                    result = FluidHazard.UNKNOWN;
+                }
+                continue;
+            }
+            FluidHazard adjacentHazard = classifyFluid(level.getBlockState(adjacent));
+            if (adjacentHazard == FluidHazard.LAVA) {
+                return FluidHazard.LAVA;
+            }
+            if (adjacentHazard == FluidHazard.WATER) {
+                result = FluidHazard.WATER;
+            } else if (adjacentHazard == FluidHazard.OTHER && result == FluidHazard.NONE) {
+                result = FluidHazard.OTHER;
             }
         }
-        return false;
+        return result;
+    }
+
+    private static FluidHazard classifyFluid(BlockState state) {
+        if (state.getFluidState().isEmpty()) {
+            return FluidHazard.NONE;
+        }
+        if (state.getFluidState().is(FluidTags.LAVA)) {
+            return FluidHazard.LAVA;
+        }
+        if (state.getFluidState().is(FluidTags.WATER)) {
+            return FluidHazard.WATER;
+        }
+        return FluidHazard.OTHER;
     }
 
     private static ToolChoice toolChoice(ItemStack stack, BlockState state) {
@@ -225,5 +308,33 @@ public final class MaidTerrainWorldEvaluator implements MaidTerrainNodeEvaluator
     }
 
     private record ToolChoice(float speed, boolean correct) {
+    }
+
+    private enum FluidHazard {
+        NONE,
+        WATER,
+        LAVA,
+        OTHER,
+        UNKNOWN
+    }
+
+    public enum ClearanceAssessment {
+        CLEAR,
+        BREAKABLE,
+        WATER_HAZARD,
+        LAVA_HAZARD,
+        PROTECTED_BLOCK,
+        UNSAFE,
+        UNLOADED,
+        TARGET_CHANGED
+    }
+
+    public enum SupportAssessment {
+        SAFE,
+        WATER_HAZARD,
+        LAVA_HAZARD,
+        UNSAFE_SUPPORT,
+        UNLOADED,
+        TARGET_CHANGED
     }
 }

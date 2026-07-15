@@ -1,0 +1,215 @@
+"""Conversation feedback for checkpointed high-level maid skills."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import time
+from typing import Any, Mapping
+
+
+class SkillFeedbackHandler:
+    """Emit only skill-level blocked and terminal decisions to the main LLM.
+
+    Child maid actions are owned by ``SkillRunner`` and deliberately do not
+    reach the ordinary action feedback path.  The runner persists notification
+    revisions; the in-memory sets below only close the small duplicate window
+    before that checkpoint has been written.
+    """
+
+    def __init__(self, plugin, *, progress_interval: float = 1.5, clock=None):
+        self._plugin = plugin
+        self._clock = clock or time.monotonic
+        self._progress_interval = max(1.0, min(2.0, float(progress_interval)))
+        self._last_progress: dict[str, tuple[str, float]] = {}
+        self._blocked_sent: set[tuple[str, int]] = set()
+        self._finished_sent: set[tuple[str, int, str]] = set()
+
+    async def progress(self, run_snapshot: Mapping[str, Any]) -> bool:
+        """Optionally expose aggregated skill progress without waking the LLM."""
+        run = _snapshot(run_snapshot)
+        skill_id = str(run.get("skill_id") or "")
+        if not skill_id:
+            return False
+        child = run.get("child_action") \
+            if isinstance(run.get("child_action"), Mapping) else {}
+        result = run.get("result") if isinstance(run.get("result"), Mapping) else {}
+        stage = str(child.get("stage") or result.get("stage") or run.get("status") or "RUNNING")
+        now = self._clock()
+        previous = self._last_progress.get(skill_id)
+        if previous and previous[0] == stage \
+                and now - previous[1] < self._progress_interval:
+            return False
+        try:
+            await self._plugin._push_minecraft_context(
+                _progress_text(run),
+                ai_behavior="read",
+                priority=1,
+                metadata={
+                    "description": "Minecraft 女仆 Skill 进度",
+                    "skill_id": skill_id,
+                    "skill_name": str(run.get("skill_name") or ""),
+                    "revision": _integer(run.get("revision")),
+                    "child_kind": str(child.get("kind") or ""),
+                    "stage": stage,
+                },
+                aggregate=True,
+                coalesce_key=f"mc_maid_skill_progress:{run.get('maid_id') or skill_id}",
+            )
+        except Exception as exc:
+            logger = getattr(self._plugin, "logger", None)
+            if logger is not None:
+                logger.warning("[MaidSkill] progress feedback failed: %s", exc)
+            return False
+        self._last_progress[skill_id] = (stage, now)
+        return True
+
+    async def blocked(self, run_snapshot: Mapping[str, Any]) -> bool:
+        run = _snapshot(run_snapshot)
+        skill_id = str(run.get("skill_id") or "")
+        revision = _integer(run.get("revision"))
+        notified_revision = _integer(run.get("blocked_notification_revision"))
+        if not skill_id or notified_revision >= revision > 0:
+            return False
+        key = (skill_id, revision)
+        if key in self._blocked_sent:
+            return False
+        await self._push_with_retry(
+            _blocked_text(run),
+            ai_behavior="respond",
+            priority=5,
+            metadata={
+                "description": "Minecraft 女仆 Skill 阻塞",
+                "skill_id": skill_id,
+                "skill_name": str(run.get("skill_name") or ""),
+                "revision": revision,
+                "status": "BLOCKED",
+                "reason": str(run.get("last_failure_reason") or ""),
+            },
+            aggregate=False,
+            coalesce_key=None,
+        )
+        self._blocked_sent.add(key)
+        self._last_progress.pop(skill_id, None)
+        return True
+
+    async def finished(self, run_snapshot: Mapping[str, Any]) -> bool:
+        run = _snapshot(run_snapshot)
+        status = str(run.get("status") or "").upper()
+        if status == "BLOCKED":
+            return await self.blocked(run)
+        skill_id = str(run.get("skill_id") or "")
+        revision = _integer(run.get("revision"))
+        if not skill_id:
+            return False
+        key = (skill_id, revision, status)
+        if key in self._finished_sent:
+            return False
+        await self._push_with_retry(
+            _finished_text(run),
+            ai_behavior="respond",
+            priority=5,
+            metadata={
+                "description": "Minecraft 女仆 Skill 结束",
+                "skill_id": skill_id,
+                "skill_name": str(run.get("skill_name") or ""),
+                "revision": revision,
+                "status": status,
+                "reason": str(run.get("last_failure_reason") or ""),
+            },
+            aggregate=False,
+            coalesce_key=None,
+        )
+        self._finished_sent.add(key)
+        self._last_progress.pop(skill_id, None)
+        return True
+
+    async def _push_with_retry(self, text: str, **kwargs) -> None:
+        for attempt, delay in enumerate((0.0, 0.5, 1.5)):
+            if delay:
+                await asyncio.sleep(delay)
+            try:
+                await self._plugin._push_minecraft_context(text, **kwargs)
+                return
+            except Exception:
+                if attempt == 2:
+                    raise
+
+
+def _snapshot(value: Any) -> dict[str, Any]:
+    if isinstance(value, Mapping):
+        return dict(value)
+    as_dict = getattr(value, "as_dict", None)
+    if callable(as_dict):
+        data = as_dict()
+        return dict(data) if isinstance(data, Mapping) else {}
+    return {}
+
+
+def _integer(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _progress_text(run: Mapping[str, Any]) -> str:
+    result = run.get("result") if isinstance(run.get("result"), Mapping) else {}
+    child = run.get("child_action") \
+        if isinstance(run.get("child_action"), Mapping) else {}
+    collected = _integer(run.get("collected_count"))
+    target = _integer((run.get("args") or {}).get("target_count")) \
+        if isinstance(run.get("args"), Mapping) else 0
+    stage = str(child.get("stage") or result.get("stage") or run.get("status") or "RUNNING")
+    kind = str(child.get("kind") or "内部动作")
+    return (
+        f"女仆 Skill {run.get('skill_name') or '任务'} 正在执行，内部动作：{kind}，阶段：{stage}，"
+        f"已采集 {collected}/{target if target > 0 else '?'} 个目标方块。"
+        "这是内部进度，不要仅因本消息打断玩家或另行启动动作。"
+    )
+
+
+def _blocked_text(run: Mapping[str, Any]) -> str:
+    result = run.get("result") if isinstance(run.get("result"), Mapping) else {}
+    reason = str(run.get("last_failure_reason") or result.get("reason") or "BLOCKED")
+    suggestions = result.get("suggestions")
+    safe_result = dict(result)
+    diagnostic = json.dumps(
+        safe_result, ensure_ascii=False, separators=(",", ":"), default=str
+    )[:4000]
+    text = (
+        f"女仆 Skill {run.get('skill_name') or '任务'}（skill_id={run.get('skill_id')}）"
+        f"已阻塞，原因：{reason}。已采集 {max(0, _integer(run.get('collected_count')))} 个目标方块。"
+        f"结构化诊断：{diagnostic}。"
+    )
+    if isinstance(suggestions, list) and suggestions:
+        text += "服务端给出的候选方案：" + json.dumps(
+            suggestions, ensure_ascii=False, separators=(",", ":"), default=str
+        )[:2000] + "。"
+    text += (
+        "这是 Skill 终态，不会自动继续。你必须基于 suggestions 给出一个具体方案；"
+        "若方案不扩大破坏范围且依据充分，可调用 mc_start_skill 创建新的 Skill；"
+        "若涉及换层、危险地形、清除额外方块或玩家选择，先说明具体方案并请求确认。"
+        "禁止原样重启、编造坐标或声称仍在执行。"
+    )
+    return text
+
+
+def _finished_text(run: Mapping[str, Any]) -> str:
+    status = str(run.get("status") or "UNKNOWN").upper()
+    result = run.get("result") if isinstance(run.get("result"), Mapping) else {}
+    reason = str(run.get("last_failure_reason") or result.get("reason") or status)
+    diagnostic = json.dumps(
+        dict(result), ensure_ascii=False, separators=(",", ":"), default=str
+    )[:4000]
+    if status == "SUCCEEDED":
+        outcome = "已经成功完成"
+    elif status == "CANCELLED":
+        outcome = "已取消"
+    else:
+        outcome = f"已结束，状态为 {status}，原因是 {reason}"
+    return (
+        f"女仆 Skill {run.get('skill_name') or '任务'}（skill_id={run.get('skill_id')}）{outcome}。"
+        f"实际采集数量：{max(0, _integer(run.get('collected_count')))}。"
+        f"结构化结果：{diagnostic}。请按真实 Skill 终态回应玩家；失败时不得声称成功。"
+    )

@@ -5,6 +5,7 @@ import java.util.Locale;
 public enum MaidActionKind {
     NAVIGATE("navigate"),
     HARVEST_BLOCKS("harvest_blocks"),
+    EXCAVATE_SEGMENT("excavate_segment"),
     LEGACY_ATTACK("legacy_attack");
 
     private final String wireName;

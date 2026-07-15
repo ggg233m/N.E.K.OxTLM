@@ -373,6 +373,16 @@ public final class MaidActionStore {
             LOGGER.error("Action stop failed for {}", active.actionId, cleanupFailure);
             active.warnings.add("ACTION_STOP_FAILED");
         }
+        JsonObject mergedResult = result == null ? new JsonObject() : result.deepCopy();
+        try {
+            JsonObject actionResult = active.action.terminationResult(
+                    active.context(active.maid.level().getGameTime()), reason);
+            mergeMissingFields(mergedResult, actionResult);
+        } catch (RuntimeException snapshotFailure) {
+            LOGGER.error("Action terminal snapshot failed for {}", active.actionId,
+                    snapshotFailure);
+            active.warnings.add("ACTION_TERMINAL_SNAPSHOT_FAILED");
+        }
         try {
             cleanupNavigation(active.maid);
         } catch (RuntimeException cleanupFailure) {
@@ -404,7 +414,7 @@ public final class MaidActionStore {
         } finally {
             active.stage = terminalStatus.name();
             active.endReason = reason;
-            active.result = result == null ? new JsonObject() : result.deepCopy();
+            active.result = mergedResult;
             active.finishedAtMs = System.currentTimeMillis();
             activeByMaid.remove(active.maidId, active);
             if (active.eventsEnabled) {
@@ -419,6 +429,17 @@ public final class MaidActionStore {
         maid.getBrain().eraseMemory(MemoryModuleType.WALK_TARGET);
         maid.getBrain().eraseMemory(MemoryModuleType.LOOK_TARGET);
         maid.setSwingingArms(false);
+    }
+
+    private static void mergeMissingFields(JsonObject target, JsonObject fallback) {
+        if (fallback == null) {
+            return;
+        }
+        for (Map.Entry<String, com.google.gson.JsonElement> entry : fallback.entrySet()) {
+            if (!target.has(entry.getKey())) {
+                target.add(entry.getKey(), entry.getValue().deepCopy());
+            }
+        }
     }
 
     private static void transition(ActionRecord record, ActionStatus next) {

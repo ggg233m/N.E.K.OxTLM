@@ -188,14 +188,15 @@ MC_START_MAID_ACTION = {
         "让已绑定女仆开始一个服务端自主动作。navigate 会以非破坏方式主动寻路到指定坐标；"
         "harvest_blocks 会前往目标方块或搜索附近指定方块，并可在 search_radius 内通过 Java 地形感知"
         "规划清理安全、允许破坏且工具条件满足的阻挡，进行短距离下挖或开通道后采集；"
-        "普通挖矿石或找矿石只传 selector 并省略 mining_plan，由服务端持续探矿；只有玩家明确要求"
-        "方向或挖掘方案时才传 mining_plan。探矿不再因总步数、段数、深度或开凿方块总量停止。"
+        "harvest_blocks 是明确坐标、只搜附近、精确单块或调试 mining_plan 的底层原子动作；"
+        "普通自动找矿、开矿道或累计指定数量应使用 mc_start_skill(skill='mine_ore')。"
+        "旧的 selector 持续探矿与 mining_plan 字段仅保留为底层协议兼容能力，不是默认高层方案。"
         "工具只返回是否接受，动作完成或失败会异步通知。新动作默认会覆盖旧动作。"
         "明确要求去某坐标、主动挖掘或采集时应调用本工具，不要用 mc_switch_task 假装挖矿。"
         "按名称采集资源（例如挖石头、挖煤、砍木头）必须使用 selector；"
         "target_pos 仅限玩家明确给出或可信工具返回的方块坐标，禁止使用玩家/女仆坐标或猜测坐标。"
         "矿石优先使用 minecraft:*_ores 标签选择器；矿石 selector 默认 vein_mining=true 并尝试采完整矿脉。"
-        "纯矿石 selector 附近无目标时服务端默认执行持续 auto 探矿；显式 mining_plan.mode=nearby 可关闭。"
+        "显式 mining_plan.mode=nearby 可将原子采集限制为附近扫描。"
         "矿石持续探矿会强制使用 timeout_ms=0（无常规截止时间），直到完成、急停或安全故障。"
         "普通 navigate 不会破坏地形；harvest_blocks 仍不会搭桥或垫方块，也不会强制加载未加载区块。"
     ),
@@ -218,17 +219,16 @@ MC_START_MAID_ACTION = {
                     "tag selector（如 minecraft:diamond_ores），不要只传单一 minecraft:diamond_ore；tag id"
                     "以 _ores 结尾或 block id 以 _ore 结尾时，省略 vein_mining 会默认 true、max_blocks 默认"
                     "64 且允许 1..64，按连通矿脉采集。vein_mining=false 时 max_blocks 默认 1、范围 1..8。"
-                    "玩家明确说数量时设置对应 max_blocks；说只挖一块时设置 vein_mining=false,max_blocks=1。"
-                    "纯矿石 selector 附近无目标时默认持续 auto 探矿；显式 mode=nearby 可关闭。普通‘挖/找"
-                    "某种矿石’必须省略 mining_plan。只有玩家明确要求向前、向下或某种方案时才传"
+                    "附近原子采集明确给出数量时设置对应 max_blocks；自动找矿或累计数量改用 mine_ore Skill 的"
+                    "target_count。说只挖一块时设置 vein_mining=false,max_blocks=1。显式 mode=nearby 可限制"
+                    "为附近扫描。持续探矿是旧协议兼容能力；只有低层调试或明确要求原子动作方案时才传"
                     "mining_plan：{mode:nearby|forward_tunnel|staircase_down|auto,"
                     "direction:maid_facing|north|south|east|west,max_distance:1..16,max_depth:0..12,"
                     "max_segments:1..4,excavation_budget:0..256}。max_segments/excavation_budget 是旧协议"
                     "兼容字段，服务端不再用它们终止动作。非 nearby 模式只允许与 selector 搭配；forward_tunnel 的"
                     "max_depth 必须为 0；staircase_down 要求 max_distance>=max_depth，auto 要求"
                     "max_distance>max_depth。max_distance/max_depth 只定义每段矿道形状，段结束后会从女仆"
-                    "实际位置继续；不构成总上限。未传 mining_plan 时，纯矿石 selector 默认持续 auto，"
-                    "其它资源保持仅搜索附近。harvest_blocks 可清理安全可破坏"
+                    "实际位置继续；不构成总上限。harvest_blocks 可清理安全可破坏"
                     "阻挡；navigate 始终非破坏性。两者都"
                     "不会搭桥或垫方块，也不会强制加载未加载区块"
                 ),
@@ -283,6 +283,118 @@ MC_LIST_ACTIVE_MAID_ACTIONS = {
     "name": "mc_list_active_maid_actions",
     "description": "列出已绑定女仆当前仍在服务端执行或清理中的 Agent 动作。",
     "parameters": {"type": "object", "properties": {}},
+}
+
+MC_START_SKILL = {
+    "name": "mc_start_skill",
+    "description": (
+        "启动由 Python SkillRunner 持久化编排的高级女仆技能。当前支持 mine_ore。"
+        "mine_ore 使用确定性鱼骨矿道：默认主线为持续向下阶梯，每段8格；在新 junction "
+        "扫描目标矿物，再挖左右各8格水平分支并返回 junction。shape=level 可改为纯水平主线。"
+        "发现矿脉时固定完整采集，因此 target_count 是最低目标，最终 blocks_harvested "
+        "允许超出。启动只表示已接受，必须等待异步 Skill 终态。不要与提示词/RAG用途的"
+        "mc_use_skill 混淆。普通自动找矿优先使用本工具；原子动作调试才使用"
+        "mc_start_maid_action。"
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "skill": {
+                "type": "string",
+                "enum": ["mine_ore"],
+                "description": "高级技能名；当前仅支持 mine_ore",
+            },
+            "args": {
+                "type": "object",
+                "properties": {
+                    "selector": {
+                        "type": "object",
+                        "properties": {
+                            "type": {"type": "string", "enum": ["block", "tag"]},
+                            "id": {
+                                "type": "string",
+                                "description": "带命名空间的矿物方块/标签ID，如 minecraft:diamond_ores",
+                            },
+                        },
+                        "required": ["type", "id"],
+                        "additionalProperties": False,
+                    },
+                    "target_count": {
+                        "type": "integer", "minimum": 1, "maximum": 4096,
+                        "description": "最低目标方块数；完整矿脉可使结果超出该数量",
+                    },
+                    "target_metric": {
+                        "type": "string", "enum": ["blocks_harvested"],
+                        "description": "只按服务端确认的实际采集方块计数",
+                    },
+                    "strategy": {
+                        "type": "string", "enum": ["fishbone", "auto"],
+                        "description": "可选；auto 会归一化为 fishbone",
+                    },
+                    "direction": {
+                        "type": "string",
+                        "enum": ["north", "east", "south", "west"],
+                        "description": "可选主线方向；省略时确定性默认 north",
+                    },
+                    "shape": {
+                        "type": "string", "enum": ["level", "staircase_down"],
+                        "description": "可选主线形状；默认 staircase_down，左右/回退支路始终 level",
+                    },
+                },
+                "required": ["selector", "target_count", "target_metric"],
+                "additionalProperties": False,
+            },
+            "skill_id": {
+                "type": "string",
+                "description": "可选幂等 UUID；省略时自动生成",
+            },
+            "replace_existing": {
+                "type": "boolean",
+                "description": "是否安全取消该女仆当前 Skill 后启动，默认 true",
+            },
+        },
+        "required": ["skill", "args"],
+    },
+}
+
+MC_CANCEL_SKILL = {
+    "name": "mc_cancel_skill",
+    "description": (
+        "取消高级女仆 Skill 及其当前内部动作。skill_id 可省略，此时取消已绑定女仆当前 Skill。"
+        "玩家要求停止自动挖矿或鱼骨矿道时必须调用。"
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "skill_id": {"type": "string", "description": "可选 Skill UUID"},
+        },
+    },
+}
+
+MC_GET_SKILL_STATUS = {
+    "name": "mc_get_skill_status",
+    "description": "按 skill_id 查询高级女仆 Skill 的真实检查点、阶段、实际累计数和终态。",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "skill_id": {"type": "string", "description": "Skill UUID"},
+        },
+        "required": ["skill_id"],
+    },
+}
+
+MC_LIST_SKILLS = {
+    "name": "mc_list_skills",
+    "description": "列出已绑定女仆的高级 Skill 检查点，可选择是否包含最近终态。",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "include_terminal": {
+                "type": "boolean",
+                "description": "是否包含最近成功、失败、取消或阻塞的 Skill，默认 true",
+            },
+        },
+    },
 }
 
 MC_USE_SKILL = {
