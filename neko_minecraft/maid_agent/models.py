@@ -38,6 +38,7 @@ class ActionRecord:
     progress: Optional[float] = None
     end_reason: str = ""
     result: Dict[str, Any] = field(default_factory=dict)
+    detail: Dict[str, Any] = field(default_factory=dict)
     warnings: list = field(default_factory=list)
     updated_at: float = field(default_factory=time.time)
     raw: Dict[str, Any] = field(default_factory=dict)
@@ -61,6 +62,7 @@ class ActionRecord:
             "stage": self.stage,
             "end_reason": self.end_reason,
             "result": self.result,
+            "detail": self.detail,
             "warnings": list(self.warnings),
         }
         if self.progress is not None:
@@ -131,6 +133,9 @@ class ActionTracker:
         result = payload.get("result")
         if isinstance(result, dict):
             current.result = dict(result)
+        detail = payload.get("detail")
+        if isinstance(detail, dict):
+            current.detail = dict(detail)
         warnings = payload.get("warnings")
         if isinstance(warnings, list):
             current.warnings = list(warnings)

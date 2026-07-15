@@ -11,7 +11,6 @@ _DIRECTIONS = ("north", "east", "south", "west")
 _LEFT = {"north": "west", "west": "south", "south": "east", "east": "north"}
 _RIGHT = {value: key for key, value in _LEFT.items()}
 _OPPOSITE = {"north": "south", "south": "north", "east": "west", "west": "east"}
-_SEGMENT_LENGTH = 8
 _BENIGN_SCAN_MESSAGES = frozenset({
     "no_matching_block_found",
     "all_targets_changed_before_planning",
@@ -20,7 +19,7 @@ _BENIGN_SCAN_MESSAGES = frozenset({
 
 
 class MineOreSkill:
-    """Mine complete veins using a main tunnel with deterministic side branches."""
+    """Delegate mining to Java, with the former fishbone runner as a fallback."""
 
     name = "mine_ore"
     version = 1
@@ -29,7 +28,16 @@ class MineOreSkill:
         if not isinstance(raw, Mapping):
             raise ValueError("mine_ore args must be an object")
         allowed = {
-            "selector", "target_count", "target_metric", "strategy", "direction", "shape",
+            "selector",
+            "target_count",
+            "target_metric",
+            "execution_mode",
+            "strategy",
+            "direction",
+            "shape",
+            "segment_length",
+            "speed",
+            "discovery_mode",
         }
         unknown = sorted(set(raw) - allowed)
         if unknown:
@@ -63,24 +71,63 @@ class MineOreSkill:
             strategy = "fishbone"
         if strategy != "fishbone":
             raise ValueError("mine_ore.strategy must be fishbone (auto is accepted as an alias)")
-        direction = str(raw.get("direction", "north") or "").strip().lower()
-        if direction not in _DIRECTIONS:
-            raise ValueError("mine_ore.direction must be north, east, south or west")
-        shape = str(raw.get("shape", "staircase_down") or "").strip().lower()
-        if shape not in {"level", "staircase_down"}:
-            raise ValueError("mine_ore.shape must be level or staircase_down")
+        execution_mode = str(
+            raw.get("execution_mode", "autonomous") or ""
+        ).strip().lower()
+        if execution_mode not in {"autonomous", "legacy"}:
+            raise ValueError("mine_ore.execution_mode must be autonomous or legacy")
+        direction = str(raw.get("direction", "auto") or "").strip().lower()
+        if direction not in {*_DIRECTIONS, "auto"}:
+            raise ValueError(
+                "mine_ore.direction must be auto, north, east, south or west"
+            )
+        shape = str(raw.get("shape", "auto") or "").strip().lower()
+        if shape not in {"auto", "level", "staircase_down"}:
+            raise ValueError(
+                "mine_ore.shape must be auto, level or staircase_down"
+            )
+        segment_length = _bounded_integer(
+            raw.get("segment_length", 8), "segment_length", 1, 8
+        )
+        speed = _bounded_number(raw.get("speed", 0.7), "speed", 0.4, 1.0)
+        discovery_mode = str(
+            raw.get("discovery_mode", "loaded_scan") or ""
+        ).strip().lower()
+        if discovery_mode not in {"loaded_scan", "exposed_only"}:
+            raise ValueError(
+                "mine_ore.discovery_mode must be loaded_scan or exposed_only"
+            )
         return {
             "selector": {"type": selector_type, "id": selector_id},
             "target_count": target_count,
             "target_metric": target_metric,
+            "execution_mode": execution_mode,
             "strategy": strategy,
             "direction": direction,
             "shape": shape,
+            "segment_length": segment_length,
+            "speed": speed,
+            "discovery_mode": discovery_mode,
         }
 
     def initialize(self, run: SkillRun) -> None:
         run.collected_count = 0
-        run.main_direction = str(run.args["direction"])
+        if _execution_mode(run) == "autonomous":
+            run.main_direction = str(run.args.get("direction") or "auto")
+            run.main_segment_index = 0
+            run.branch_index = 0
+            run.tried_directions_at_current = []
+            run.origin_pos = None
+            run.current_pos = None
+            run.result = {
+                "stage": "delegating_to_java",
+                "phase": "autonomous",
+                "execution_mode": "autonomous",
+                "planner_owner": "java",
+            }
+            return
+
+        run.main_direction = _legacy_direction(run)
         run.main_segment_index = 0
         run.branch_index = 0
         run.tried_directions_at_current = []
@@ -93,6 +140,7 @@ class MineOreSkill:
             "after_harvest_phase": "choose_direction",
             "junction_established": False,
             "junction_pos": None,
+            "execution_mode": "legacy",
         }
 
     def next_directive(
@@ -100,6 +148,8 @@ class MineOreSkill:
         run: SkillRun,
         terminal_snapshot: Optional[Mapping[str, Any]],
     ):
+        if _execution_mode(run) == "autonomous":
+            return self._next_autonomous(run, terminal_snapshot)
         if run.collected_count >= int(run.args["target_count"]):
             return self._complete(run)
         if terminal_snapshot is not None:
@@ -124,6 +174,141 @@ class MineOreSkill:
                 return directive
         return self._directive_for_phase(run)
 
+    def _next_autonomous(
+        self,
+        run: SkillRun,
+        terminal_snapshot: Optional[Mapping[str, Any]],
+    ):
+        """Delegate sensing, route planning and execution to one Java child."""
+        if terminal_snapshot is None:
+            run.result.update({
+                "stage": "delegating_to_java",
+                "phase": "autonomous",
+                "execution_mode": "autonomous",
+                "planner_owner": "java",
+            })
+            return StartAction(
+                "autonomous_mining",
+                self._autonomous_action_args(run),
+                timeout_ms=0,
+            )
+
+        terminal = dict(terminal_snapshot)
+        result = _result(terminal)
+        reported_count = max(
+            0,
+            _integer(
+                result.get(
+                    "collected_count",
+                    result.get("blocks_harvested", result.get("harvested", 0)),
+                ),
+                0,
+            ),
+        )
+        run.collected_count = max(run.collected_count, reported_count)
+        status = _status(terminal)
+        phase = str(result.get("phase") or "").strip().upper()
+        blocked_reason = str(
+            result.get("blocked_reason")
+            or terminal.get("end_reason")
+            or "autonomous_mining_blocked"
+        ).strip()
+        decision_required = bool(result.get("decision_required", False))
+
+        if decision_required or phase == "BLOCKED":
+            current_parameters = self._autonomous_action_args(run)
+            decision = {
+                "mode": "restart_with_adjusted_parameters",
+                "adjustable_fields": [
+                    "direction",
+                    "shape",
+                    "segment_length",
+                    "speed",
+                    "discovery_mode",
+                ],
+                "current_parameters": current_parameters,
+                "requires_player_confirmation": True,
+                "in_place_resume_supported": False,
+            }
+            blocked_result = {
+                **result,
+                "execution_mode": "autonomous",
+                "planner_owner": "java",
+                "selector": dict(run.args["selector"]),
+                "target_metric": "blocks_harvested",
+                "blocks_harvested": run.collected_count,
+                "decision_required": True,
+                "decision": decision,
+                "child_terminal": terminal,
+            }
+            return Blocked(
+                _reason_code(blocked_reason, "AUTONOMOUS_MINING_BLOCKED"),
+                blocked_result,
+                tuple(terminal.get("warnings") or ()),
+            )
+
+        if status == "SUCCEEDED" and (phase in {"", "COMPLETED"}):
+            if run.collected_count < int(run.args["target_count"]):
+                return Fail(
+                    "SERVER_RESULT_INCONSISTENT",
+                    {
+                        **result,
+                        "message": (
+                            "Java reported COMPLETED before the requested target_count "
+                            "was observed"
+                        ),
+                        "execution_mode": "autonomous",
+                        "planner_owner": "java",
+                        "blocks_harvested": run.collected_count,
+                        "child_terminal": terminal,
+                    },
+                    tuple(terminal.get("warnings") or ()),
+                )
+            return Complete({
+                **result,
+                "message": "mine_ore_target_reached",
+                "execution_mode": "autonomous",
+                "planner_owner": "java",
+                "selector": dict(run.args["selector"]),
+                "target_metric": "blocks_harvested",
+                "target_count": int(run.args["target_count"]),
+                "blocks_harvested": run.collected_count,
+                "target_overshoot": max(
+                    0,
+                    run.collected_count - int(run.args["target_count"]),
+                ),
+            }, tuple(terminal.get("warnings") or ()))
+
+        reason = _reason_code(
+            terminal.get("end_reason") or result.get("blocked_reason") or status,
+            "AUTONOMOUS_MINING_FAILED",
+        )
+        return Fail(
+            reason,
+            {
+                **result,
+                "execution_mode": "autonomous",
+                "planner_owner": "java",
+                "blocks_harvested": run.collected_count,
+                "child_terminal": terminal,
+            },
+            tuple(terminal.get("warnings") or ()),
+        )
+
+    @staticmethod
+    def _autonomous_action_args(run: SkillRun) -> dict[str, Any]:
+        return {
+            "selector": dict(run.args["selector"]),
+            "target_count": int(run.args["target_count"]),
+            "direction": str(run.args.get("direction") or "auto"),
+            "shape": str(run.args.get("shape") or "auto"),
+            "segment_length": _segment_length(run),
+            "speed": float(run.args.get("speed", 0.7)),
+            "discovery_mode": str(
+                run.args.get("discovery_mode") or "loaded_scan"
+            ),
+        }
+
     def _directive_for_phase(self, run: SkillRun):
         scratch = run.result
         phase = str(scratch.get("phase") or "")
@@ -134,13 +319,20 @@ class MineOreSkill:
             return self._choose_direction(run)
         if phase == "dig":
             direction = str(scratch.get("dig_direction") or "")
-            remaining = max(1, min(_SEGMENT_LENGTH, _integer(scratch.get("segment_remaining"), 8)))
+            segment_length = _segment_length(run)
+            remaining = max(
+                1,
+                min(
+                    segment_length,
+                    _integer(scratch.get("segment_remaining"), segment_length),
+                ),
+            )
             scratch["stage"] = f"excavating_{scratch.get('dig_role') or 'segment'}"
             return StartAction(
                 "excavate_segment",
                 {
                     "direction": direction,
-                    "shape": run.args["shape"]
+                    "shape": _legacy_shape(run)
                     if scratch.get("dig_role") == "main" else "level",
                     "length": remaining,
                 },
@@ -218,10 +410,13 @@ class MineOreSkill:
             if run.origin_pos is None:
                 shape = str(
                     result.get("shape")
-                    or (run.args["shape"] if role == "main" else "level")
+                    or (_legacy_shape(run) if role == "main" else "level")
                 ).lower()
                 run.origin_pos = _segment_origin(real_end, direction, shape, dug)
-        remaining = max(0, _integer(scratch.get("segment_remaining"), _SEGMENT_LENGTH) - dug)
+        remaining = max(
+            0,
+            _integer(scratch.get("segment_remaining"), _segment_length(run)) - dug,
+        )
         scratch["segment_remaining"] = remaining
 
         if status == "SUCCEEDED" and stop_reason == "ore_encountered":
@@ -282,7 +477,7 @@ class MineOreSkill:
         scratch["phase"] = "dig"
         scratch["dig_direction"] = direction
         scratch["dig_role"] = role
-        scratch["segment_remaining"] = _SEGMENT_LENGTH
+        scratch["segment_remaining"] = _segment_length(run)
         return self._directive_for_phase(run)
 
     def _finish_direction(
@@ -372,7 +567,8 @@ class MineOreSkill:
             ),
             "main_segments_completed": run.main_segment_index,
             "strategy": "fishbone",
-            "shape": run.args["shape"],
+            "shape": _legacy_shape(run),
+            "execution_mode": "legacy",
         })
 
     def _blocked(
@@ -472,6 +668,56 @@ def _positive_integer(value: Any, name: str) -> int:
     if number < 1:
         raise ValueError(f"mine_ore.{name} must be positive")
     return number
+
+
+def _bounded_integer(value: Any, name: str, minimum: int, maximum: int) -> int:
+    number = _positive_integer(value, name)
+    if number < minimum or number > maximum:
+        raise ValueError(
+            f"mine_ore.{name} must be between {minimum} and {maximum}"
+        )
+    return number
+
+
+def _bounded_number(value: Any, name: str, minimum: float, maximum: float) -> float:
+    if isinstance(value, bool):
+        raise ValueError(f"mine_ore.{name} must be a number")
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"mine_ore.{name} must be a number") from None
+    if number < minimum or number > maximum:
+        raise ValueError(
+            f"mine_ore.{name} must be between {minimum} and {maximum}"
+        )
+    return number
+
+
+def _execution_mode(run: SkillRun) -> str:
+    """Missing mode identifies a v1 fishbone checkpoint from before Java autonomy."""
+    explicit = str(run.args.get("execution_mode") or "").strip().lower()
+    if explicit in {"autonomous", "legacy"}:
+        return explicit
+    return "legacy"
+
+
+def _legacy_direction(run: SkillRun) -> str:
+    direction = str(run.args.get("direction") or "auto").strip().lower()
+    return direction if direction in _DIRECTIONS else "north"
+
+
+def _legacy_shape(run: SkillRun) -> str:
+    shape = str(run.args.get("shape") or "auto").strip().lower()
+    return shape if shape in {"level", "staircase_down"} else "staircase_down"
+
+
+def _segment_length(run: SkillRun) -> int:
+    return max(1, min(8, _integer(run.args.get("segment_length"), 8)))
+
+
+def _reason_code(value: Any, fallback: str) -> str:
+    text = str(value or "").strip().upper().replace("-", "_").replace(" ", "_")
+    return text if text and text != "NONE" else fallback
 
 
 def _integer(value: Any, fallback: int = 0) -> int:

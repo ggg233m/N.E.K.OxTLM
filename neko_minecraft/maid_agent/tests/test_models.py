@@ -9,6 +9,21 @@ from neko_minecraft.maid_agent.registry import ActionRegistry, ActionValidationE
 
 
 class ActionTrackerTests(unittest.TestCase):
+    def test_preserves_java_progress_detail_for_skill_projection(self):
+        tracker = ActionTracker()
+        record, accepted = tracker.apply({
+            "action_id": "mining",
+            "generation": 1,
+            "sequence": 2,
+            "kind": "autonomous_mining",
+            "status": "RUNNING",
+            "stage": "HARVESTING",
+            "detail": {"collected_count": 4, "target_count": 10},
+        })
+        self.assertTrue(accepted)
+        self.assertEqual(4, record.detail["collected_count"])
+        self.assertEqual(record.detail, record.as_dict()["detail"])
+
     def test_rejects_old_generation_and_duplicate_sequence(self):
         tracker = ActionTracker()
         first, accepted = tracker.apply({
@@ -86,6 +101,51 @@ class ActionRegistryTests(unittest.TestCase):
         for args in invalid:
             with self.subTest(args=args), self.assertRaises(ActionValidationError):
                 self.registry.normalize("excavate_segment", args)
+
+    def test_normalizes_autonomous_mining_java_contract(self):
+        args = self.registry.normalize("autonomous_mining", {
+            "selector": {"type": "tag", "id": "Minecraft:Diamond_Ores"},
+            "target_count": 16,
+            "direction": "WEST",
+            "shape": "staircase_down",
+            "segment_length": 6,
+            "speed": 0.8,
+            "discovery_mode": "exposed_only",
+        })
+        self.assertEqual({
+            "selector": {"type": "tag", "id": "minecraft:diamond_ores"},
+            "target_count": 16,
+            "direction": "west",
+            "shape": "staircase_down",
+            "segment_length": 6,
+            "speed": 0.8,
+            "discovery_mode": "exposed_only",
+        }, args)
+
+    def test_autonomous_mining_defaults_are_java_owned_auto(self):
+        args = self.registry.normalize("autonomous_mining", {
+            "selector": {"type": "block", "id": "mod:tin_ore"},
+        })
+        self.assertEqual(1, args["target_count"])
+        self.assertEqual("auto", args["direction"])
+        self.assertEqual("auto", args["shape"])
+        self.assertEqual(8, args["segment_length"])
+        self.assertEqual(0.7, args["speed"])
+        self.assertEqual("loaded_scan", args["discovery_mode"])
+
+    def test_rejects_unknown_or_out_of_range_autonomous_mining_fields(self):
+        base = {"selector": {"type": "tag", "id": "minecraft:coal_ores"}}
+        invalid = (
+            {**base, "direction": "up"},
+            {**base, "shape": "shaft"},
+            {**base, "segment_length": 9},
+            {**base, "speed": 0.1},
+            {**base, "discovery_mode": "xray"},
+            {**base, "route": [{"x": 0, "y": 0, "z": 0}]},
+        )
+        for args in invalid:
+            with self.subTest(args=args), self.assertRaises(ActionValidationError):
+                self.registry.normalize("autonomous_mining", args)
 
     def test_harvest_requires_exactly_one_targeting_mode(self):
         with self.assertRaises(ActionValidationError):

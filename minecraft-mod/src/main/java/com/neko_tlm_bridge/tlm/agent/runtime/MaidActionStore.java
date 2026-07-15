@@ -216,9 +216,46 @@ public final class MaidActionStore {
         return active != null && !active.status.isTerminal();
     }
 
+    /**
+     * Reconciles an entity-load event with the volatile runtime. A different
+     * entity instance carrying the same maid UUID means the old instance was
+     * unloaded or changed dimension before the server tick observed removal.
+     * Returns true only when this exact instance already owns the action.
+     */
+    public boolean reconcileLoadedEntity(EntityMaid maid) {
+        Objects.requireNonNull(maid, "maid");
+        ActiveAction active = activeByMaid.get(maid.getUUID());
+        if (active == null || active.status.isTerminal()) {
+            return false;
+        }
+        if (active.maid == maid) {
+            return true;
+        }
+        if (active.kind == MaidActionKind.AUTONOMOUS_MINING) {
+            suspendForRecovery(active, ActionEndReason.ENTITY_UNLOADED, false);
+        } else {
+            terminate(active, ActionStatus.FAILED, ActionEndReason.ENTITY_UNLOADED,
+                    new JsonObject(), false);
+        }
+        return false;
+    }
+
     public Optional<JsonObject> getActiveStatus(UUID maidId) {
         ActiveAction active = activeByMaid.get(maidId);
         return active == null ? Optional.empty() : Optional.of(active.snapshot());
+    }
+
+    /**
+     * Raises, but never lowers, the generation counter before a persisted
+     * long-running action is reconstructed. The next {@link #start} therefore
+     * emits a generation strictly newer than every pre-restart event.
+     */
+    public void ensureGenerationAtLeast(UUID maidId, long generation) {
+        Objects.requireNonNull(maidId, "maidId");
+        if (generation < 0L) {
+            throw new IllegalArgumentException("generation must be non-negative");
+        }
+        generationsByMaid.merge(maidId, generation, Math::max);
     }
 
     public boolean attachHandLease(UUID actionId, long generation, HandLease handLease) {
@@ -311,15 +348,24 @@ public final class MaidActionStore {
                 terminate(active, ActionStatus.FAILED, ActionEndReason.ENTITY_DEAD,
                         new JsonObject());
             } else if (active.maid.isRemoved()) {
-                terminate(active, ActionStatus.FAILED, ActionEndReason.ENTITY_UNLOADED,
-                        new JsonObject(), false);
+                if (active.kind == MaidActionKind.AUTONOMOUS_MINING) {
+                    suspendForRecovery(active, ActionEndReason.ENTITY_UNLOADED, false);
+                } else {
+                    terminate(active, ActionStatus.FAILED, ActionEndReason.ENTITY_UNLOADED,
+                            new JsonObject(), false);
+                }
             }
         }
     }
 
     public void shutdown() {
         for (ActiveAction active : new ArrayList<>(activeByMaid.values())) {
-            terminate(active, ActionStatus.CANCELLED, ActionEndReason.REQUESTED, new JsonObject());
+            if (active.kind == MaidActionKind.AUTONOMOUS_MINING) {
+                suspendForRecovery(active, ActionEndReason.SERVER_STATE_LOST, true);
+            } else {
+                terminate(active, ActionStatus.CANCELLED, ActionEndReason.REQUESTED,
+                        new JsonObject());
+            }
         }
         activeByMaid.clear();
         recordsByAction.clear();
@@ -440,6 +486,43 @@ public final class MaidActionStore {
                 target.add(entry.getKey(), entry.getValue().deepCopy());
             }
         }
+    }
+
+    /**
+     * Removes a durable autonomous operation from the volatile runtime without
+     * publishing a false terminal event. Its action persists the resumable
+     * checkpoint from {@code stop}; entity load reconstructs a fresh runtime
+     * generation later.
+     */
+    private void suspendForRecovery(ActiveAction active, ActionEndReason reason,
+                                    boolean releaseLease) {
+        if (active.status.isTerminal() || active.status == ActionStatus.TERMINATING) {
+            return;
+        }
+        transition(active, ActionStatus.TERMINATING);
+        active.eventsEnabled = false;
+        try {
+            active.action.stop(active.context(active.maid.level().getGameTime()), reason);
+        } catch (RuntimeException failure) {
+            LOGGER.error("Failed to suspend durable maid action {}", active.actionId,
+                    failure);
+        }
+        try {
+            cleanupNavigation(active.maid);
+        } catch (RuntimeException failure) {
+            LOGGER.error("Failed to clean navigation while suspending {}", active.actionId,
+                    failure);
+        }
+        if (releaseLease) {
+            try {
+                active.lease.release(active.maid);
+            } catch (RuntimeException failure) {
+                LOGGER.error("Failed to release durable maid lease {}", active.actionId,
+                        failure);
+            }
+        }
+        activeByMaid.remove(active.maidId, active);
+        recordsByAction.remove(active.actionId, active);
     }
 
     private static void transition(ActionRecord record, ActionStatus next) {

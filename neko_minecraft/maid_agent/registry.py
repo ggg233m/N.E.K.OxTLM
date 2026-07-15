@@ -9,7 +9,12 @@ class ActionValidationError(ValueError):
 
 
 class ActionRegistry:
-    SUPPORTED_KINDS = frozenset({"navigate", "harvest_blocks", "excavate_segment"})
+    SUPPORTED_KINDS = frozenset({
+        "navigate",
+        "harvest_blocks",
+        "excavate_segment",
+        "autonomous_mining",
+    })
 
     def normalize(self, kind: str, args: Dict[str, Any]) -> Dict[str, Any]:
         kind = str(kind or "").strip().lower()
@@ -24,7 +29,95 @@ class ActionRegistry:
             return self._navigate(args)
         if kind == "excavate_segment":
             return self._excavate_segment(args)
+        if kind == "autonomous_mining":
+            return self._autonomous_mining(args)
         return self._harvest(args)
+
+    def _autonomous_mining(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalize the Java-owned mining goal and its bounded preferences.
+
+        Python deliberately does not expose route steps, excavation budgets or
+        a queue of primitive actions here.  Once accepted, Java owns sensing,
+        replanning and execution until the target count is reached, the player
+        cancels, or the server reports a decision-requiring BLOCKED terminal.
+        """
+        allowed = {
+            "selector",
+            "target_count",
+            "direction",
+            "shape",
+            "segment_length",
+            "speed",
+            "discovery_mode",
+        }
+        unknown = sorted(set(args) - allowed)
+        if unknown:
+            raise ActionValidationError(
+                "autonomous_mining has unsupported fields: "
+                + ", ".join(unknown)
+            )
+
+        selector = args.get("selector")
+        if not isinstance(selector, dict):
+            raise ActionValidationError("autonomous_mining.selector must be an object")
+        selector_unknown = sorted(set(selector) - {"type", "id"})
+        if selector_unknown:
+            raise ActionValidationError(
+                "autonomous_mining.selector has unsupported fields: "
+                + ", ".join(selector_unknown)
+            )
+        selector_type = str(selector.get("type") or "").strip().lower()
+        selector_id = str(selector.get("id") or "").strip().lower()
+        if selector_type not in {"block", "tag"}:
+            raise ActionValidationError(
+                "autonomous_mining.selector.type must be block or tag"
+            )
+        if not selector_id or ":" not in selector_id:
+            raise ActionValidationError(
+                "autonomous_mining.selector.id must be a namespaced resource id"
+            )
+
+        direction = str(args.get("direction", "auto") or "").strip().lower()
+        if direction not in {"auto", "north", "south", "east", "west"}:
+            raise ActionValidationError(
+                "autonomous_mining.direction must be auto, north, south, east or west"
+            )
+        shape = str(args.get("shape", "auto") or "").strip().lower()
+        if shape not in {"auto", "level", "staircase_down"}:
+            raise ActionValidationError(
+                "autonomous_mining.shape must be auto, level or staircase_down"
+            )
+        discovery_mode = str(
+            args.get("discovery_mode", "loaded_scan") or ""
+        ).strip().lower()
+        if discovery_mode not in {"loaded_scan", "exposed_only"}:
+            raise ActionValidationError(
+                "autonomous_mining.discovery_mode must be loaded_scan or exposed_only"
+            )
+        return {
+            "selector": {"type": selector_type, "id": selector_id},
+            "target_count": self._integer(
+                args.get("target_count", 1),
+                "autonomous_mining.target_count",
+                1,
+                4096,
+            ),
+            "direction": direction,
+            "shape": shape,
+            "segment_length": self._integer(
+                args.get("segment_length", 8),
+                "autonomous_mining.segment_length",
+                1,
+                8,
+            ),
+            "speed": self._number(
+                args.get("speed", 0.7),
+                "autonomous_mining.speed",
+                0.4,
+                1.0,
+            ),
+            "discovery_mode": discovery_mode,
+        }
 
     def _excavate_segment(self, args: Dict[str, Any]) -> Dict[str, Any]:
         allowed = {"direction", "shape", "length"}

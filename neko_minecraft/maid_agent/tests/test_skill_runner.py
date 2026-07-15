@@ -167,6 +167,22 @@ class TwoActionSkill(OneActionSkill):
         return Complete({"children": 2})
 
 
+class AutonomousOneActionSkill(OneActionSkill):
+    name = "autonomous_one_action"
+
+    def next_directive(self, run, terminal_snapshot):
+        if terminal_snapshot is None:
+            return StartAction(
+                "autonomous_mining",
+                {
+                    "selector": {"type": "tag", "id": "minecraft:coal_ores"},
+                    "target_count": 10,
+                },
+                timeout_ms=0,
+            )
+        return Complete({"collected_count": 10})
+
+
 class AlwaysBlockedSkill(OneActionSkill):
     name = "blocked"
 
@@ -235,6 +251,14 @@ class SkillRunnerTests(unittest.IsolatedAsyncioTestCase):
             runner.register(AlwaysBlockedSkill())
             result = await runner.start("blocked", "maid", {})
             self.assertEqual("BLOCKED", result["status"])
+            self.assertTrue(result["decision_required"])
+            self.assertEqual(
+                "restart_with_adjusted_parameters",
+                result["control_capabilities"]["decision_mode"],
+            )
+            self.assertFalse(result["control_capabilities"]["pause"])
+            self.assertFalse(result["control_capabilities"]["resume"])
+            self.assertFalse(result["control_capabilities"]["submit_decision"])
             self.assertEqual(1, len(feedback.blocked_runs))
             self.assertGreater(result["blocked_notification_revision"], 0)
 
@@ -381,6 +405,68 @@ class SkillRunnerTests(unittest.IsolatedAsyncioTestCase):
                 "SEARCHING",
                 feedback.progress_runs[0]["child_action"]["stage"],
             )
+            await runner.close()
+
+    async def test_autonomous_progress_updates_checkpointed_skill_count(self):
+        with tempfile.TemporaryDirectory() as directory:
+            feedback = FakeFeedback()
+            client = FakeActionClient(directory)
+            runner = SkillRunner(FakePlugin(), client, directory, feedback=feedback)
+            runner.register(AutonomousOneActionSkill())
+            started = await runner.start("autonomous_one_action", "maid", {})
+            progress = {
+                "action_id": started["current_action_id"],
+                "maid_id": "maid",
+                "generation": 1,
+                "sequence": 2,
+                "kind": "autonomous_mining",
+                "status": "RUNNING",
+                "stage": "HARVESTING",
+                "detail": {
+                    "phase": "HARVESTING",
+                    "collected_count": 4,
+                    "target_count": 10,
+                    "segments_dug": 3,
+                },
+            }
+            await runner.on_action_event("maid_action_progress", progress, progress)
+            await wait_until(lambda: len(feedback.progress_runs) == 1)
+            snapshot = runner.get_status(started["skill_id"])
+            self.assertEqual(4, snapshot["collected_count"])
+            self.assertEqual("HARVESTING", snapshot["result"]["stage"])
+            self.assertEqual(3, snapshot["result"]["java_progress"]["segments_dug"])
+            self.assertEqual(4, feedback.progress_runs[0]["collected_count"])
+            await runner.close()
+
+    async def test_resumed_autonomous_child_adopts_newer_generation_events(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runner = SkillRunner(FakePlugin(), FakeActionClient(directory), directory)
+            runner.register(AutonomousOneActionSkill())
+            started = await runner.start("autonomous_one_action", "maid", {})
+            action_id = started["current_action_id"]
+
+            resumed = {
+                "action_id": action_id,
+                "maid_id": "maid",
+                "generation": 2,
+                "sequence": 1,
+                "kind": "autonomous_mining",
+                "status": "RUNNING",
+                "stage": "SCANNING",
+                "detail": {"phase": "SCANNING", "collected_count": 2},
+            }
+            stale = {
+                **resumed,
+                "generation": 1,
+                "sequence": 99,
+                "detail": {"phase": "SCANNING", "collected_count": 9},
+            }
+            await runner.on_action_event("maid_action_progress", resumed, resumed)
+            await runner.on_action_event("maid_action_progress", stale, stale)
+
+            snapshot = runner.get_status(started["skill_id"])
+            self.assertEqual(2, snapshot["current_action_generation"])
+            self.assertEqual(2, snapshot["collected_count"])
             await runner.close()
 
     async def test_external_child_supersede_cancels_skill_without_retry(self):

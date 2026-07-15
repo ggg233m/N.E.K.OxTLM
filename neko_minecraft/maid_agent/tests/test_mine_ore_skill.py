@@ -8,13 +8,16 @@ from neko_minecraft.maid_agent.skills.base import Blocked, Complete, SkillRun, S
 from neko_minecraft.maid_agent.skills.mine_ore import MineOreSkill
 
 
-def run_for(args=None):
+def run_for(args=None, *, execution_mode="legacy"):
     definition = MineOreSkill()
-    normalized = definition.normalize_args(args or {
+    raw = dict(args or {
         "selector": {"type": "tag", "id": "minecraft:diamond_ores"},
         "target_count": 5,
         "target_metric": "blocks_harvested",
     })
+    if execution_mode:
+        raw.setdefault("execution_mode", execution_mode)
+    normalized = definition.normalize_args(raw)
     run = SkillRun("00000000-0000-0000-0000-000000000001", "maid", "mine_ore", normalized)
     definition.initialize(run)
     return definition, run
@@ -29,19 +32,93 @@ def terminal(kind, *, status="SUCCEEDED", result=None, end_reason="COMPLETED"):
 
 
 class MineOreSkillTests(unittest.TestCase):
-    def test_normalizes_frozen_contract_and_defaults_to_downward_fishbone(self):
+    def test_normalizes_new_runs_to_java_autonomy_and_legacy_is_explicit(self):
+        definition, autonomous = run_for(execution_mode=None)
+        self.assertEqual("autonomous", autonomous.args["execution_mode"])
+        self.assertEqual("auto", autonomous.args["direction"])
+        self.assertEqual("auto", autonomous.args["shape"])
+        self.assertEqual("loaded_scan", autonomous.args["discovery_mode"])
+
         definition, run = run_for()
         self.assertEqual("fishbone", run.args["strategy"])
-        self.assertEqual("north", run.args["direction"])
-        self.assertEqual("staircase_down", run.args["shape"])
+        self.assertEqual("legacy", run.args["execution_mode"])
+        self.assertEqual("auto", run.args["direction"])
+        self.assertEqual("auto", run.args["shape"])
+        self.assertEqual("north", run.main_direction)
         aliased = definition.normalize_args({
             "selector": {"type": "block", "id": "mod:tin_ore"},
             "target_count": 2,
             "target_metric": "blocks_harvested",
-            "strategy": "auto", "direction": "west", "shape": "level",
+            "execution_mode": "legacy", "strategy": "auto",
+            "direction": "west", "shape": "level",
         })
         self.assertEqual("fishbone", aliased["strategy"])
         self.assertEqual("level", aliased["shape"])
+
+    def test_autonomous_mode_is_one_java_owned_child_with_frozen_mapping(self):
+        definition, run = run_for({
+            "selector": {"type": "tag", "id": "minecraft:iron_ores"},
+            "target_count": 12,
+            "target_metric": "blocks_harvested",
+            "direction": "east",
+            "shape": "staircase_down",
+            "segment_length": 6,
+            "speed": 0.8,
+            "discovery_mode": "exposed_only",
+        }, execution_mode=None)
+        directive = definition.next_directive(run, None)
+        self.assertIsInstance(directive, StartAction)
+        self.assertEqual("autonomous_mining", directive.kind)
+        self.assertEqual({
+            "selector": {"type": "tag", "id": "minecraft:iron_ores"},
+            "target_count": 12,
+            "direction": "east",
+            "shape": "staircase_down",
+            "segment_length": 6,
+            "speed": 0.8,
+            "discovery_mode": "exposed_only",
+        }, directive.args)
+
+    def test_autonomous_blocked_terminal_requests_restart_decision(self):
+        definition, run = run_for(execution_mode=None)
+        directive = definition.next_directive(run, terminal(
+            "autonomous_mining", status="FAILED", end_reason="BLOCKED",
+            result={
+                "phase": "BLOCKED",
+                "collected_count": 3,
+                "target_count": 5,
+                "blocked_reason": "lava_hazard",
+                "decision_required": True,
+                "segments_dug": 2,
+                "cleared_blocks": 8,
+            },
+        ))
+        self.assertIsInstance(directive, Blocked)
+        self.assertEqual("LAVA_HAZARD", directive.reason)
+        self.assertTrue(directive.result["decision_required"])
+        decision = directive.result["decision"]
+        self.assertEqual("restart_with_adjusted_parameters", decision["mode"])
+        self.assertFalse(decision["in_place_resume_supported"])
+        self.assertEqual(3, directive.result["blocks_harvested"])
+
+    def test_old_checkpoint_without_execution_mode_stays_legacy(self):
+        definition = MineOreSkill()
+        old_args = {
+            "selector": {"type": "tag", "id": "minecraft:coal_ores"},
+            "target_count": 1,
+            "target_metric": "blocks_harvested",
+            "strategy": "fishbone",
+            "direction": "north",
+            "shape": "staircase_down",
+        }
+        run = SkillRun("old", "maid", "mine_ore", old_args)
+        run.result = {
+            "phase": "harvest",
+            "harvest_purpose": "junction_scan",
+            "after_harvest_phase": "choose_direction",
+        }
+        directive = definition.next_directive(run, None)
+        self.assertEqual("harvest_blocks", directive.kind)
 
     def test_initial_scan_uses_complete_nearby_vein(self):
         definition, run = run_for()

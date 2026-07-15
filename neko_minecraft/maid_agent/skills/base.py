@@ -68,6 +68,12 @@ class SkillRun:
     revision: int = 0
     blocked_notification_revision: int = 0
     last_failure_reason: str = ""
+    # A BLOCKED skill is terminal in v1.  Java may attach a structured
+    # decision request, but there is intentionally no in-place resume protocol
+    # until the server implements and advertises one.  The LLM must start a new
+    # skill with adjusted goal/preferences after player confirmation.
+    decision_required: bool = False
+    decision_context: Dict[str, Any] = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
     result: Dict[str, Any] = field(default_factory=dict)
@@ -88,6 +94,7 @@ class SkillRun:
         return self.status in ACTIVE_SKILL_STATUSES
 
     def as_dict(self) -> Dict[str, Any]:
+        can_cancel = self.active
         return {
             "schema_version": self.schema_version,
             "skill_id": self.skill_id,
@@ -109,6 +116,20 @@ class SkillRun:
             "revision": self.revision,
             "blocked_notification_revision": self.blocked_notification_revision,
             "last_failure_reason": self.last_failure_reason,
+            "decision_required": bool(self.decision_required),
+            "decision_context": dict(self.decision_context),
+            "control_capabilities": {
+                "cancel": can_cancel,
+                "pause": False,
+                "resume": False,
+                "submit_decision": False,
+                "decision_mode": (
+                    "restart_with_adjusted_parameters"
+                    if self.status == "BLOCKED" and self.decision_required
+                    else "none"
+                ),
+                "protocol_gate": "pause_resume_decision_protocol_not_registered",
+            },
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "result": dict(self.result),
@@ -155,6 +176,13 @@ class SkillRun:
                 0, int(data.get("blocked_notification_revision", 0))
             ),
             last_failure_reason=str(data.get("last_failure_reason") or ""),
+            decision_required=bool(
+                data.get(
+                    "decision_required",
+                    str(data.get("status") or "").upper() == "BLOCKED",
+                )
+            ),
+            decision_context=_mapping(data.get("decision_context")),
             created_at=float(data.get("created_at", time.time())),
             updated_at=float(data.get("updated_at", time.time())),
             result=_mapping(data.get("result")),

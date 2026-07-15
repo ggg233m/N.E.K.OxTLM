@@ -289,10 +289,12 @@ MC_START_SKILL = {
     "name": "mc_start_skill",
     "description": (
         "启动由 Python SkillRunner 持久化编排的高级女仆技能。当前支持 mine_ore。"
-        "mine_ore 使用确定性鱼骨矿道：默认主线为持续向下阶梯，每段8格；在新 junction "
-        "扫描目标矿物，再挖左右各8格水平分支并返回 junction。shape=level 可改为纯水平主线。"
-        "发现矿脉时固定完整采集，因此 target_count 是最低目标，最终 blocks_harvested "
-        "允许超出。启动只表示已接受，必须等待异步 Skill 终态。不要与提示词/RAG用途的"
+        "mine_ore 默认只启动一个 Java autonomous_mining 子动作；世界感知、选路、开矿道、"
+        "重规划和数量累计均由 Java 持续完成，LLM 只提供目标和有限偏好，不编排逐段动作。"
+        "execution_mode=legacy 仅用于显式回退和旧检查点兼容。target_count 是最低目标，"
+        "最终 blocks_harvested 可能超出。启动只表示已接受，必须等待异步 Skill 终态。"
+        "Java 只有在无法安全继续且 decision_required=true 时才以 BLOCKED 请求决策；"
+        "当前无原地恢复协议，需按诊断调整参数后新建 Skill。不要与提示词/RAG用途的"
         "mc_use_skill 混淆。普通自动找矿优先使用本工具；原子动作调试才使用"
         "mc_start_maid_action。"
     ),
@@ -329,16 +331,32 @@ MC_START_SKILL = {
                     },
                     "strategy": {
                         "type": "string", "enum": ["fishbone", "auto"],
-                        "description": "可选；auto 会归一化为 fishbone",
+                        "description": "旧鱼骨回退兼容字段；autonomous 模式不用于逐段规划",
+                    },
+                    "execution_mode": {
+                        "type": "string", "enum": ["autonomous", "legacy"],
+                        "description": "默认 autonomous，由 Java 全程自主；legacy 仅显式回退",
                     },
                     "direction": {
                         "type": "string",
-                        "enum": ["north", "east", "south", "west"],
-                        "description": "可选主线方向；省略时确定性默认 north",
+                        "enum": ["auto", "north", "east", "south", "west"],
+                        "description": "可选方向偏好；默认 auto 由 Java 选择",
                     },
                     "shape": {
-                        "type": "string", "enum": ["level", "staircase_down"],
-                        "description": "可选主线形状；默认 staircase_down，左右/回退支路始终 level",
+                        "type": "string", "enum": ["auto", "level", "staircase_down"],
+                        "description": "可选矿道形状偏好；默认 auto 由 Java 选择",
+                    },
+                    "segment_length": {
+                        "type": "integer", "minimum": 1, "maximum": 8,
+                        "description": "Java 自主规划的基础段长，默认8",
+                    },
+                    "speed": {
+                        "type": "number", "minimum": 0.4, "maximum": 1.0,
+                        "description": "移动速度，默认0.7",
+                    },
+                    "discovery_mode": {
+                        "type": "string", "enum": ["loaded_scan", "exposed_only"],
+                        "description": "默认 loaded_scan 扫描已加载区域；exposed_only 只认暴露矿物",
                     },
                 },
                 "required": ["selector", "target_count", "target_metric"],

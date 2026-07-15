@@ -48,7 +48,8 @@ class SkillCheckpointTests(unittest.IsolatedAsyncioTestCase):
                 "tried_directions_at_current", "status", "current_action_id",
                 "current_action_generation", "current_action_fingerprint",
                 "revision", "blocked_notification_revision",
-                "last_failure_reason", "created_at", "updated_at",
+                "last_failure_reason", "decision_required", "decision_context",
+                "created_at", "updated_at",
             ):
                 self.assertIn(field, payload)
             loaded = await store.load_all()

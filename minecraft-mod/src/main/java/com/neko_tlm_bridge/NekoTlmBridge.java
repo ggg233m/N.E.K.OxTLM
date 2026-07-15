@@ -10,11 +10,13 @@ import com.neko_tlm_bridge.network.debug.MaidAgentNetwork;
 import com.neko_tlm_bridge.network.debug.MaidPathDebugService;
 import com.neko_tlm_bridge.tlm.NekoWebSocketServerHolder;
 import com.neko_tlm_bridge.tlm.agent.MaidActionKind;
+import com.neko_tlm_bridge.tlm.agent.action.AutonomousMiningAction;
 import com.neko_tlm_bridge.tlm.agent.action.HarvestBlocksAction;
 import com.neko_tlm_bridge.tlm.agent.action.ExcavateSegmentAction;
 import com.neko_tlm_bridge.tlm.agent.action.LegacyAttackAction;
 import com.neko_tlm_bridge.tlm.agent.action.NavigateAction;
 import com.neko_tlm_bridge.tlm.agent.runtime.MaidActionStore;
+import com.neko_tlm_bridge.tlm.agent.world.AutonomousMiningRecovery;
 import com.neko_tlm_bridge.ws.NekoCommand;
 import com.neko_tlm_bridge.ws.NekoWebSocketServer;
 import com.neko_tlm_bridge.ws.PendingCommandManager;
@@ -164,7 +166,7 @@ public class NekoTlmBridge {
 
     private static void onEntityJoinLevel(EntityJoinLevelEvent event) {
         if (!event.getLevel().isClientSide() && event.getEntity() instanceof EntityMaid maid) {
-            MaidActionStore.getInstance().recoverOrphanLease(maid);
+            AutonomousMiningRecovery.recover(maid);
         }
     }
 
@@ -180,6 +182,8 @@ public class NekoTlmBridge {
                 (maid, args) -> HarvestBlocksAction.fromArgs(args));
         store.registerFactory(MaidActionKind.EXCAVATE_SEGMENT,
                 (maid, args) -> ExcavateSegmentAction.fromArgs(args));
+        store.registerFactory(MaidActionKind.AUTONOMOUS_MINING,
+                (maid, args) -> AutonomousMiningAction.fromArgs(args));
         IMaidTask attackTask = TaskManager.findTask(
                         net.minecraft.resources.ResourceLocation.parse("touhou_little_maid:attack"))
                 .orElse(TaskManager.getIdleTask());

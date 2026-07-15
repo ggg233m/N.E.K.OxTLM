@@ -382,15 +382,28 @@ class SkillRunner:
         if run is None:
             return False
         if not self._is_action_terminal(snapshot):
-            if run.current_action_id != action_id:
-                return True
-            generation = self._integer(snapshot.get("generation"), 0)
-            if (run.current_action_generation > 0 and generation > 0
-                    and generation != run.current_action_generation):
-                return True
+            lock = self._maid_locks[run.maid_id]
+            async with lock:
+                run = self._runs.get(skill_id)
+                if run is None or run.current_action_id != action_id:
+                    return True
+                generation = self._integer(snapshot.get("generation"), 0)
+                if (run.current_action_generation > 0 and generation > 0
+                        and generation < run.current_action_generation):
+                    return True
+                generation_changed = (
+                    generation > 0
+                    and generation > run.current_action_generation
+                )
+                if generation_changed:
+                    run.current_action_generation = generation
+                progress_changed = self._observe_child_progress(run, snapshot)
+                changed = generation_changed or progress_changed
+                if changed:
+                    await self._persist(run)
+                progress_snapshot = run.as_dict()
             callback = getattr(self.feedback, "progress", None)
             if callable(callback):
-                progress_snapshot = run.as_dict()
                 progress_snapshot["child_action"] = snapshot
                 task = asyncio.create_task(callback(progress_snapshot))
                 self._feedback_tasks.add(task)
@@ -404,7 +417,7 @@ class SkillRunner:
                 return True
             generation = self._integer(snapshot.get("generation"), 0)
             if (run.current_action_generation > 0 and generation > 0
-                    and generation != run.current_action_generation):
+                    and generation < run.current_action_generation):
                 return True
             if run.pending_terminal:
                 return True
@@ -415,6 +428,33 @@ class SkillRunner:
 
         self._ensure_drive_background(skill_id)
         return True
+
+    def _observe_child_progress(
+        self, run: SkillRun, snapshot: Mapping[str, Any]
+    ) -> bool:
+        """Project Java autonomous-mining telemetry into the Skill checkpoint."""
+        if str(snapshot.get("kind") or "").lower() != "autonomous_mining":
+            return False
+        detail = snapshot.get("detail")
+        detail = dict(detail) if isinstance(detail, Mapping) else {}
+        changed = False
+        reported_count = self._integer(detail.get("collected_count"), -1)
+        if reported_count >= 0 and reported_count > run.collected_count:
+            run.collected_count = reported_count
+            changed = True
+        stage = str(snapshot.get("stage") or detail.get("phase") or "")
+        previous_stage = str(run.result.get("stage") or "")
+        if stage and stage != previous_stage:
+            run.result["stage"] = stage
+            changed = True
+        if detail and detail != run.result.get("java_progress"):
+            run.result["java_progress"] = detail
+            changed = True
+        if run.result.get("execution_mode") != "autonomous":
+            run.result["execution_mode"] = "autonomous"
+            run.result["planner_owner"] = "java"
+            changed = True
+        return changed
 
     async def _drive(self, skill_id: str):
         while not self._closed:
@@ -445,6 +485,8 @@ class SkillRunner:
                             or child_status in {"CANCELLED", "SUPERSEDED"}):
                         self._clear_child(run)
                         run.status = "CANCELLED"
+                        run.decision_required = False
+                        run.decision_context = {}
                         run.last_failure_reason = str(
                             terminal.get("end_reason")
                             or ("REQUESTED" if cancel_requested
@@ -552,6 +594,8 @@ class SkillRunner:
                 run.maid_id, action_id, request
             )
             run.pending_terminal = {}
+            run.decision_required = False
+            run.decision_context = {}
             run.blocked_notification_revision = 0
             await self._persist(run)
             self._claims[action_id] = run.skill_id
@@ -562,6 +606,8 @@ class SkillRunner:
             run.result = dict(directive.result or {})
             run.warnings = list(directive.warnings or ())
             run.last_failure_reason = ""
+            run.decision_required = False
+            run.decision_context = {}
             await self._persist(run)
             return "finished"
         if isinstance(directive, Blocked):
@@ -569,6 +615,13 @@ class SkillRunner:
             run.last_failure_reason = str(directive.reason or "BLOCKED")
             run.result = dict(directive.result or {})
             run.warnings = list(directive.warnings or ())
+            run.decision_required = bool(
+                run.result.get("decision_required", True)
+            )
+            context = run.result.get("decision")
+            run.decision_context = (
+                dict(context) if isinstance(context, Mapping) else {}
+            )
             run.blocked_notification_revision = 0
             await self._persist(run)
             return "blocked"
@@ -577,6 +630,8 @@ class SkillRunner:
             run.last_failure_reason = str(directive.reason or "FAILED")
             run.result = dict(directive.result or {})
             run.warnings = list(directive.warnings or ())
+            run.decision_required = False
+            run.decision_context = {}
             await self._persist(run)
             return "finished"
         raise TypeError(f"Unsupported skill directive: {type(directive).__name__}")

@@ -62,7 +62,8 @@ class MaidActionGuidanceTests(unittest.TestCase):
             self.assertIn(value, tool_text)
             self.assertIn(value, _TLM_AI_INSTRUCTIONS)
         self.assertIn("mc_start_skill", _TLM_AI_INSTRUCTIONS)
-        self.assertIn("fishbone", _TLM_AI_INSTRUCTIONS)
+        self.assertIn("autonomous_mining", _TLM_AI_INSTRUCTIONS)
+        self.assertIn("Java 自主完成", _TLM_AI_INSTRUCTIONS)
         self.assertIn("staircase_down", _TLM_AI_INSTRUCTIONS)
         self.assertIn("F8", _TLM_AI_INSTRUCTIONS)
         self.assertIn("mc_cancel_skill", _TLM_AI_INSTRUCTIONS)
@@ -91,13 +92,18 @@ class MaidActionGuidanceTests(unittest.TestCase):
         self.assertNotIn("skill_name", parameters["properties"])
         skill_text = MC_START_SKILL["description"] + str(parameters)
         for value in (
-            "mine_ore", "target_count", "blocks_harvested", "fishbone",
-            "staircase_down",
+            "mine_ore", "target_count", "blocks_harvested",
+            "autonomous_mining", "execution_mode", "segment_length",
+            "loaded_scan", "decision_required",
         ):
             self.assertIn(value, skill_text)
             self.assertIn(value, _TLM_AI_INSTRUCTIONS)
-        self.assertIn("完整采集", skill_text)
-        self.assertIn("完整连通矿脉", _TLM_AI_INSTRUCTIONS)
+        self.assertIn("Java 全程自主", skill_text)
+        self.assertIn("LLM 不得逐段遥控", _TLM_AI_INSTRUCTIONS)
+        self.assertIn("当前没有暂停", _TLM_AI_INSTRUCTIONS)
+        self.assertIn("fishbone", skill_text)
+        self.assertIn("legacy", skill_text)
+        self.assertIn("旧检查点", _TLM_AI_INSTRUCTIONS)
 
     def test_guidance_requires_a_concrete_llm_recovery_plan(self):
         self.assertIn("具体解决方案", _TLM_AI_INSTRUCTIONS)

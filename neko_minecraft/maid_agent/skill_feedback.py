@@ -85,6 +85,7 @@ class SkillFeedbackHandler:
                 "revision": revision,
                 "status": "BLOCKED",
                 "reason": str(run.get("last_failure_reason") or ""),
+                "decision_required": bool(run.get("decision_required", True)),
             },
             aggregate=False,
             coalesce_key=None,
@@ -173,6 +174,8 @@ def _blocked_text(run: Mapping[str, Any]) -> str:
     result = run.get("result") if isinstance(run.get("result"), Mapping) else {}
     reason = str(run.get("last_failure_reason") or result.get("reason") or "BLOCKED")
     suggestions = result.get("suggestions")
+    decision = run.get("decision_context") \
+        if isinstance(run.get("decision_context"), Mapping) else result.get("decision")
     safe_result = dict(result)
     diagnostic = json.dumps(
         safe_result, ensure_ascii=False, separators=(",", ":"), default=str
@@ -186,9 +189,15 @@ def _blocked_text(run: Mapping[str, Any]) -> str:
         text += "服务端给出的候选方案：" + json.dumps(
             suggestions, ensure_ascii=False, separators=(",", ":"), default=str
         )[:2000] + "。"
+    if isinstance(decision, Mapping) and decision:
+        text += "结构化决策闸门：" + json.dumps(
+            dict(decision), ensure_ascii=False, separators=(",", ":"), default=str
+        )[:2000] + "。"
     text += (
-        "这是 Skill 终态，不会自动继续。你必须基于 suggestions 给出一个具体方案；"
-        "若方案不扩大破坏范围且依据充分，可调用 mc_start_skill 创建新的 Skill；"
+        "这是 Skill 终态，不会自动继续。你必须基于 decision 或 suggestions 给出一个具体方案；"
+        "若 Java 给出 decision，则按 blocked_reason 和 adjustable_fields 选择不同参数。"
+        "当前没有暂停、原地恢复或 submit-decision 协议；方案依据充分后只能调用 "
+        "mc_start_skill 创建新的 Skill；"
         "若涉及换层、危险地形、清除额外方块或玩家选择，先说明具体方案并请求确认。"
         "禁止原样重启、编造坐标或声称仍在执行。"
     )

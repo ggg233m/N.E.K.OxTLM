@@ -91,8 +91,16 @@ class SkillToolTests(unittest.IsolatedAsyncioTestCase):
             mine_args["required"],
         )
         self.assertEqual(
-            ["level", "staircase_down"],
+            ["auto", "level", "staircase_down"],
             mine_args["properties"]["shape"]["enum"],
+        )
+        self.assertEqual(
+            ["autonomous", "legacy"],
+            mine_args["properties"]["execution_mode"]["enum"],
+        )
+        self.assertEqual(
+            ["loaded_scan", "exposed_only"],
+            mine_args["properties"]["discovery_mode"]["enum"],
         )
 
 
