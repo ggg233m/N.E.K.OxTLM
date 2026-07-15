@@ -37,6 +37,7 @@ public final class MaidTerrainNavigator {
     private static final double MAX_SPEED = 1.0D;
     private static final long STUCK_WINDOW_TICKS = 40L;
     private static final double REQUIRED_STEP_PROGRESS = 0.25D;
+    private static final long ARRIVAL_SETTLE_TIMEOUT_TICKS = 40L;
 
     private final MaidTerrainPath terrainPath;
     private final HandLease handLease;
@@ -57,6 +58,7 @@ public final class MaidTerrainNavigator {
     private long windowStartedAt;
     private boolean started;
     private boolean terminal;
+    private long arrivalSettleStartedAt = Long.MIN_VALUE;
     private String phase = "pending";
     private ActionEndReason lastFailure;
 
@@ -81,6 +83,9 @@ public final class MaidTerrainNavigator {
         // path left by follow/work AI move the maid while the first passage
         // cells are being cleared.
         stopNativeNavigation(context);
+        if (context.maid().onGround()) {
+            context.maid().setDeltaMovement(Vec3.ZERO);
+        }
         for (MaidTerrainStep step : terrainPath.steps()) {
             for (BlockPos pos : step.toBreak()) {
                 plannedBreakStates.putIfAbsent(pos, context.level().getBlockState(pos));
@@ -256,6 +261,10 @@ public final class MaidTerrainNavigator {
         // Completing only after the entity really occupies the destination
         // also verifies the correct elevation for ascend/descend steps.
         if (context.maid().blockPosition().equals(step.to())) {
+            TickResult settling = settleAtDestination(context, step);
+            if (settling != null) {
+                return settling;
+            }
             completeStep(context);
             if (stepIndex >= terrainPath.steps().size()) {
                 return arrive(context);
@@ -311,6 +320,41 @@ public final class MaidTerrainNavigator {
         return running(detail);
     }
 
+    /**
+     * Crossing a block boundary is not a stable arrival: native navigation
+     * can leave horizontal velocity on the entity, and a descending maid may
+     * still be airborne. Stabilize for at least one server tick before the
+     * next terrain segment captures its origin.
+     */
+    private TickResult settleAtDestination(MaidActionContext context, MaidTerrainStep step) {
+        stopNativeNavigation(context);
+        Vec3 velocity = context.maid().getDeltaMovement();
+        context.maid().setDeltaMovement(0.0D, velocity.y, 0.0D);
+        if (arrivalSettleStartedAt == Long.MIN_VALUE) {
+            arrivalSettleStartedAt = context.gameTime();
+            phase = "settling";
+            return running(settlingDetail(context, step));
+        }
+        if (!context.maid().onGround()) {
+            if (context.gameTime() - arrivalSettleStartedAt >= ARRIVAL_SETTLE_TIMEOUT_TICKS) {
+                return fail(context, ActionEndReason.STUCK,
+                        "maid_did_not_settle_at_terrain_step_destination", true);
+            }
+            phase = "settling";
+            return running(settlingDetail(context, step));
+        }
+        context.maid().setDeltaMovement(Vec3.ZERO);
+        return null;
+    }
+
+    private JsonObject settlingDetail(MaidActionContext context, MaidTerrainStep step) {
+        JsonObject detail = stepDetail(step);
+        detail.addProperty("on_ground", context.maid().onGround());
+        detail.addProperty("settle_ticks", Math.max(0L,
+                context.gameTime() - arrivalSettleStartedAt));
+        return detail;
+    }
+
     private TickResult descendByGravity(MaidActionContext context, MaidTerrainStep step, double distance) {
         phase = "descending";
         if (!movementStarted) {
@@ -346,6 +390,7 @@ public final class MaidTerrainNavigator {
 
     private void completeStep(MaidActionContext context) {
         context.maid().getNavigation().stop();
+        context.maid().setDeltaMovement(Vec3.ZERO);
         if (debugPath != null && !debugPath.isDone()) {
             debugPath.advance();
         }
@@ -355,6 +400,7 @@ public final class MaidTerrainNavigator {
         breaker = null;
         movementStarted = false;
         movementStartDistance = 0.0D;
+        arrivalSettleStartedAt = Long.MIN_VALUE;
         phase = "step_complete";
     }
 
@@ -377,7 +423,12 @@ public final class MaidTerrainNavigator {
         terminal = true;
         phase = "failed";
         lastFailure = reason == null ? ActionEndReason.INTERNAL_ERROR : reason;
-        return failed(lastFailure, message, replanRecommended);
+        TickResult failure = failed(lastFailure, message, replanRecommended);
+        addPosition(failure.detail(), "actual", context.maid().blockPosition());
+        failure.detail().addProperty("actual_x_exact", context.maid().getX());
+        failure.detail().addProperty("actual_y_exact", context.maid().getY());
+        failure.detail().addProperty("actual_z_exact", context.maid().getZ());
+        return failure;
     }
 
     private TickResult failed(ActionEndReason reason, String message, boolean replanRecommended) {

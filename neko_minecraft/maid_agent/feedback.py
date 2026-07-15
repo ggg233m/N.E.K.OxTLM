@@ -122,7 +122,11 @@ class ActionFeedbackHandler:
             "prospecting_budget_exhausted_without_match",
             "prospecting_distance_or_depth_budget_exhausted",
         }
-        if retry_hint and not prospect_exhausted:
+        path_origin_drift = message in {
+            "maid_is_no_longer_at_terrain_step_origin",
+            "terrain_origin_drift_replan_exhausted",
+        }
+        if retry_hint and not prospect_exhausted and not path_origin_drift:
             text += f" 重试提示：{retry_hint}。"
         if message == "target_chunk_not_loaded":
             text += (
@@ -135,6 +139,11 @@ class ActionFeedbackHandler:
                 " 不要自动重复同一动作。本次请求允许的附近搜索或有界探矿已经完成；"
                 "如果 selector 原本代表矿石，请确认使用正确的 minecraft:*_ores 标签，"
                 "只有玩家明确要求扩大方向、距离、深度或开凿预算时才启动新动作。"
+            )
+        if path_origin_drift:
+            text += (
+                " 这是路径执行位置偏移，不是矿石 selector 或目标方块选择错误；服务端已经耗尽"
+                "本次有界重规划。不要改变 selector 或自动原样重试，可让玩家确认女仆没有被推挤后再决定。"
             )
         text += "请根据真实终态简短回应玩家；失败时不要声称动作成功。"
         return text

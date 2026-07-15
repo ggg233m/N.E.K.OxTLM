@@ -104,6 +104,7 @@ public final class HarvestBlocksAction implements MaidAction {
     private int unreachablePaths;
     private int plannerExpandedNodes;
     private int terrainReplans;
+    private int consecutiveTerrainReplans;
     private int routeBlocksCleared;
     private PlanningPurpose planningPurpose = PlanningPurpose.HARVEST;
     private Direction prospectDirection;
@@ -115,6 +116,7 @@ public final class HarvestBlocksAction implements MaidAction {
     private int prospectRescans;
     private BlockPos veinSeed;
     private String veinStopReason;
+    private JsonObject lastNavigationFailureDetail;
 
     public HarvestBlocksAction(BlockPos explicitTarget, Predicate<BlockState> selector,
                                String selectorDescription, int searchRadius, int maxBlocks,
@@ -669,11 +671,14 @@ public final class HarvestBlocksAction implements MaidAction {
             }
         }
         if (result.outcome() == MaidTerrainNavigator.Outcome.FAILED) {
-            boolean retry = result.replanRecommended() && terrainReplans < MAX_TERRAIN_REPLANS;
+            rememberNavigationFailure(result);
+            boolean retry = result.replanRecommended()
+                    && consecutiveTerrainReplans < MAX_TERRAIN_REPLANS;
             navigation.stop(context);
             navigation = null;
             if (retry) {
                 terrainReplans++;
+                consecutiveTerrainReplans++;
                 return restartTerrainSearch(context, result.reason(), "terrain_execution_requires_replan");
             }
             return onCandidateFailure(context, result.reason(),
@@ -683,6 +688,7 @@ public final class HarvestBlocksAction implements MaidAction {
         }
         if (result.outcome() == MaidTerrainNavigator.Outcome.ARRIVED) {
             navigation = null;
+            consecutiveTerrainReplans = 0;
             if (!canReachVisibleFace(context, currentTarget)) {
                 return onCandidateFailure(context, ActionEndReason.PATH_NOT_FOUND,
                         "planned_mining_stance_has_no_visible_target_face");
@@ -732,15 +738,28 @@ public final class HarvestBlocksAction implements MaidAction {
         }
 
         if (result.outcome() == MaidTerrainNavigator.Outcome.FAILED) {
+            rememberNavigationFailure(result);
+            String message = result.detail().has("message")
+                    ? result.detail().get("message").getAsString()
+                    : "prospecting_step_failed";
+            boolean retry = result.replanRecommended()
+                    && consecutiveTerrainReplans < MAX_TERRAIN_REPLANS;
             navigation.stop(context);
             navigation = null;
-            return failure(result.reason(),
-                    result.detail().has("message")
-                            ? result.detail().get("message").getAsString()
-                            : "prospecting_step_failed");
+            if (retry) {
+                terrainReplans++;
+                consecutiveTerrainReplans++;
+                return restartProspectingFromActualPosition(context);
+            }
+            if ("maid_is_no_longer_at_terrain_step_origin".equals(message)) {
+                return failure(ActionEndReason.STUCK,
+                        "terrain_origin_drift_replan_exhausted");
+            }
+            return failure(result.reason(), message);
         }
         if (result.outcome() == MaidTerrainNavigator.Outcome.ARRIVED) {
             navigation = null;
+            consecutiveTerrainReplans = 0;
             prospectSteps++;
             if (prospectStepMode == MiningPlan.StepMode.DESCEND) {
                 prospectDescentSteps++;
@@ -833,6 +852,7 @@ public final class HarvestBlocksAction implements MaidAction {
             return failure(ActionEndReason.INTERNAL_ERROR,
                     "successfully_broken_block_was_not_an_eligible_target");
         }
+        consecutiveTerrainReplans = 0;
         currentTarget = null;
         currentStandPos = null;
         expectedState = null;
@@ -888,25 +908,33 @@ public final class HarvestBlocksAction implements MaidAction {
             navigation.stop(context);
             navigation = null;
         }
-        if (reason == ActionEndReason.TARGET_CHANGED && currentTarget != null) {
-            rejectedCandidates.add(currentTarget.immutable());
-        }
         resetTerrainPlan();
         currentTarget = null;
         currentStandPos = null;
         expectedState = null;
-        if (terrainReplans > MAX_TERRAIN_REPLANS) {
-            MaidActionTickResult partial = finishLockedVeinPartial(context, message);
-            if (partial != null) {
-                return partial;
-            }
-            return failure(reason, message);
-        }
         searchOrigin = context.maid().blockPosition().immutable();
         candidates.clear();
         searchPrepared = false;
         stage = Stage.SEARCHING;
         return MaidActionTickResult.running();
+    }
+
+    private MaidActionTickResult restartProspectingFromActualPosition(
+            MaidActionContext context) {
+        resetTerrainPlan();
+        prospectGoal = null;
+        prospectStepMode = null;
+        planningPurpose = PlanningPurpose.HARVEST;
+        searchOrigin = context.maid().blockPosition().immutable();
+        candidates.clear();
+        searchPrepared = false;
+        stage = Stage.SEARCHING;
+        return MaidActionTickResult.running();
+    }
+
+    private void rememberNavigationFailure(MaidTerrainNavigator.TickResult result) {
+        lastNavigationFailureDetail = result.detail() == null
+                ? null : result.detail().deepCopy();
     }
 
     private void resetTerrainPlan() {
@@ -1137,7 +1165,11 @@ public final class HarvestBlocksAction implements MaidAction {
         result.addProperty("planner", "maid_weighted_astar");
         result.addProperty("planner_expanded_nodes", plannerExpandedNodes);
         result.addProperty("terrain_replans", terrainReplans);
+        result.addProperty("consecutive_terrain_replans", consecutiveTerrainReplans);
         result.addProperty("route_blocks_cleared", routeBlocksCleared);
+        if (lastNavigationFailureDetail != null) {
+            result.add("last_navigation_failure", lastNavigationFailureDetail.deepCopy());
+        }
         result.addProperty("search_radius", searchRadius);
         result.addProperty("selector", selectorDescription);
         result.addProperty("collection_scope", veinMining ? "connected_vein" : "nearest");

@@ -173,6 +173,27 @@ class MaidActionServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("不要自动重复", text)
         self.assertNotIn("Refresh the target or retry", text)
 
+    async def test_terrain_origin_drift_feedback_does_not_blame_selector(self):
+        plugin = FakePlugin()
+        service = MaidActionService(plugin)
+        await service.handle_message({
+            "type": "maid_action_finished",
+            "data": {
+                "action_id": "drift", "maid_id": "maid", "generation": 1,
+                "sequence": 12, "kind": "harvest_blocks", "status": "FAILED",
+                "stage": "FAILED", "end_reason": "STUCK",
+                "result": {
+                    "message": "terrain_origin_drift_replan_exhausted",
+                    "retry_hint": "Refresh the target or retry with a broader selector",
+                },
+            },
+        })
+
+        text = plugin.pushes[-1][0]
+        self.assertIn("路径执行位置偏移", text)
+        self.assertIn("不要改变 selector", text)
+        self.assertNotIn("broader selector", text)
+
     async def test_decision_required_uses_respond(self):
         plugin = FakePlugin()
         service = MaidActionService(plugin)

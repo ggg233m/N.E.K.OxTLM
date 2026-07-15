@@ -272,26 +272,26 @@ public final class MaidAgentGameTests {
 
     @GameTest(template = "maid_agent_test", timeoutTicks = 1000)
     public static void staircaseProspectingDescendsWithoutDiggingCurrentSupport(GameTestHelper helper) {
-        BlockPos originalSupport = new BlockPos(1, 2, 2);
+        BlockPos originalSupport = new BlockPos(1, 4, 2);
         helper.setBlock(originalSupport, Blocks.STONE);
-        helper.setBlock(new BlockPos(2, 1, 2), Blocks.STONE);
-        helper.setBlock(new BlockPos(3, 0, 2), Blocks.STONE);
-        for (int y = 2; y <= 4; y++) {
-            helper.setBlock(new BlockPos(2, y, 2), Blocks.STONE);
+        for (int step = 1; step <= 4; step++) {
+            int x = 1 + step;
+            int destinationY = 5 - step;
+            helper.setBlock(new BlockPos(x, destinationY - 1, 2), Blocks.STONE);
+            for (int y = destinationY; y <= destinationY + 2; y++) {
+                helper.setBlock(new BlockPos(x, y, 2), Blocks.STONE);
+            }
         }
-        for (int y = 1; y <= 3; y++) {
-            helper.setBlock(new BlockPos(3, y, 2), Blocks.STONE);
-        }
-        BlockPos ore = new BlockPos(4, 1, 2);
-        helper.setBlock(new BlockPos(4, 0, 2), Blocks.STONE);
+        BlockPos ore = new BlockPos(6, 1, 2);
+        helper.setBlock(new BlockPos(6, 0, 2), Blocks.STONE);
         helper.setBlock(ore, Blocks.COAL_ORE);
 
-        EntityMaid maid = helper.spawn(InitEntities.MAID.get(), new BlockPos(1, 3, 2));
+        EntityMaid maid = helper.spawn(InitEntities.MAID.get(), new BlockPos(1, 5, 2));
         maid.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(Items.IRON_PICKAXE));
         UUID actionId = UUID.randomUUID();
         JsonObject args = selectorHarvestArgs("block", "minecraft:coal_ore", 1);
         args.add("mining_plan", miningPlan(
-                "staircase_down", "east", 2, 2, 6));
+                "staircase_down", "east", 4, 4, 12));
 
         helper.runAfterDelay(5, () -> {
             MaidActionStore.StartResult start = MaidActionStore.getInstance().start(
@@ -303,8 +303,8 @@ public final class MaidAgentGameTests {
             helper.assertTrue("SUCCEEDED".equals(status.get("status").getAsString()),
                     "staircase prospecting should discover and harvest coal, current=" + status);
             JsonObject result = status.getAsJsonObject("result");
-            helper.assertTrue(result.get("prospect_descent_steps").getAsInt() == 2,
-                    "staircase should perform exactly two diagonal descents");
+            helper.assertTrue(result.get("prospect_descent_steps").getAsInt() == 4,
+                    "staircase should perform four stable diagonal descents");
             helper.assertTrue(helper.getBlockState(originalSupport).is(Blocks.STONE),
                     "staircase prospecting must never dig the maid's current support block");
             helper.assertTrue(helper.getBlockState(ore).isAir(),
