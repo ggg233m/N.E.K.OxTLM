@@ -22,6 +22,7 @@ import net.minecraft.world.entity.ai.behavior.BlockPosTracker;
 import net.minecraft.world.entity.ai.memory.MemoryModuleType;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.phys.BlockHitResult;
@@ -38,6 +39,7 @@ import java.util.HashSet;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.EnumSet;
 import java.util.function.Predicate;
 
 /** Searches, approaches and harvests a bounded number of blocks. */
@@ -46,6 +48,7 @@ public final class HarvestBlocksAction implements MaidAction {
     private static final int MAX_TERRAIN_GOALS = 384;
     private static final int PATH_SEARCH_BUDGET_PER_TICK = 256;
     private static final int MAX_PATH_SEARCH_EXPANSIONS = 12_000;
+    private static final int MAX_PROSPECT_SEARCH_EXPANSIONS = 64;
     private static final int MAX_TERRAIN_REPLANS = 3;
     private static final double MAX_BREAK_DISTANCE_SQUARED = 4.5D * 4.5D;
     private static final Direction[] HORIZONTAL_DIRECTIONS = {
@@ -60,6 +63,7 @@ public final class HarvestBlocksAction implements MaidAction {
     private final int maxBlocks;
     private final ToolPolicy toolPolicy;
     private final double speed;
+    private final MiningPlan miningPlan;
 
     private Stage stage = Stage.VALIDATING;
     private final List<BlockPos> candidates = new ArrayList<>();
@@ -85,10 +89,25 @@ public final class HarvestBlocksAction implements MaidAction {
     private int plannerExpandedNodes;
     private int terrainReplans;
     private int routeBlocksCleared;
+    private PlanningPurpose planningPurpose = PlanningPurpose.HARVEST;
+    private Direction prospectDirection;
+    private BlockPos prospectGoal;
+    private MiningPlan.StepMode prospectStepMode;
+    private int prospectSteps;
+    private int prospectDescentSteps;
+    private int prospectBlocksCleared;
+    private int prospectRescans;
 
     public HarvestBlocksAction(BlockPos explicitTarget, Predicate<BlockState> selector,
                                String selectorDescription, int searchRadius, int maxBlocks,
                                ToolPolicy toolPolicy, double speed) {
+        this(explicitTarget, selector, selectorDescription, searchRadius, maxBlocks,
+                toolPolicy, speed, MiningPlan.nearby());
+    }
+
+    public HarvestBlocksAction(BlockPos explicitTarget, Predicate<BlockState> selector,
+                               String selectorDescription, int searchRadius, int maxBlocks,
+                               ToolPolicy toolPolicy, double speed, MiningPlan miningPlan) {
         if ((explicitTarget == null) == (selector == null)) {
             throw new IllegalArgumentException("Exactly one of explicitTarget and selector is required");
         }
@@ -99,6 +118,10 @@ public final class HarvestBlocksAction implements MaidAction {
         this.maxBlocks = Math.max(1, Math.min(8, maxBlocks));
         this.toolPolicy = Objects.requireNonNull(toolPolicy, "toolPolicy");
         this.speed = Math.max(0.4D, Math.min(1.0D, speed));
+        this.miningPlan = Objects.requireNonNull(miningPlan, "miningPlan");
+        if (explicitTarget != null && miningPlan.enabled()) {
+            throw new IllegalArgumentException("mining_plan exploration requires selector targeting");
+        }
     }
 
     public static HarvestBlocksAction fromArgs(JsonObject args) {
@@ -140,7 +163,9 @@ public final class HarvestBlocksAction implements MaidAction {
         requireRange(maxBlocks, "max_blocks", 1, 8);
         requireRange(speed, "speed", 0.4D, 1.0D);
         ToolPolicy policy = ToolPolicy.fromWireName(optionalString(args, "tool_policy", "require_correct"));
-        return new HarvestBlocksAction(targetPos, selectorPredicate, description, radius, maxBlocks, policy, speed);
+        MiningPlan miningPlan = MiningPlan.fromArgs(args, hasSelector);
+        return new HarvestBlocksAction(targetPos, selectorPredicate, description,
+                radius, maxBlocks, policy, speed, miningPlan);
     }
 
     @Override
@@ -157,6 +182,7 @@ public final class HarvestBlocksAction implements MaidAction {
     public void start(MaidActionContext context) {
         started = true;
         searchOrigin = context.maid().blockPosition().immutable();
+        prospectDirection = miningPlan.resolveDirection(context.maid().getDirection());
         report(context, Stage.VALIDATING, 0.0D, null);
     }
 
@@ -171,6 +197,7 @@ public final class HarvestBlocksAction implements MaidAction {
             case PATHFINDING -> advanceTerrainSearch(context);
             case SELECTING_TOOL -> selectTool(context);
             case APPROACHING -> approach(context);
+            case PROSPECTING -> prospect(context);
             case BREAKING -> breakBlock(context);
             case VERIFYING -> verifyAndContinue(context);
         };
@@ -199,11 +226,18 @@ public final class HarvestBlocksAction implements MaidAction {
         }
 
         if (candidates.isEmpty()) {
+            if (miningPlan.hasNextStep(prospectSteps, prospectDescentSteps)) {
+                return beginProspecting(context);
+            }
             if (harvested > 0) {
                 return success(context);
             }
-            return failure(matchedBlocks == 0 ? ActionEndReason.TARGET_CHANGED : ActionEndReason.PATH_NOT_FOUND,
-                    matchedBlocks == 0 ? "no_matching_block_found" : "no_terrain_path_goal_found");
+            String message = miningPlan.enabled()
+                    ? "prospecting_budget_exhausted_without_match"
+                    : matchedBlocks == 0 ? "no_matching_block_found" : "no_terrain_path_goal_found";
+            return failure(matchedBlocks == 0
+                            ? ActionEndReason.TARGET_CHANGED : ActionEndReason.PATH_NOT_FOUND,
+                    message);
         }
         return beginTerrainSearch(context);
     }
@@ -265,6 +299,50 @@ public final class HarvestBlocksAction implements MaidAction {
         return null;
     }
 
+    private MaidActionTickResult beginProspecting(MaidActionContext context) {
+        if (!miningPlan.hasNextStep(prospectSteps, prospectDescentSteps)) {
+            return harvested > 0
+                    ? success(context)
+                    : failure(ActionEndReason.TARGET_CHANGED,
+                    "prospecting_distance_or_depth_budget_exhausted");
+        }
+        if (prospectBlocksCleared >= miningPlan.excavationBudget()) {
+            return harvested > 0
+                    ? success(context)
+                    : failure(ActionEndReason.PATH_NOT_FOUND,
+                    "prospecting_excavation_budget_exhausted");
+        }
+
+        // A prospecting route has no known ore state yet. Lease the best real
+        // tool for ordinary stone so the terrain evaluator cannot promise a
+        // tunnel that the held item is unable to clear safely.
+        MaidActionTickResult toolFailure = ensureHeldTool(
+                context, Blocks.STONE.defaultBlockState());
+        if (toolFailure != null) {
+            return toolFailure;
+        }
+
+        BlockPos start = context.maid().blockPosition().immutable();
+        prospectStepMode = miningPlan.nextStepMode(prospectDescentSteps);
+        prospectGoal = miningPlan.nextDestination(
+                start, prospectDirection, prospectDescentSteps).immutable();
+        MaidTerrainWorldEvaluator evaluator = new MaidTerrainWorldEvaluator(
+                context.level(), context.maid(), start, 4, 4,
+                toolPolicy == ToolPolicy.REQUIRE_CORRECT);
+        Set<com.neko_tlm_bridge.tlm.agent.path.MaidTerrainStep.Kind> allowedKinds =
+                prospectStepMode == MiningPlan.StepMode.DESCEND
+                        ? EnumSet.of(com.neko_tlm_bridge.tlm.agent.path.MaidTerrainStep.Kind.DESCEND)
+                        : EnumSet.of(com.neko_tlm_bridge.tlm.agent.path.MaidTerrainStep.Kind.TRAVERSE);
+
+        planningPurpose = PlanningPurpose.PROSPECT;
+        terrainGoalTargets = Map.of();
+        pathAttempts++;
+        terrainSearch = new MaidTerrainSearch(start, Set.of(prospectGoal), evaluator,
+                MAX_PROSPECT_SEARCH_EXPANSIONS, allowedKinds);
+        report(context, Stage.PATHFINDING, overallProgress(), prospectGoal);
+        return MaidActionTickResult.running();
+    }
+
     private MaidActionTickResult beginTerrainSearch(MaidActionContext context) {
         BlockPos start = context.maid().blockPosition().immutable();
         BlockState planningState = candidates.stream()
@@ -323,8 +401,18 @@ public final class HarvestBlocksAction implements MaidAction {
             return failure(ActionEndReason.PATH_NOT_FOUND, "no_clearable_mining_stance_found");
         }
         terrainGoalTargets = Map.copyOf(goals);
+        planningPurpose = PlanningPurpose.HARVEST;
         pathAttempts++;
-        terrainSearch = new MaidTerrainSearch(start, goals.keySet(), evaluator, MAX_PATH_SEARCH_EXPANSIONS);
+        Set<com.neko_tlm_bridge.tlm.agent.path.MaidTerrainStep.Kind> allowedKinds =
+                miningPlan.enabled()
+                        ? EnumSet.of(
+                        com.neko_tlm_bridge.tlm.agent.path.MaidTerrainStep.Kind.TRAVERSE,
+                        com.neko_tlm_bridge.tlm.agent.path.MaidTerrainStep.Kind.ASCEND,
+                        com.neko_tlm_bridge.tlm.agent.path.MaidTerrainStep.Kind.DESCEND)
+                        : EnumSet.allOf(
+                        com.neko_tlm_bridge.tlm.agent.path.MaidTerrainStep.Kind.class);
+        terrainSearch = new MaidTerrainSearch(start, goals.keySet(), evaluator,
+                MAX_PATH_SEARCH_EXPANSIONS, allowedKinds);
         report(context, Stage.PATHFINDING, overallProgress(), null);
         return MaidActionTickResult.running();
     }
@@ -340,18 +428,53 @@ public final class HarvestBlocksAction implements MaidAction {
         detail.addProperty("nodes_expanded", terrainSearch.expandedNodes());
         detail.addProperty("goal_count", terrainGoalTargets.size());
         detail.addProperty("replans", terrainReplans);
+        detail.addProperty("planning_purpose", planningPurpose.wireName);
         context.execution().reportProgress(Stage.PATHFINDING.wireName, overallProgress(), detail);
         if (status == MaidTerrainSearch.Status.SEARCHING) {
             return MaidActionTickResult.running();
         }
         if (status == MaidTerrainSearch.Status.FAILED) {
             unreachablePaths++;
-            return failure(ActionEndReason.PATH_NOT_FOUND, "terrain_search_exhausted");
+            return failure(ActionEndReason.PATH_NOT_FOUND,
+                    planningPurpose == PlanningPurpose.PROSPECT
+                            ? "no_safe_prospecting_step_found"
+                            : "terrain_search_exhausted");
         }
 
         terrainPath = terrainSearch.result().orElse(null);
         if (terrainPath == null) {
             return failure(ActionEndReason.INTERNAL_ERROR, "terrain_search_found_without_path");
+        }
+        if (planningPurpose == PlanningPurpose.PROSPECT) {
+            if (!terrainPath.target().equals(prospectGoal)) {
+                return failure(ActionEndReason.INTERNAL_ERROR,
+                        "prospecting_search_returned_wrong_goal");
+            }
+            int plannedExcavation = plannedNonTargetExcavation(context, terrainPath);
+            if (prospectBlocksCleared + plannedExcavation
+                    > miningPlan.excavationBudget()) {
+                return harvested > 0
+                        ? success(context)
+                        : failure(ActionEndReason.PATH_NOT_FOUND,
+                        "prospecting_excavation_budget_would_be_exceeded");
+            }
+            terrainSearch = null;
+            navigation = new MaidTerrainNavigator(
+                    terrainPath, handLease, speed,
+                    toolPolicy == ToolPolicy.REQUIRE_CORRECT);
+            navigation.start(context);
+            report(context, Stage.PROSPECTING, overallProgress(), prospectGoal);
+            return MaidActionTickResult.running();
+        }
+        if (miningPlan.enabled()) {
+            int plannedExcavation = plannedNonTargetExcavation(context, terrainPath);
+            if (prospectBlocksCleared + plannedExcavation
+                    > miningPlan.excavationBudget()) {
+                return harvested > 0
+                        ? success(context)
+                        : failure(ActionEndReason.PATH_NOT_FOUND,
+                        "target_route_excavation_budget_would_be_exceeded");
+            }
         }
         currentStandPos = terrainPath.target();
         currentTarget = terrainGoalTargets.get(currentStandPos);
@@ -433,7 +556,6 @@ public final class HarvestBlocksAction implements MaidAction {
         MaidTerrainNavigator.TickResult result = navigation.tick(context);
         for (MaidTerrainNavigator.ClearedBlock cleared : navigation.drainClearedBlocks()) {
             routeBlocksCleared++;
-            rejectedCandidates.add(cleared.pos());
             if (matchesClearedTarget(cleared)) {
                 harvested++;
                 if (harvested >= maxBlocks) {
@@ -441,6 +563,8 @@ public final class HarvestBlocksAction implements MaidAction {
                     navigation = null;
                     return success(context);
                 }
+            } else if (miningPlan.enabled()) {
+                prospectBlocksCleared++;
             }
         }
         if (result.outcome() == MaidTerrainNavigator.Outcome.FAILED) {
@@ -474,10 +598,75 @@ public final class HarvestBlocksAction implements MaidAction {
         return MaidActionTickResult.running();
     }
 
+    private MaidActionTickResult prospect(MaidActionContext context) {
+        if (navigation == null || prospectGoal == null || prospectStepMode == null) {
+            return failure(ActionEndReason.INTERNAL_ERROR,
+                    "prospecting_navigation_state_missing");
+        }
+        if (handLease == null
+                || handLease.validate(context.maid()) != HandLease.LeaseHealth.HEALTHY) {
+            return failure(ActionEndReason.HAND_CONFLICT,
+                    "held_tool_changed_while_prospecting");
+        }
+
+        MaidTerrainNavigator.TickResult result = navigation.tick(context);
+        for (MaidTerrainNavigator.ClearedBlock cleared : navigation.drainClearedBlocks()) {
+            routeBlocksCleared++;
+            if (matchesClearedTarget(cleared)) {
+                harvested++;
+                if (harvested >= maxBlocks) {
+                    navigation.stop(context);
+                    navigation = null;
+                    return success(context);
+                }
+            } else {
+                prospectBlocksCleared++;
+            }
+        }
+
+        if (result.outcome() == MaidTerrainNavigator.Outcome.FAILED) {
+            navigation.stop(context);
+            navigation = null;
+            return failure(result.reason(),
+                    result.detail().has("message")
+                            ? result.detail().get("message").getAsString()
+                            : "prospecting_step_failed");
+        }
+        if (result.outcome() == MaidTerrainNavigator.Outcome.ARRIVED) {
+            navigation = null;
+            prospectSteps++;
+            if (prospectStepMode == MiningPlan.StepMode.DESCEND) {
+                prospectDescentSteps++;
+            }
+            prospectRescans++;
+            prospectGoal = null;
+            prospectStepMode = null;
+            planningPurpose = PlanningPurpose.HARVEST;
+            resetTerrainPlan();
+            searchOrigin = context.maid().blockPosition().immutable();
+            candidates.clear();
+            searchPrepared = false;
+            stage = Stage.SEARCHING;
+            return MaidActionTickResult.running();
+        }
+
+        stage = Stage.PROSPECTING;
+        JsonObject detail = result.detail();
+        addProspectingDiagnostics(detail);
+        context.execution().reportProgress(
+                Stage.PROSPECTING.wireName, overallProgress(), detail);
+        return MaidActionTickResult.running();
+    }
+
     private MaidActionTickResult breakBlock(MaidActionContext context) {
         BlockState state = context.level().getBlockState(currentTarget);
         if (!state.equals(expectedState)) {
             return onCandidateFailure(context, ActionEndReason.TARGET_CHANGED, "target_changed_while_breaking");
+        }
+        if (!MaidTerrainWorldEvaluator.isSafeToClear(
+                context.level(), currentTarget, expectedState)) {
+            return onCandidateFailure(context, ActionEndReason.PATH_NOT_FOUND,
+                    "target_break_became_unsafe");
         }
         if (handLease.validate(context.maid()) != HandLease.LeaseHealth.HEALTHY) {
             return failure(ActionEndReason.HAND_CONFLICT, "held_tool_changed_while_breaking");
@@ -561,7 +750,8 @@ public final class HarvestBlocksAction implements MaidAction {
         currentTarget = null;
         currentStandPos = null;
         expectedState = null;
-        if (explicitTarget == null && harvested > 0) {
+        if (explicitTarget == null && harvested > 0
+                && !miningPlan.hasNextStep(prospectSteps, prospectDescentSteps)) {
             return success(context);
         }
         if (explicitTarget != null || rejectedCandidates.size() >= MAX_SEARCH_CANDIDATES) {
@@ -638,10 +828,25 @@ public final class HarvestBlocksAction implements MaidAction {
                 : selector.test(cleared.state());
     }
 
+    private int plannedNonTargetExcavation(MaidActionContext context, MaidTerrainPath path) {
+        return (int) path.steps().stream()
+                .flatMap(step -> step.toBreak().stream())
+                .distinct()
+                .map(context.level()::getBlockState)
+                .filter(state -> !matchesTarget(state))
+                .count();
+    }
+
     private MaidActionTickResult success(MaidActionContext context) {
         report(context, Stage.VERIFYING, 1.0D, null);
         JsonObject result = new JsonObject();
         result.addProperty("harvested", harvested);
+        result.addProperty("requested", maxBlocks);
+        boolean partial = harvested < maxBlocks;
+        result.addProperty("partial", partial);
+        if (partial) {
+            result.addProperty("message", "partial_harvest_completed_before_search_or_budget_limit");
+        }
         addSearchDiagnostics(result, "none");
         return MaidActionTickResult.succeeded(result);
     }
@@ -658,6 +863,9 @@ public final class HarvestBlocksAction implements MaidAction {
         detail.addProperty("harvested", harvested);
         detail.addProperty("max_blocks", maxBlocks);
         detail.addProperty("selector", selectorDescription);
+        if (miningPlan.enabled()) {
+            addProspectingDiagnostics(detail);
+        }
         context.execution().reportProgress(nextStage.wireName, progress, detail);
     }
 
@@ -684,7 +892,21 @@ public final class HarvestBlocksAction implements MaidAction {
         result.addProperty("route_blocks_cleared", routeBlocksCleared);
         result.addProperty("search_radius", searchRadius);
         result.addProperty("selector", selectorDescription);
+        addProspectingDiagnostics(result);
         result.addProperty("retry_hint", retryHint);
+    }
+
+    private void addProspectingDiagnostics(JsonObject result) {
+        result.addProperty("mining_plan", miningPlan.mode().wireName());
+        result.addProperty("prospect_direction",
+                prospectDirection == null ? "unresolved" : prospectDirection.getName());
+        result.addProperty("prospect_steps", prospectSteps);
+        result.addProperty("prospect_max_distance", miningPlan.maxDistance());
+        result.addProperty("prospect_descent_steps", prospectDescentSteps);
+        result.addProperty("prospect_max_depth", miningPlan.maxDepth());
+        result.addProperty("prospect_blocks_cleared", prospectBlocksCleared);
+        result.addProperty("prospect_excavation_budget", miningPlan.excavationBudget());
+        result.addProperty("prospect_rescans", prospectRescans);
     }
 
     private static String retryHint(ActionEndReason reason) {
@@ -876,12 +1098,24 @@ public final class HarvestBlocksAction implements MaidAction {
         SELECTING_TOOL("selecting_tool"),
         PATHFINDING("pathfinding"),
         APPROACHING("approaching"),
+        PROSPECTING("prospecting"),
         BREAKING("breaking"),
         VERIFYING("verifying");
 
         private final String wireName;
 
         Stage(String wireName) {
+            this.wireName = wireName;
+        }
+    }
+
+    private enum PlanningPurpose {
+        HARVEST("harvest"),
+        PROSPECT("prospect");
+
+        private final String wireName;
+
+        PlanningPurpose(String wireName) {
             this.wireName = wireName;
         }
     }

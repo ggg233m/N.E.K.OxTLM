@@ -19,7 +19,8 @@ public final class MaidTerrainWorldEvaluator implements MaidTerrainNodeEvaluator
     public static final int DEFAULT_HORIZONTAL_RADIUS = 64;
     public static final int DEFAULT_VERTICAL_RADIUS = 24;
     private static final Direction[] FLUID_EXPOSURE_DIRECTIONS = {
-            Direction.UP, Direction.NORTH, Direction.EAST, Direction.SOUTH, Direction.WEST
+            Direction.UP, Direction.DOWN, Direction.NORTH, Direction.EAST,
+            Direction.SOUTH, Direction.WEST
     };
 
     private final ServerLevel level;
@@ -79,21 +80,15 @@ public final class MaidTerrainWorldEvaluator implements MaidTerrainNodeEvaluator
             return Double.POSITIVE_INFINITY;
         }
         BlockState state = level.getBlockState(pos);
-        if (isHazard(state) || !state.getFluidState().isEmpty()) {
+        if (!isSafeToClear(level, pos, state)) {
             return Double.POSITIVE_INFINITY;
         }
         if (state.getFluidState().isEmpty()
                 && state.getCollisionShape(level, pos).isEmpty()) {
             return 0.0D;
         }
-        if (isProtectedBlock(pos, state) || wouldExposeFluid(pos)) {
-            return Double.POSITIVE_INFINITY;
-        }
 
         float hardness = state.getDestroySpeed(level, pos);
-        if (hardness < 0.0F || !Float.isFinite(hardness)) {
-            return Double.POSITIVE_INFINITY;
-        }
 
         // Execution is governed by one HandLease. Price only the real held
         // tool so the planner cannot promise a route that would require an
@@ -140,12 +135,42 @@ public final class MaidTerrainWorldEvaluator implements MaidTerrainNodeEvaluator
         return verticalRadius;
     }
 
-    private boolean isProtectedBlock(BlockPos pos, BlockState state) {
+    /**
+     * Revalidates the non-tool safety invariants immediately before a route or
+     * target block is broken. This closes the gap between A* evaluation and a
+     * multi-tick progressive break when water/lava or a block entity appears.
+     */
+    public static boolean isSafeToClear(ServerLevel level, BlockPos pos, BlockState expectedState) {
+        Objects.requireNonNull(level, "level");
+        Objects.requireNonNull(pos, "pos");
+        Objects.requireNonNull(expectedState, "expectedState");
+        if (pos.getY() < level.getMinBuildHeight()
+                || pos.getY() >= level.getMaxBuildHeight()
+                || !level.hasChunkAt(pos)) {
+            return false;
+        }
+        BlockState state = level.getBlockState(pos);
+        if (!state.equals(expectedState)
+                || isHazard(state)
+                || !state.getFluidState().isEmpty()) {
+            return false;
+        }
+        if (state.getCollisionShape(level, pos).isEmpty()) {
+            return true;
+        }
+        float hardness = state.getDestroySpeed(level, pos);
+        return hardness >= 0.0F
+                && Float.isFinite(hardness)
+                && !isProtectedBlock(level, pos, state)
+                && !wouldExposeFluid(level, pos);
+    }
+
+    private static boolean isProtectedBlock(ServerLevel level, BlockPos pos, BlockState state) {
         // Route digging must never use a storage or other stateful block as disposable terrain.
         return state.hasBlockEntity() || level.getBlockEntity(pos) != null;
     }
 
-    private boolean wouldExposeFluid(BlockPos pos) {
+    private static boolean wouldExposeFluid(ServerLevel level, BlockPos pos) {
         for (Direction direction : FLUID_EXPOSURE_DIRECTIONS) {
             BlockPos adjacent = pos.relative(direction);
             // Unknown terrain is never assumed dry. This also guarantees that

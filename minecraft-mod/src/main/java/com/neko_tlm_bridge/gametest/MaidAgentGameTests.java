@@ -229,6 +229,149 @@ public final class MaidAgentGameTests {
         });
     }
 
+    @GameTest(template = "maid_agent_test", timeoutTicks = 1000)
+    public static void forwardProspectingFindsOreBeyondInitialScan(GameTestHelper helper) {
+        for (int x = 0; x <= 9; x++) {
+            helper.setBlock(new BlockPos(x, 0, 2), Blocks.STONE);
+            helper.setBlock(new BlockPos(x, 3, 2), Blocks.BEDROCK);
+            for (int y = 1; y <= 3; y++) {
+                helper.setBlock(new BlockPos(x, y, 1), Blocks.BEDROCK);
+                helper.setBlock(new BlockPos(x, y, 3), Blocks.BEDROCK);
+            }
+        }
+        for (int x = 2; x <= 5; x++) {
+            helper.setBlock(new BlockPos(x, 1, 2), Blocks.STONE);
+            helper.setBlock(new BlockPos(x, 2, 2), Blocks.STONE);
+        }
+        BlockPos ore = new BlockPos(6, 1, 2);
+        helper.setBlock(ore, Blocks.COAL_ORE);
+
+        EntityMaid maid = helper.spawn(InitEntities.MAID.get(), new BlockPos(1, 1, 2));
+        maid.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(Items.IRON_PICKAXE));
+        UUID actionId = UUID.randomUUID();
+        JsonObject args = selectorHarvestArgs("block", "minecraft:coal_ore", 2);
+        args.add("mining_plan", miningPlan(
+                "forward_tunnel", "east", 4, 0, 8));
+
+        helper.runAfterDelay(5, () -> {
+            MaidActionStore.StartResult start = MaidActionStore.getInstance().start(
+                    actionId, maid, MaidActionKind.HARVEST_BLOCKS, args, 45_000L, true);
+            helper.assertTrue(start.accepted(), "forward prospecting action should be accepted");
+        });
+        helper.succeedWhen(() -> {
+            JsonObject status = MaidActionStore.getInstance().getStatus(actionId).orElseThrow();
+            helper.assertTrue("SUCCEEDED".equals(status.get("status").getAsString()),
+                    "forward prospecting should discover and harvest coal, current=" + status);
+            JsonObject result = status.getAsJsonObject("result");
+            helper.assertTrue(result.get("prospect_steps").getAsInt() >= 2,
+                    "ore must only be found after advancing the prospect tunnel");
+            helper.assertTrue(helper.getBlockState(ore).isAir(),
+                    "coal beyond the initial scan radius should be harvested");
+        });
+    }
+
+    @GameTest(template = "maid_agent_test", timeoutTicks = 1000)
+    public static void staircaseProspectingDescendsWithoutDiggingCurrentSupport(GameTestHelper helper) {
+        BlockPos originalSupport = new BlockPos(1, 2, 2);
+        helper.setBlock(originalSupport, Blocks.STONE);
+        helper.setBlock(new BlockPos(2, 1, 2), Blocks.STONE);
+        helper.setBlock(new BlockPos(3, 0, 2), Blocks.STONE);
+        for (int y = 2; y <= 4; y++) {
+            helper.setBlock(new BlockPos(2, y, 2), Blocks.STONE);
+        }
+        for (int y = 1; y <= 3; y++) {
+            helper.setBlock(new BlockPos(3, y, 2), Blocks.STONE);
+        }
+        BlockPos ore = new BlockPos(4, 1, 2);
+        helper.setBlock(new BlockPos(4, 0, 2), Blocks.STONE);
+        helper.setBlock(ore, Blocks.COAL_ORE);
+
+        EntityMaid maid = helper.spawn(InitEntities.MAID.get(), new BlockPos(1, 3, 2));
+        maid.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(Items.IRON_PICKAXE));
+        UUID actionId = UUID.randomUUID();
+        JsonObject args = selectorHarvestArgs("block", "minecraft:coal_ore", 1);
+        args.add("mining_plan", miningPlan(
+                "staircase_down", "east", 2, 2, 6));
+
+        helper.runAfterDelay(5, () -> {
+            MaidActionStore.StartResult start = MaidActionStore.getInstance().start(
+                    actionId, maid, MaidActionKind.HARVEST_BLOCKS, args, 45_000L, true);
+            helper.assertTrue(start.accepted(), "staircase prospecting action should be accepted");
+        });
+        helper.succeedWhen(() -> {
+            JsonObject status = MaidActionStore.getInstance().getStatus(actionId).orElseThrow();
+            helper.assertTrue("SUCCEEDED".equals(status.get("status").getAsString()),
+                    "staircase prospecting should discover and harvest coal, current=" + status);
+            JsonObject result = status.getAsJsonObject("result");
+            helper.assertTrue(result.get("prospect_descent_steps").getAsInt() == 2,
+                    "staircase should perform exactly two diagonal descents");
+            helper.assertTrue(helper.getBlockState(originalSupport).is(Blocks.STONE),
+                    "staircase prospecting must never dig the maid's current support block");
+            helper.assertTrue(helper.getBlockState(ore).isAir(),
+                    "coal at the bottom of the staircase should be harvested");
+        });
+    }
+
+    @GameTest(template = "maid_agent_test", timeoutTicks = 500)
+    public static void prospectingRechecksFluidBeforeBreakCommit(GameTestHelper helper) {
+        prepareFloorArea(helper, 0, 4, 0, 4, Blocks.STONE);
+        BlockPos obstacle = new BlockPos(2, 1, 2);
+        BlockPos fluid = new BlockPos(2, 1, 1);
+        helper.setBlock(obstacle, Blocks.OBSIDIAN);
+        EntityMaid maid = helper.spawn(InitEntities.MAID.get(), new BlockPos(1, 1, 2));
+        maid.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(Items.DIAMOND_PICKAXE));
+        UUID actionId = UUID.randomUUID();
+        JsonObject args = selectorHarvestArgs("block", "minecraft:coal_ore", 1);
+        args.add("mining_plan", miningPlan(
+                "forward_tunnel", "east", 1, 0, 2));
+
+        helper.runAfterDelay(5, () -> {
+            MaidActionStore.StartResult start = MaidActionStore.getInstance().start(
+                    actionId, maid, MaidActionKind.HARVEST_BLOCKS, args, 20_000L, true);
+            helper.assertTrue(start.accepted(), "fluid race prospecting action should be accepted");
+        });
+        // Obsidian takes long enough that this changes the world after path
+        // planning but before the progressive breaker can commit.
+        helper.runAfterDelay(30, () -> helper.setBlock(fluid, Blocks.WATER));
+        helper.succeedWhen(() -> {
+            JsonObject status = MaidActionStore.getInstance().getStatus(actionId).orElseThrow();
+            helper.assertTrue("FAILED".equals(status.get("status").getAsString()),
+                    "new adjacent fluid should abort the prospect step, current=" + status);
+            helper.assertTrue(helper.getBlockState(obstacle).is(Blocks.OBSIDIAN),
+                    "unsafe obstacle must remain intact after fluid appears");
+        });
+    }
+
+    @GameTest(template = "maid_agent_test", timeoutTicks = 300)
+    public static void prospectingBudgetRejectsWholeStepWithoutPartialBreak(GameTestHelper helper) {
+        prepareFloorArea(helper, 0, 4, 0, 4, Blocks.STONE);
+        BlockPos feet = new BlockPos(2, 1, 2);
+        BlockPos head = feet.above();
+        helper.setBlock(feet, Blocks.STONE);
+        helper.setBlock(head, Blocks.STONE);
+        EntityMaid maid = helper.spawn(InitEntities.MAID.get(), new BlockPos(1, 1, 2));
+        maid.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(Items.IRON_PICKAXE));
+        UUID actionId = UUID.randomUUID();
+        JsonObject args = selectorHarvestArgs("block", "minecraft:coal_ore", 1);
+        args.add("mining_plan", miningPlan(
+                "forward_tunnel", "east", 1, 0, 1));
+
+        helper.runAfterDelay(5, () -> {
+            MaidActionStore.StartResult start = MaidActionStore.getInstance().start(
+                    actionId, maid, MaidActionKind.HARVEST_BLOCKS, args, 10_000L, true);
+            helper.assertTrue(start.accepted(), "budget boundary action should be accepted");
+        });
+        helper.succeedWhen(() -> {
+            JsonObject status = MaidActionStore.getInstance().getStatus(actionId).orElseThrow();
+            helper.assertTrue("FAILED".equals(status.get("status").getAsString()),
+                    "two-block step must fail against a one-block excavation budget, current=" + status);
+            helper.assertTrue(helper.getBlockState(feet).is(Blocks.STONE),
+                    "feet block must not be partially cleared before budget rejection");
+            helper.assertTrue(helper.getBlockState(head).is(Blocks.STONE),
+                    "head block must not be partially cleared before budget rejection");
+        });
+    }
+
     @GameTest(template = "maid_agent_test", timeoutTicks = 400)
     public static void activeLeaseSuppressesScheduleTeleport(GameTestHelper helper) {
         prepareFloor(helper, 1, 11, 1);
@@ -311,5 +454,29 @@ public final class MaidAgentGameTests {
         json.addProperty("y", pos.getY());
         json.addProperty("z", pos.getZ());
         return json;
+    }
+
+    private static JsonObject selectorHarvestArgs(String type, String id, int searchRadius) {
+        JsonObject selector = new JsonObject();
+        selector.addProperty("type", type);
+        selector.addProperty("id", id);
+        JsonObject args = new JsonObject();
+        args.add("selector", selector);
+        args.addProperty("search_radius", searchRadius);
+        args.addProperty("max_blocks", 1);
+        args.addProperty("tool_policy", "require_correct");
+        args.addProperty("speed", 0.8D);
+        return args;
+    }
+
+    private static JsonObject miningPlan(String mode, String direction,
+                                         int distance, int depth, int budget) {
+        JsonObject plan = new JsonObject();
+        plan.addProperty("mode", mode);
+        plan.addProperty("direction", direction);
+        plan.addProperty("max_distance", distance);
+        plan.addProperty("max_depth", depth);
+        plan.addProperty("excavation_budget", budget);
+        return plan;
     }
 }

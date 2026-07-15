@@ -13,6 +13,7 @@ import java.util.Set;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
@@ -137,6 +138,50 @@ class MaidTerrainSearchTest {
         assertEquals(goal, step.to());
         assertEquals(List.of(goal), step.toBreak());
         assertEquals(3.35, step.cost(), EPSILON);
+    }
+
+    @Test
+    void traverseOnlyCannotDescendOrDigBelowTheMaid() {
+        BlockPos start = pos(0, 2, 0);
+        BlockPos goal = pos(1, 1, 0);
+        FakeEvaluator world = new FakeEvaluator(0, 1, 0, 3, 0, 0)
+                .support(pos(0, 1, 0))
+                .support(pos(1, 0, 0));
+        MaidTerrainSearch search = new MaidTerrainSearch(
+                start, Set.of(goal), world, 16,
+                Set.of(MaidTerrainStep.Kind.TRAVERSE));
+
+        assertEquals(MaidTerrainSearch.Status.FAILED, finish(search));
+        assertTrue(search.result().isEmpty());
+    }
+
+    @Test
+    void descendOnlyBuildsAnAdjacentStairStepWithoutDiggingStraightDown() {
+        BlockPos start = pos(0, 2, 0);
+        BlockPos goal = pos(1, 1, 0);
+        FakeEvaluator world = new FakeEvaluator(0, 1, 0, 3, 0, 0)
+                .support(pos(0, 1, 0))
+                .support(pos(1, 0, 0));
+
+        MaidTerrainPath path = complete(new MaidTerrainSearch(
+                start, Set.of(goal), world, 16,
+                Set.of(MaidTerrainStep.Kind.DESCEND)));
+
+        assertEquals(1, path.steps().size());
+        assertEquals(MaidTerrainStep.Kind.DESCEND, path.steps().getFirst().kind());
+        assertEquals(goal, path.steps().getFirst().to());
+        assertFalse(kinds(path).contains(MaidTerrainStep.Kind.DIG_DOWN));
+    }
+
+    @Test
+    void rejectsAnEmptyAllowedKindSet() {
+        FakeEvaluator world = flatWorld(0, 1, 0, 0);
+
+        IllegalArgumentException failure = assertThrows(IllegalArgumentException.class,
+                () -> new MaidTerrainSearch(pos(0, 1, 0), Set.of(pos(1, 1, 0)),
+                        world, 16, Set.of()));
+
+        assertEquals("allowedKinds must not be empty", failure.getMessage());
     }
 
     @Test

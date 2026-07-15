@@ -68,7 +68,78 @@ class ActionRegistry:
                     "selector.id must be a namespaced Minecraft resource id"
                 )
             data["selector"] = {"type": selector_type, "id": selector_id}
+        if args.get("mining_plan") is not None:
+            data["mining_plan"] = self._mining_plan(
+                args.get("mining_plan"), has_selector=has_selector
+            )
         return deepcopy(data)
+
+    def _mining_plan(self, value: Any, *, has_selector: bool) -> Dict[str, Any]:
+        if not isinstance(value, dict):
+            raise ActionValidationError("mining_plan must be an object")
+        allowed = {
+            "mode", "direction", "max_distance", "max_depth",
+            "excavation_budget",
+        }
+        unknown = sorted(set(value) - allowed)
+        if unknown:
+            raise ActionValidationError(
+                f"mining_plan has unsupported fields: {', '.join(unknown)}"
+            )
+
+        mode = str(value.get("mode", "nearby") or "").strip().lower()
+        if mode not in ("nearby", "forward_tunnel", "staircase_down", "auto"):
+            raise ActionValidationError(
+                "mining_plan.mode must be nearby, forward_tunnel, staircase_down or auto"
+            )
+        if mode != "nearby" and not has_selector:
+            raise ActionValidationError(
+                "non-nearby mining_plan modes require selector targeting"
+            )
+
+        direction = str(
+            value.get("direction", "maid_facing") or ""
+        ).strip().lower()
+        if direction not in ("maid_facing", "north", "south", "east", "west"):
+            raise ActionValidationError(
+                "mining_plan.direction must be maid_facing, north, south, east or west"
+            )
+
+        default_depth = 4 if mode in ("staircase_down", "auto") else 0
+        max_depth = self._integer(
+            value.get("max_depth", default_depth), "mining_plan.max_depth", 0, 12
+        )
+        if mode == "forward_tunnel" and max_depth != 0:
+            raise ActionValidationError(
+                "forward_tunnel requires mining_plan.max_depth=0"
+            )
+        if mode == "staircase_down" and max_depth == 0:
+            raise ActionValidationError(
+                "staircase_down requires positive mining_plan.max_depth"
+            )
+
+        max_distance = self._integer(
+            value.get("max_distance", 8), "mining_plan.max_distance", 1, 16
+        )
+        if mode == "staircase_down" and max_depth > max_distance:
+            raise ActionValidationError(
+                "staircase_down requires max_distance >= max_depth"
+            )
+        if mode == "auto" and max_depth >= max_distance:
+            raise ActionValidationError(
+                "auto requires max_distance > max_depth"
+            )
+
+        return {
+            "mode": mode,
+            "direction": direction,
+            "max_distance": max_distance,
+            "max_depth": max_depth,
+            "excavation_budget": self._integer(
+                value.get("excavation_budget", 24),
+                "mining_plan.excavation_budget", 0, 64,
+            ),
+        }
 
     @staticmethod
     def _position(value: Any, name: str) -> Dict[str, int]:

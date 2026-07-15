@@ -5,6 +5,7 @@ import net.minecraft.core.Direction;
 
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -40,6 +41,7 @@ public final class MaidTerrainSearch {
     private final Set<Long> goalKeys;
     private final MaidTerrainNodeEvaluator evaluator;
     private final int maxExpanded;
+    private final Set<MaidTerrainStep.Kind> allowedKinds;
     private final PriorityQueue<SearchNode> open = new PriorityQueue<>(NODE_ORDER);
     private final Map<Long, Double> bestCosts = new HashMap<>();
     private final Set<Long> closed = new HashSet<>();
@@ -51,6 +53,13 @@ public final class MaidTerrainSearch {
 
     public MaidTerrainSearch(BlockPos start, Set<BlockPos> goals,
                              MaidTerrainNodeEvaluator evaluator, int maxExpanded) {
+        this(start, goals, evaluator, maxExpanded,
+                EnumSet.allOf(MaidTerrainStep.Kind.class));
+    }
+
+    public MaidTerrainSearch(BlockPos start, Set<BlockPos> goals,
+                             MaidTerrainNodeEvaluator evaluator, int maxExpanded,
+                             Set<MaidTerrainStep.Kind> allowedKinds) {
         this.start = Objects.requireNonNull(start, "start").immutable();
         Objects.requireNonNull(goals, "goals");
         if (goals.isEmpty()) {
@@ -72,6 +81,11 @@ public final class MaidTerrainSearch {
             throw new IllegalArgumentException("maxExpanded must be positive");
         }
         this.maxExpanded = maxExpanded;
+        Objects.requireNonNull(allowedKinds, "allowedKinds");
+        if (allowedKinds.isEmpty()) {
+            throw new IllegalArgumentException("allowedKinds must not be empty");
+        }
+        this.allowedKinds = Set.copyOf(allowedKinds);
 
         double heuristic = heuristic(this.start);
         SearchNode root = new SearchNode(this.start, 0.0D, heuristic,
@@ -148,28 +162,36 @@ public final class MaidTerrainSearch {
     private void expand(SearchNode from) {
         for (Direction direction : HORIZONTAL_DIRECTIONS) {
             BlockPos horizontal = from.pos().relative(direction);
-            offerStep(from, MaidTerrainStep.Kind.TRAVERSE, horizontal,
-                    1.0D, horizontal, horizontal.above());
+            if (allowedKinds.contains(MaidTerrainStep.Kind.TRAVERSE)) {
+                offerStep(from, MaidTerrainStep.Kind.TRAVERSE, horizontal,
+                        1.0D, horizontal, horizontal.above());
+            }
 
             BlockPos up = horizontal.above();
             // A one-block jump sweeps the maid's head through the cell two
             // blocks above the source before her feet settle at {@code up}.
             // Checking only the destination's two cells would accept a low
             // ceiling over the take-off edge and the executor would collide.
-            offerStep(from, MaidTerrainStep.Kind.ASCEND, up,
-                    1.45D, from.pos().above(2), up, up.above());
+            if (allowedKinds.contains(MaidTerrainStep.Kind.ASCEND)) {
+                offerStep(from, MaidTerrainStep.Kind.ASCEND, up,
+                        1.45D, from.pos().above(2), up, up.above());
+            }
 
             BlockPos down = horizontal.below();
             // While stepping down, the maid enters the destination column
             // before her feet have fully dropped. Reserve the third cell for
             // that diagonal body sweep as well as the final two-cell stance.
-            offerStep(from, MaidTerrainStep.Kind.DESCEND, down,
-                    1.20D, down, down.above(), down.above(2));
+            if (allowedKinds.contains(MaidTerrainStep.Kind.DESCEND)) {
+                offerStep(from, MaidTerrainStep.Kind.DESCEND, down,
+                        1.20D, down, down.above(), down.above(2));
+            }
         }
 
-        BlockPos below = from.pos().below();
-        offerStep(from, MaidTerrainStep.Kind.DIG_DOWN, below,
-                1.35D, below, below.above());
+        if (allowedKinds.contains(MaidTerrainStep.Kind.DIG_DOWN)) {
+            BlockPos below = from.pos().below();
+            offerStep(from, MaidTerrainStep.Kind.DIG_DOWN, below,
+                    1.35D, below, below.above());
+        }
     }
 
     private void offerStep(SearchNode from, MaidTerrainStep.Kind kind, BlockPos destination,

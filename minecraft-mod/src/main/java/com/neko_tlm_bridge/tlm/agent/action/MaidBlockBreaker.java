@@ -1,8 +1,10 @@
 package com.neko_tlm_bridge.tlm.agent.action;
 
 import com.github.tartaricacid.touhoulittlemaid.entity.passive.EntityMaid;
+import com.neko_tlm_bridge.tlm.agent.path.MaidTerrainWorldEvaluator;
 import com.neko_tlm_bridge.tlm.agent.runtime.HandLease;
 import net.minecraft.core.BlockPos;
+import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.entity.BlockEntity;
@@ -28,6 +30,11 @@ public final class MaidBlockBreaker {
         BlockState currentState = maid.level().getBlockState(pos);
         if (!currentState.equals(expectedState)) {
             return BreakResult.TARGET_CHANGED;
+        }
+        if (!(maid.level() instanceof ServerLevel serverLevel)
+                || !MaidTerrainWorldEvaluator.isSafeToClear(
+                serverLevel, pos, expectedState)) {
+            return BreakResult.BLOCK_PROTECTED;
         }
 
         BlockEntity blockEntity = currentState.hasBlockEntity() ? maid.level().getBlockEntity(pos) : null;

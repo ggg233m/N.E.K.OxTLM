@@ -85,6 +85,79 @@ class ActionRegistryTests(unittest.TestCase):
         self.assertEqual(8, args["search_radius"])
         self.assertEqual("require_correct", args["tool_policy"])
 
+    def test_harvest_without_mining_plan_preserves_legacy_shape(self):
+        args = self.registry.normalize("harvest_blocks", {
+            "selector": {"type": "tag", "id": "minecraft:coal_ores"},
+        })
+        self.assertNotIn("mining_plan", args)
+
+    def test_normalizes_forward_tunnel_mining_plan_defaults(self):
+        args = self.registry.normalize("harvest_blocks", {
+            "selector": {"type": "tag", "id": "minecraft:iron_ores"},
+            "max_blocks": 4,
+            "mining_plan": {"mode": "forward_tunnel"},
+        })
+        self.assertEqual(4, args["max_blocks"])
+        self.assertEqual({
+            "mode": "forward_tunnel",
+            "direction": "maid_facing",
+            "max_distance": 8,
+            "max_depth": 0,
+            "excavation_budget": 24,
+        }, args["mining_plan"])
+
+    def test_normalizes_staircase_and_auto_depth_defaults(self):
+        for mode in ("staircase_down", "auto"):
+            with self.subTest(mode=mode):
+                args = self.registry.normalize("harvest_blocks", {
+                    "selector": {"type": "tag", "id": "minecraft:diamond_ores"},
+                    "mining_plan": {"mode": mode, "direction": "north"},
+                })
+                self.assertEqual(4, args["mining_plan"]["max_depth"])
+                self.assertEqual("north", args["mining_plan"]["direction"])
+
+    def test_rejects_non_nearby_plan_for_explicit_target(self):
+        with self.assertRaisesRegex(ActionValidationError, "require selector"):
+            self.registry.normalize("harvest_blocks", {
+                "target_pos": {"x": 0, "y": 64, "z": 0},
+                "mining_plan": {"mode": "auto"},
+            })
+
+    def test_rejects_forward_tunnel_depth_and_invalid_plan_bounds(self):
+        selector = {"type": "tag", "id": "minecraft:coal_ores"}
+        with self.assertRaisesRegex(ActionValidationError, "max_depth=0"):
+            self.registry.normalize("harvest_blocks", {
+                "selector": selector,
+                "mining_plan": {"mode": "forward_tunnel", "max_depth": 1},
+            })
+        with self.assertRaisesRegex(ActionValidationError, "positive"):
+            self.registry.normalize("harvest_blocks", {
+                "selector": selector,
+                "mining_plan": {"mode": "staircase_down", "max_depth": 0},
+            })
+        with self.assertRaisesRegex(ActionValidationError, "max_distance >= max_depth"):
+            self.registry.normalize("harvest_blocks", {
+                "selector": selector,
+                "mining_plan": {
+                    "mode": "staircase_down", "max_distance": 2, "max_depth": 3,
+                },
+            })
+        with self.assertRaisesRegex(ActionValidationError, "max_distance > max_depth"):
+            self.registry.normalize("harvest_blocks", {
+                "selector": selector,
+                "mining_plan": {"mode": "auto", "max_distance": 4, "max_depth": 4},
+            })
+        with self.assertRaisesRegex(ActionValidationError, "between 1 and 16"):
+            self.registry.normalize("harvest_blocks", {
+                "selector": selector,
+                "mining_plan": {"mode": "auto", "max_distance": 17},
+            })
+        with self.assertRaisesRegex(ActionValidationError, "unsupported fields"):
+            self.registry.normalize("harvest_blocks", {
+                "selector": selector,
+                "mining_plan": {"mode": "auto", "branch_length": 8},
+            })
+
 
 if __name__ == "__main__":
     unittest.main()

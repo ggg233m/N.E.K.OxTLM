@@ -4,6 +4,7 @@ import com.github.tartaricacid.touhoulittlemaid.entity.passive.EntityMaid;
 import com.google.gson.JsonObject;
 import com.neko_tlm_bridge.tlm.agent.ActionEndReason;
 import com.neko_tlm_bridge.tlm.agent.MaidActionContext;
+import com.neko_tlm_bridge.tlm.agent.path.MaidTerrainWorldEvaluator;
 import com.neko_tlm_bridge.tlm.agent.runtime.HandLease;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.InteractionHand;
@@ -60,6 +61,11 @@ public final class MaidProgressiveBlockBreaker {
         BlockState state = context.level().getBlockState(target);
         if (!state.equals(expectedState)) {
             return finishFailure(context, ActionEndReason.TARGET_CHANGED, "terrain_changed_while_clearing_path");
+        }
+        if (!MaidTerrainWorldEvaluator.isSafeToClear(
+                context.level(), target, expectedState)) {
+            return finishFailure(context, ActionEndReason.PATH_NOT_FOUND,
+                    "terrain_clear_became_unsafe");
         }
         if (!canReachVisibleFace(context, target)) {
             return finishFailure(context, ActionEndReason.PATH_NOT_FOUND,

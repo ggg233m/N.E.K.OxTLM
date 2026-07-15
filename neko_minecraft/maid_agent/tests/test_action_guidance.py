@@ -45,6 +45,22 @@ class MaidActionGuidanceTests(unittest.TestCase):
             parameters["properties"]["kind"]["enum"],
         )
 
+    def test_guidance_exposes_bounded_mining_plans_and_emergency_stop(self):
+        tool_text = MC_START_MAID_ACTION["description"] + str(
+            MC_START_MAID_ACTION["parameters"]
+        )
+        for value in (
+            "mining_plan", "forward_tunnel", "staircase_down", "auto",
+            "max_distance", "max_depth", "excavation_budget",
+        ):
+            self.assertIn(value, tool_text)
+            self.assertIn(value, _TLM_AI_INSTRUCTIONS)
+        self.assertIn("没找到继续", _TLM_AI_INSTRUCTIONS)
+        self.assertIn("F8", _TLM_AI_INSTRUCTIONS)
+        self.assertIn("mc_cancel_maid_action", _TLM_AI_INSTRUCTIONS)
+        self.assertIn("timeout_ms=120000", _TLM_AI_INSTRUCTIONS)
+        self.assertIn("120000", tool_text)
+
 
 if __name__ == "__main__":
     unittest.main()

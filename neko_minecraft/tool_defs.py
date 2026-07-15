@@ -187,11 +187,13 @@ MC_START_MAID_ACTION = {
     "description": (
         "让已绑定女仆开始一个服务端自主动作。navigate 会以非破坏方式主动寻路到指定坐标；"
         "harvest_blocks 会前往目标方块或搜索附近指定方块，并可在 search_radius 内通过 Java 地形感知"
-        "规划清理安全、允许破坏且工具条件满足的阻挡，进行短距离下挖或开通道后采集。"
+        "规划清理安全、允许破坏且工具条件满足的阻挡，进行短距离下挖或开通道后采集；"
+        "找矿、未找到后继续搜索、挖矿道或向下探矿时可通过 mining_plan 明确要求主动探矿。"
         "工具只返回是否接受，动作完成或失败会异步通知。新动作默认会覆盖旧动作。"
         "明确要求去某坐标、主动挖掘或采集时应调用本工具，不要用 mc_switch_task 假装挖矿。"
         "按名称采集资源（例如挖石头、挖煤、砍木头）必须使用 selector；"
         "target_pos 仅限玩家明确给出或可信工具返回的方块坐标，禁止使用玩家/女仆坐标或猜测坐标。"
+        "主动探矿通常应把 timeout_ms 设为 120000，避免长矿道沿用普通动作的 60 秒默认超时。"
         "普通 navigate 不会破坏地形；harvest_blocks 仍不会搭桥或垫方块，也不会强制加载未加载区块。"
     ),
     "parameters": {
@@ -209,9 +211,15 @@ MC_START_MAID_ACTION = {
                     "harvest_blocks: target_pos 与 selector 二选一。挖石头等按资源名称的请求必须传"
                     "selector，例如 {type:'tag', id:'minecraft:base_stone_overworld'}；target_pos 只能是玩家明确"
                     "指定或可信工具返回的方块坐标，不得猜测。selector 也可使用 tag；可传 search_radius、"
-                    "max_blocks、tool_policy(require_correct|allow_wrong)、speed。harvest_blocks 可在 search_radius"
-                    "内清理安全可破坏阻挡并短距离下挖/开通道；navigate 始终非破坏性。两者都不会搭桥或"
-                    "垫方块，也不会强制加载未加载区块"
+                    "max_blocks、tool_policy(require_correct|allow_wrong)、speed。找矿、没找到继续、挖矿道或"
+                    "向下探矿时显式传 mining_plan：{mode:nearby|forward_tunnel|staircase_down|auto,"
+                    "direction:maid_facing|north|south|east|west,max_distance:1..16,max_depth:0..12,"
+                    "excavation_budget:0..64}。非 nearby 模式只允许与 selector 搭配；forward_tunnel 的"
+                    "max_depth 必须为 0；staircase_down 要求 max_distance>=max_depth，auto 要求"
+                    "max_distance>max_depth。默认 direction=maid_facing、max_distance=8、excavation_budget=24，"
+                    "staircase_down/auto 默认 max_depth=4，其余默认 0。未传 mining_plan 时保持仅搜索附近"
+                    "资源的旧行为。harvest_blocks 可清理安全可破坏阻挡；navigate 始终非破坏性。两者都"
+                    "不会搭桥或垫方块，也不会强制加载未加载区块"
                 ),
                 "additionalProperties": True,
             },

@@ -57,6 +57,39 @@ class MaidActionToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("INVALID_ACTION_ARGUMENTS", result["error"])
         self.assertEqual([], plugin.requests)
 
+    async def test_start_passes_normalized_mining_plan_to_server(self):
+        plugin = FakePlugin({
+            "type": "maid_action_start_result",
+            "data": {
+                "accepted": True, "action_id": "mine", "maid_id": "maid-1",
+                "generation": 1, "sequence": 1, "kind": "harvest_blocks",
+                "status": "RUNNING", "stage": "SEARCHING",
+            },
+        })
+        result = await tools.do_start_maid_action(
+            plugin,
+            kind="harvest_blocks",
+            action_id="mine",
+            args={
+                "selector": {"type": "tag", "id": "minecraft:diamond_ores"},
+                "max_blocks": 3,
+                "mining_plan": {
+                    "mode": "staircase_down",
+                    "direction": "west",
+                    "max_distance": 12,
+                    "max_depth": 6,
+                    "excavation_budget": 48,
+                },
+            },
+        )
+        self.assertFalse(result["is_error"])
+        plan = plugin.requests[0]["data"]["args"]["mining_plan"]
+        self.assertEqual("staircase_down", plan["mode"])
+        self.assertEqual("west", plan["direction"])
+        self.assertEqual(12, plan["max_distance"])
+        self.assertEqual(6, plan["max_depth"])
+        self.assertEqual(48, plan["excavation_budget"])
+
     async def test_start_generates_action_id(self):
         plugin = FakePlugin({
             "type": "maid_action_start_result",
