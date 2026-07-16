@@ -530,6 +530,59 @@ class MaidActionServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(["local"], result["lost"])
         self.assertEqual("SERVER_STATE_LOST", service.tracker.get("local").end_reason)
 
+    async def test_strict_active_query_distinguishes_error_from_empty(self):
+        plugin = FakePlugin(responses=[
+            {"type": "error", "data": {"message": "Request timed out"}},
+            {"type": "maid_action_list", "data": {"actions": []}},
+        ])
+        plugin.connected = True
+        service = MaidActionService(plugin)
+
+        failed = await service.query_active_actions(maid_id="m")
+        empty = await service.query_active_actions(maid_id="m")
+
+        self.assertFalse(failed["success"])
+        self.assertEqual("REQUEST_FAILED", failed["error_code"])
+        self.assertTrue(empty["success"])
+        self.assertEqual([], empty["actions"])
+
+    async def test_legacy_active_list_remains_best_effort_on_error(self):
+        plugin = FakePlugin(responses=[
+            {"type": "error", "data": {"message": "Request timed out"}},
+        ])
+        plugin.connected = True
+        service = MaidActionService(plugin)
+
+        self.assertEqual([], await service.list_active_actions(maid_id="m"))
+
+    async def test_strict_active_query_rejects_embedded_protocol_error(self):
+        plugin = FakePlugin(responses=[{
+            "type": "maid_action_list",
+            "data": {
+                "error_code": "SERVER_BUSY",
+                "error": "Action store is reconciling",
+                "actions": [],
+            },
+        }])
+        plugin.connected = True
+        service = MaidActionService(plugin)
+
+        result = await service.query_active_actions(maid_id="m")
+
+        self.assertFalse(result["success"])
+        self.assertEqual("SERVER_BUSY", result["error_code"])
+
+    async def test_strict_active_query_rejects_non_object_response(self):
+        plugin = FakePlugin(responses=[None])
+        plugin.connected = True
+        service = MaidActionService(plugin)
+
+        result = await service.query_active_actions(maid_id="m")
+
+        self.assertFalse(result["success"])
+        self.assertEqual("INVALID_RESPONSE", result["error_code"])
+        self.assertEqual([], result["actions"])
+
 
 if __name__ == "__main__":
     unittest.main()

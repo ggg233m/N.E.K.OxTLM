@@ -256,16 +256,64 @@ class MaidActionService:
         return data or None
 
     async def list_active_actions(self, *, maid_id: str = "") -> list[Dict[str, Any]]:
+        result = await self.query_active_actions(maid_id=maid_id)
+        return list(result.get("actions") or []) if result.get("success") else []
+
+    async def query_active_actions(self, *, maid_id: str = "") -> Dict[str, Any]:
+        """Query the authoritative server list without hiding transport errors.
+
+        ``list_active_actions`` keeps its legacy best-effort list contract for
+        existing callers.  Activity arbitration must use this strict variant:
+        an empty list and a failed query have very different safety meanings.
+        """
         if not getattr(self.plugin, "connected", False):
-            return []
+            return {
+                "success": False,
+                "error_code": "NOT_CONNECTED",
+                "error": "Not connected to Minecraft",
+                "actions": [],
+            }
         data = {"maid_id": str(maid_id)} if maid_id else {}
-        response = await self.plugin._send_request(
-            {"type": "list_active_maid_actions", "data": data}, timeout=5
-        )
+        try:
+            response = await self.plugin._send_request(
+                {"type": "list_active_maid_actions", "data": data}, timeout=5
+            )
+        except Exception as exc:
+            return {
+                "success": False,
+                "error_code": "REQUEST_FAILED",
+                "error": str(exc),
+                "actions": [],
+            }
+        if not isinstance(response, dict):
+            return {
+                "success": False,
+                "error_code": "INVALID_RESPONSE",
+                "error": "list_active_maid_actions returned a non-object response",
+                "actions": [],
+            }
         if response.get("type") == "error":
-            return []
+            return {
+                "success": False,
+                "error_code": "REQUEST_FAILED",
+                "error": self._payload(response),
+                "actions": [],
+            }
+        payload = self._payload(response)
+        if payload.get("error"):
+            return {
+                "success": False,
+                "error_code": str(
+                    payload.get("error_code") or "LIST_ACTIONS_FAILED"
+                ),
+                "error": payload.get("error"),
+                "actions": [],
+            }
         self.observe_response(response)
-        return [dict(item) for item in self._extract_actions(self._payload(response))]
+        actions = [
+            dict(item) for item in self._extract_actions(payload)
+        ]
+        return {"success": True, "actions": actions}
 
     def observe_response(self, message: Dict[str, Any]) -> list:
         """Update local snapshots from request responses without emitting feedback."""

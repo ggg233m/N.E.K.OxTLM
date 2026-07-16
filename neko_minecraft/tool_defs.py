@@ -24,6 +24,8 @@ MC_SWITCH_FOLLOW = {
         "当玩家要求女仆跟随、跟上、过来、不要走远时，action设为follow；"
         "当玩家要求女仆驻守、留在原地、不要跟随时，action设为stay。"
         "如果女仆正坐着且要跟随，会自动站起。"
+        "若 Skill/Agent Action 正在控制女仆，本工具会拒绝以避免触发 USER_OVERRIDE；"
+        "需要抢占时先调用 mc_stop_maid_activity，再重试本工具。"
         "【必须调用】玩家说'跟我来'、'过来'、'一起去'、'别离太远'时，不要只文字回应，必须调用本工具。"
         "【重要】如果玩家在跟随指令中还提到了要做什么工作（如'过来玩游戏''跟着我去打草''过来种田''过来收菜''跟我去挖矿''跟我去打怪'），在调用本工具的同时，必须也调用 mc_switch_task 切换到对应的工作模式。"
     ),
@@ -46,6 +48,7 @@ MC_SWITCH_SIT = {
         "当玩家要求女仆坐下、休息时，action设为sit；"
         "当玩家要求女仆站起、起来、站起来时，action设为stand。"
         "坐下和跟随是两个独立的状态：坐下控制姿势，跟随控制移动。"
+        "若 Skill/Agent Action 正在执行，先调用 mc_stop_maid_activity，不能并行改姿势。"
     ),
     "parameters": {
         "type": "object",
@@ -96,6 +99,7 @@ MC_SWITCH_SCHEDULE = {
     "description": (
         "切换女仆的日程安排。"
         "schedule=day白天工作、schedule=night夜晚工作、schedule=all全天工作。"
+        "活动执行中修改日程会破坏身体租约，因此忙碌时应先调用 mc_stop_maid_activity。"
     ),
     "parameters": {
         "type": "object",
@@ -116,6 +120,7 @@ MC_EQUIP_ITEM = {
         "item=物品ID（如item=minecraft:torch、minecraft:diamond_sword）或slot=背包槽位编号指定物品。"
         "玩家说'举火把'、'拿火把'、'换火把'、'把火把拿手上'时，应该调用本工具装备 minecraft:torch，而不是只切换工作模式。"
         "本工具会在装备后重新查询状态验证 main_hand_item；只有 verified=true 才表示主手真的切换成功。"
+        "Agent/Skill 占用主手时本工具会拒绝以避免 HAND_CONFLICT；需要换装备时先安全停止当前活动。"
         "如果返回 EQUIP_VERIFY_FAILED 或 verified=false，不能告诉玩家已经拿好了，必须说明当前主手实际物品并重试或提醒检查背包。"
         "'插火把/照明模式'是工作模式切换，使用 mc_switch_task；'举火把/拿火把'是主手装备，使用本工具。"
     ),
@@ -429,6 +434,92 @@ MC_LIST_SKILLS = {
             "include_terminal": {
                 "type": "boolean",
                 "description": "是否包含最近成功、失败、取消或阻塞的 Skill，默认 true",
+            },
+        },
+    },
+}
+
+MC_GET_MAID_ACTIVITY = {
+    "name": "mc_get_maid_activity",
+    "description": (
+        "查询女仆当前由谁控制以及正在进行的统一活动。返回 Skill、Agent Action、"
+        "TLM 工作模式、待处理切换和真实女仆状态；不要只凭先前对话猜测当前活动。"
+    ),
+    "parameters": {"type": "object", "properties": {}},
+}
+
+MC_GET_MAID_CAPABILITIES = {
+    "name": "mc_get_maid_capabilities",
+    "description": (
+        "查询当前女仆真实可用的 TLM 工作模式，以及插件注册的 Agent Action、"
+        "高级 Skill 和支持的活动切换策略。不同整合包的 TLM 模式以返回结果为准。"
+    ),
+    "parameters": {"type": "object", "properties": {}},
+}
+
+MC_SET_MAID_ACTIVITY = {
+    "name": "mc_set_maid_activity",
+    "description": (
+        "统一切换女仆活动。activity_type=tlm_task 时传 task；agent_action 时传 kind/args；"
+        "skill 时传 skill/args；idle 表示安全停止后切到待机。"
+        "cancel_then_switch 会先等待当前 Skill/Action 真正终止并释放身体租约后再切换；"
+        "after_current 排队等待自然完成；reject_if_busy 在忙碌时拒绝。"
+        "职业或玩法切换优先使用本工具，避免直接切 TLM task 导致 Agent 被 USER_OVERRIDE。"
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "activity_type": {
+                "type": "string",
+                "enum": ["tlm_task", "agent_action", "skill", "idle"],
+                "description": "目标活动类型",
+            },
+            "task": {
+                "type": "string",
+                "description": "tlm_task 的任务 ID、名称或工作描述",
+            },
+            "kind": {
+                "type": "string",
+                "description": "agent_action 的动作类型",
+            },
+            "skill": {
+                "type": "string",
+                "description": "skill 的技能名称",
+            },
+            "args": {
+                "type": "object",
+                "description": "Agent Action 或 Skill 参数",
+            },
+            "switch_policy": {
+                "type": "string",
+                "enum": ["cancel_then_switch", "after_current", "reject_if_busy"],
+                "description": "当前忙碌时的切换方式，默认 cancel_then_switch",
+            },
+            "request_id": {
+                "type": "string",
+                "description": "可选幂等请求 UUID；重试同一次切换时复用",
+            },
+        },
+        "required": ["activity_type"],
+    },
+}
+
+MC_STOP_MAID_ACTIVITY = {
+    "name": "mc_stop_maid_activity",
+    "description": (
+        "统一停止女仆当前的高级 Skill、Agent Action 或 TLM 工作。"
+        "会等待服务端动作完成取消和租约清理，再按需切换到真实待机任务。"
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "switch_to_idle": {
+                "type": "boolean",
+                "description": "停止后是否切换到 TLM 待机模式，默认 true",
+            },
+            "request_id": {
+                "type": "string",
+                "description": "可选幂等请求 UUID；重试同一次停止时复用",
             },
         },
     },

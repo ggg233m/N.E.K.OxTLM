@@ -55,6 +55,7 @@ class SkillRunner:
         self._notification_retry_counts: Dict[str, int] = {}
         self._terminal_events: Dict[str, asyncio.Event] = {}
         self._starts_inflight: set[str] = set()
+        self._start_events: Dict[str, asyncio.Event] = {}
         self._starting_maids: set[str] = set()
         self._closed = False
         register = getattr(self.action_client, "register_event_consumer", None)
@@ -196,7 +197,29 @@ class SkillRunner:
                 return run.as_dict() if run else None
             run.status = "CANCEL_REQUESTED"
             child_action_id = run.current_action_id
+            start_inflight = child_action_id in self._starts_inflight
             await self._persist(run)
+
+        if start_inflight:
+            try:
+                await asyncio.wait_for(
+                    self._start_event(child_action_id).wait(),
+                    timeout=REPLACEMENT_CANCEL_TIMEOUT,
+                )
+            except asyncio.TimeoutError as exc:
+                raise RuntimeError(
+                    "Timed out waiting for the child action start request to settle"
+                ) from exc
+
+            async with lock:
+                run = self._runs.get(run.skill_id)
+                if run is None or run.terminal:
+                    return run.as_dict() if run else None
+                if run.pending_terminal:
+                    snapshot = run.as_dict()
+                    self._ensure_drive_background(run.skill_id)
+                    return snapshot
+                child_action_id = run.current_action_id
 
         cancel_result = None
         if child_action_id:
@@ -358,12 +381,31 @@ class SkillRunner:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        self._start_events.clear()
+        self._starts_inflight.clear()
         # Every transition is synchronously checkpointed.  Deliberately do not
         # cancel current_action_id: Java remains authoritative across restart.
 
     def get_status(self, skill_id):
         run = self._runs.get(str(skill_id or "").strip())
         return run.as_dict() if run else None
+
+    def registered_skills(self):
+        """Return the public, immutable names accepted by ``start``."""
+        return tuple(sorted(self._definitions))
+
+    async def wait_terminal(self, skill_id, timeout=10.0):
+        """Wait for one durable Skill terminal without polling checkpoints."""
+        canonical = str(skill_id or "").strip()
+        run = self._runs.get(canonical)
+        if run is None:
+            return None
+        if not run.terminal:
+            await asyncio.wait_for(
+                self._event_for(canonical).wait(), timeout=float(timeout)
+            )
+        current = self._runs.get(canonical)
+        return current.as_dict() if current else None
 
     def list_skills(self, maid_id="", include_terminal=True):
         maid_id = str(maid_id or "").strip()
@@ -530,6 +572,7 @@ class SkillRunner:
                         feedback_kind = "finished"
                     else:
                         self._starts_inflight.add(run.current_action_id)
+                        self._start_event(run.current_action_id).clear()
                         action_request = dict(run.current_action_request)
                 elif run.status in {"PENDING", "RUNNING"}:
                     directive = self._next_directive(run, None)
@@ -554,11 +597,18 @@ class SkillRunner:
             if action_request is None:
                 return
 
-            response = await self._start_child(run, action_request)
+            action_id = str(action_request.get("action_id") or "")
+            try:
+                response = await self._start_child(run, action_request)
+            finally:
+                # ``runner.start`` may be wrapped in a caller deadline.  If that
+                # deadline cancels this drive task while the transport is
+                # waiting, cancellation must never leave the skill permanently
+                # marked as an in-flight STARTING_ACTION.
+                self._starts_inflight.discard(action_id)
+                self._start_event(action_id).set()
             async with lock:
                 current = self._runs.get(skill_id)
-                action_id = str(action_request.get("action_id") or "")
-                self._starts_inflight.discard(action_id)
                 if current is None or current.current_action_id != action_id:
                     continue
                 # A terminal event may have reached the poll loop before the
@@ -566,19 +616,27 @@ class SkillRunner:
                 if current.pending_terminal:
                     continue
                 if self._start_accepted(response):
+                    cancel_requested = current.status == "CANCEL_REQUESTED"
                     generation = self._integer(response.get("generation"), 0)
                     if generation > 0:
                         current.current_action_generation = generation
                     if self._is_action_terminal(response):
                         current.pending_terminal = dict(response)
                     else:
-                        current.status = "WAITING_ACTION"
+                        current.status = (
+                            "CANCEL_REQUESTED"
+                            if cancel_requested else "WAITING_ACTION"
+                        )
                     await self._persist(current)
                     if not current.pending_terminal:
                         return
                     continue
                 if self._start_outcome_uncertain(response):
-                    current.status = "STARTING_ACTION"
+                    current.status = (
+                        "CANCEL_REQUESTED"
+                        if current.status == "CANCEL_REQUESTED"
+                        else "STARTING_ACTION"
+                    )
                     current.last_failure_reason = str(
                         response.get("error_code") or "START_REQUEST_UNCERTAIN"
                     )
@@ -607,6 +665,7 @@ class SkillRunner:
             await self._persist(run)
             self._claims[action_id] = run.skill_id
             self._starts_inflight.add(action_id)
+            self._start_event(action_id).clear()
             return "action"
         if isinstance(directive, Complete):
             run.status = "SUCCEEDED"
@@ -839,6 +898,13 @@ class SkillRunner:
             self._terminal_events[skill_id] = event
         return event
 
+    def _start_event(self, action_id: str) -> asyncio.Event:
+        event = self._start_events.get(action_id)
+        if event is None:
+            event = asyncio.Event()
+            self._start_events[action_id] = event
+        return event
+
     @staticmethod
     def _fingerprint_valid(run: SkillRun) -> bool:
         if not run.current_action_id:
@@ -857,6 +923,8 @@ class SkillRunner:
             return
         if self._claims.get(action_id) == skill_id:
             self._claims.pop(action_id, None)
+        self._start_events.pop(action_id, None)
+        self._starts_inflight.discard(action_id)
         release = getattr(self.action_client, "release_action", None)
         if callable(release):
             release(action_id, skill_id)

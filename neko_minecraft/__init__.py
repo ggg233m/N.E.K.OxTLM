@@ -21,6 +21,7 @@ from .maid_agent import MaidActionService
 from .maid_agent.skill_feedback import SkillFeedbackHandler
 from .maid_agent.skills import SkillRunner
 from .maid_agent.skills.mine_ore import MineOreSkill
+from .maid_activity import MaidActivityDirector
 from . import tools as _tools
 from .playmate import PlaymateContextManager, MinecraftPushRouter
 from .playmate.debug_log import PlaymateDebugLogger
@@ -32,6 +33,8 @@ from .tool_defs import (
     MC_SET_PLAN, MC_START_MAID_ACTION, MC_CANCEL_MAID_ACTION,
     MC_GET_MAID_ACTION_STATUS, MC_LIST_ACTIVE_MAID_ACTIONS,
     MC_START_SKILL, MC_CANCEL_SKILL, MC_GET_SKILL_STATUS, MC_LIST_SKILLS,
+    MC_GET_MAID_ACTIVITY, MC_GET_MAID_CAPABILITIES,
+    MC_SET_MAID_ACTIVITY, MC_STOP_MAID_ACTIVITY,
 )
 
 # respond 事件的 coalesce_key 映射：相同 key 的新推送覆盖旧的未消费推送
@@ -171,6 +174,7 @@ class NekoMinecraftPlugin(NekoPluginBase):
         self._awareness = AwarenessManager(self)
         self._maid_action_service = MaidActionService(self)
         self._skill_runner = None
+        self._maid_activity_director = MaidActivityDirector(self)
 
     async def _load_config(self):
         await _config.load_config(self)
@@ -280,6 +284,7 @@ class NekoMinecraftPlugin(NekoPluginBase):
 
     @lifecycle(id="shutdown")
     async def on_shutdown(self, **_):
+        await self._maid_activity_director.close()
         if self._skill_runner is not None:
             await self._skill_runner.close()
         if self._poll_task:
@@ -980,6 +985,40 @@ class NekoMinecraftPlugin(NekoPluginBase):
     async def mc_list_skills(self, *, include_terminal=True, **_):
         return await _tools.do_list_skills(
             self, include_terminal=include_terminal
+        )
+
+    @llm_tool(**MC_GET_MAID_ACTIVITY)
+    async def mc_get_maid_activity(self, **_):
+        return await _tools.do_get_maid_activity(self)
+
+    @llm_tool(**MC_GET_MAID_CAPABILITIES)
+    async def mc_get_maid_capabilities(self, **_):
+        return await _tools.do_get_maid_capabilities(self)
+
+    @llm_tool(**MC_SET_MAID_ACTIVITY)
+    async def mc_set_maid_activity(
+        self, *, activity_type="", task="", kind="", skill="", args=None,
+        switch_policy="cancel_then_switch", request_id="", **_
+    ):
+        return await _tools.do_set_maid_activity(
+            self,
+            activity_type=activity_type,
+            task=task,
+            kind=kind,
+            skill=skill,
+            args=args,
+            switch_policy=switch_policy,
+            request_id=request_id,
+        )
+
+    @llm_tool(**MC_STOP_MAID_ACTIVITY)
+    async def mc_stop_maid_activity(
+        self, *, switch_to_idle=True, request_id="", **_
+    ):
+        return await _tools.do_stop_maid_activity(
+            self,
+            switch_to_idle=switch_to_idle,
+            request_id=request_id,
         )
 
     @llm_tool(**MC_USE_SKILL)

@@ -165,6 +165,18 @@ class FakeActionClient:
         return list(self.active.values())
 
 
+class BlockingStartActionClient(FakeActionClient):
+    def __init__(self, checkpoint_dir=None):
+        super().__init__(checkpoint_dir)
+        self.start_entered = asyncio.Event()
+        self.release_start = asyncio.Event()
+
+    async def start_action(self, **request):
+        self.start_entered.set()
+        await self.release_start.wait()
+        return await super().start_action(**request)
+
+
 class OneActionSkill:
     name = "one_action"
     version = 1
@@ -247,6 +259,7 @@ class SkillRunnerTests(unittest.IsolatedAsyncioTestCase):
             client = FakeActionClient(directory)
             runner = SkillRunner(FakePlugin(), client, directory)
             runner.register(OneActionSkill())
+            self.assertEqual(("one_action",), runner.registered_skills())
             result = await runner.start("one_action", "maid", {"target": "stone"})
 
             self.assertEqual("WAITING_ACTION", result["status"])
@@ -575,6 +588,52 @@ class SkillRunnerTests(unittest.IsolatedAsyncioTestCase):
             final = runner.get_status(started["skill_id"])
             self.assertEqual("REQUESTED", final["last_failure_reason"])
             self.assertEqual(1, len(feedback.finished_runs))
+            await runner.close()
+
+    async def test_cancel_during_child_start_waits_then_cancels_accepted_action(self):
+        with tempfile.TemporaryDirectory() as directory:
+            client = BlockingStartActionClient(directory)
+            client.emit_terminal_on_cancel = True
+            runner = SkillRunner(FakePlugin(), client, directory)
+            runner.register(OneActionSkill())
+            skill_id = str(uuid.uuid4())
+
+            start_task = asyncio.create_task(runner.start(
+                "one_action", "maid", {}, skill_id=skill_id
+            ))
+            await asyncio.wait_for(client.start_entered.wait(), timeout=1)
+            cancel_task = asyncio.create_task(runner.cancel(skill_id, "maid"))
+            await asyncio.sleep(0)
+            self.assertEqual([], client.cancel_calls)
+
+            client.release_start.set()
+            await start_task
+            cancelling = await cancel_task
+            self.assertEqual("CANCEL_REQUESTED", cancelling["status"])
+            await wait_until(
+                lambda: runner.get_status(skill_id)["status"] == "CANCELLED"
+            )
+            self.assertEqual(1, len(client.cancel_calls))
+            await runner.close()
+
+    async def test_cancelled_start_clears_inflight_start_barrier(self):
+        with tempfile.TemporaryDirectory() as directory:
+            client = BlockingStartActionClient(directory)
+            runner = SkillRunner(FakePlugin(), client, directory)
+            runner.register(OneActionSkill())
+            skill_id = str(uuid.uuid4())
+
+            start_task = asyncio.create_task(runner.start(
+                "one_action", "maid", {}, skill_id=skill_id
+            ))
+            await asyncio.wait_for(client.start_entered.wait(), timeout=1)
+            action_id = runner.get_status(skill_id)["current_action_id"]
+            start_task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await start_task
+
+            self.assertNotIn(action_id, runner._starts_inflight)
+            self.assertTrue(runner._start_event(action_id).is_set())
             await runner.close()
 
     async def test_claimed_progress_is_forwarded_without_waiting_for_terminal(self):

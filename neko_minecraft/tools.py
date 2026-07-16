@@ -86,6 +86,31 @@ def _select_status_maid(plugin, maids):
     return maids[0]
 
 
+async def _send_guarded_body_command(plugin, maid_id, request, operation):
+    director = getattr(plugin, "_maid_activity_director", None)
+    if director is None:
+        return await plugin._send_request(request)
+    guarded = await director.execute_body_mutation(
+        lambda: plugin._send_request(request),
+        maid_id=maid_id,
+        operation=operation,
+    )
+    if not guarded.get("success", False):
+        return {
+            "type": "error",
+            "data": {
+                "error_code": guarded.get("error_code", "BODY_MUTATION_FAILED"),
+                "error": guarded.get("error", "Body mutation failed"),
+                "activity": guarded.get("current_activity", {}),
+            },
+        }
+    result = guarded.get("result")
+    return result if isinstance(result, dict) else {
+        "type": "error",
+        "data": {"error": "Body mutation returned an invalid response"},
+    }
+
+
 async def do_switch_follow(plugin, *, action="follow"):
     plugin.logger.info(f"[Entry] switch_follow called with action='{action}'")
     if not plugin.connected:
@@ -94,10 +119,10 @@ async def do_switch_follow(plugin, *, action="follow"):
     if not maid_id:
         return Err("No maid assigned")
     follow = action != "stay"
-    result = await plugin._send_request({
+    result = await _send_guarded_body_command(plugin, maid_id, {
         "type": "command_maid",
         "data": {"maid_id": maid_id, "command": "switch_follow", "args": {"follow": follow}},
-    })
+    }, "switch_follow")
     if result.get("type") == "error":
         return Err(str(result.get("data", {})))
     result_data = result.get("data", {})
@@ -108,10 +133,10 @@ async def do_switch_follow(plugin, *, action="follow"):
     if follow and state == "already_following":
         maid = plugin._maid_status_cache.get(maid_id, {})
         if maid.get("is_sitting", False):
-            sit_result = await plugin._send_request({
+            sit_result = await _send_guarded_body_command(plugin, maid_id, {
                 "type": "command_maid",
                 "data": {"maid_id": maid_id, "command": "switch_sit", "args": {"sit": False}},
-            })
+            }, "switch_sit")
             if sit_result.get("type") != "error":
                 sit_data = sit_result.get("data", {})
                 if sit_data.get("success") is not False:
@@ -128,10 +153,10 @@ async def do_switch_sit(plugin, *, action="sit"):
     if not maid_id:
         return Err("No maid assigned")
     sit = action == "sit"
-    result = await plugin._send_request({
+    result = await _send_guarded_body_command(plugin, maid_id, {
         "type": "command_maid",
         "data": {"maid_id": maid_id, "command": "switch_sit", "args": {"sit": sit}},
-    })
+    }, "switch_sit")
     if result.get("type") == "error":
         return Err(str(result.get("data", {})))
     result_data = result.get("data", {})
@@ -149,6 +174,34 @@ async def do_switch_task(plugin, *, task=""):
         return Err("No maid assigned")
     if not task:
         return Err("请提供task参数")
+
+    director = getattr(plugin, "_maid_activity_director", None)
+    if director is not None:
+        transition = await director.set_activity(
+            {"type": "tlm_task", "task": str(task)},
+            maid_id=maid_id,
+            switch_policy="cancel_then_switch",
+        )
+        if not transition.get("success"):
+            return _activity_tool_result(transition)
+        final = dict(transition.get("final_activity") or {})
+        tlm = dict(final.get("tlm_task") or {})
+        target_result = dict(transition.get("target_result") or {})
+        current_task = str(tlm.get("id") or target_result.get("current_task") or "")
+        return Ok({
+            "success": True,
+            "requested_task": task,
+            "matched_task_id": str(
+                target_result.get("matched_task_id") or current_task
+            ),
+            "verified": bool(current_task) and not tlm.get("suppressed", False),
+            "current_task": current_task,
+            "current_task_name": str(tlm.get("name") or ""),
+            "expected_task": str(
+                target_result.get("matched_task_id") or current_task
+            ),
+            "activity_transition": transition,
+        })
 
     maid = plugin._maid_status_cache.get(maid_id, {})
     available = maid.get("available_tasks", [])
@@ -382,10 +435,10 @@ async def do_switch_schedule(plugin, *, schedule="all"):
     maid_id = plugin._resolve_maid_id()
     if not maid_id:
         return Err("No maid assigned")
-    result = await plugin._send_request({
+    result = await _send_guarded_body_command(plugin, maid_id, {
         "type": "command_maid",
         "data": {"maid_id": maid_id, "command": "switch_schedule", "args": {"schedule": schedule}},
-    })
+    }, "switch_schedule")
     if result.get("type") == "error":
         return Err(str(result.get("data", {})))
     result_data = result.get("data", {})
@@ -409,10 +462,10 @@ async def do_equip_item(plugin, *, item="", slot=None):
         args["slot"] = slot
     else:
         return Err("请提供item或slot参数")
-    result = await plugin._send_request({
+    result = await _send_guarded_body_command(plugin, maid_id, {
         "type": "command_maid",
         "data": {"maid_id": maid_id, "command": "equip_item", "args": args},
-    })
+    }, "equip_item")
     result_data = result.get("data", {})
     if result.get("type") == "error":
         return Err(str(result.get("data", {})))
@@ -559,6 +612,35 @@ async def do_start_maid_action(
             "[MaidAgent] start action_id=%s maid_id=%s kind=%s args=%s",
             action_id, resolved_id, str(kind).strip().lower(), normalized_args,
         )
+    director = getattr(plugin, "_maid_activity_director", None)
+    if director is not None:
+        transition = await director.set_activity(
+            {
+                "type": "agent_action",
+                "action_id": action_id,
+                "kind": str(kind).strip().lower(),
+                "args": normalized_args,
+                "timeout_ms": timeout_ms,
+            },
+            maid_id=resolved_id,
+            switch_policy=(
+                "cancel_then_switch" if replace_existing else "reject_if_busy"
+            ),
+            request_id=action_id,
+        )
+        if not transition.get("success"):
+            return _activity_tool_result(transition)
+        started = dict(
+            transition.get("target_result")
+            or transition.get("terminal_activity")
+            or {}
+        )
+        return Ok({
+            "accepted": True,
+            "action_id": action_id,
+            **started,
+            "activity_transition": transition,
+        })
     request = {
         "type": "start_maid_action",
         "data": {
@@ -696,6 +778,37 @@ async def do_start_skill(
     resolved_id = plugin._resolve_maid_id(maid_id)
     if not resolved_id:
         return _action_error("NO_MAID_ASSIGNED", "No maid assigned")
+    director = getattr(plugin, "_maid_activity_director", None)
+    if director is not None:
+        if not isinstance(args, (dict, type(None))):
+            return _action_error("INVALID_SKILL_ARGUMENTS", "args must be an object")
+        canonical_skill_id = str(skill_id or uuid.uuid4()).strip()
+        transition = await director.set_activity(
+            {
+                "type": "skill",
+                "skill": str(skill or "").strip().lower(),
+                "skill_id": canonical_skill_id,
+                "args": dict(args or {}),
+            },
+            maid_id=resolved_id,
+            switch_policy=(
+                "cancel_then_switch" if replace_existing else "reject_if_busy"
+            ),
+            request_id=canonical_skill_id,
+        )
+        if not transition.get("success"):
+            return _activity_tool_result(transition)
+        started = dict(
+            transition.get("target_result")
+            or transition.get("terminal_activity")
+            or {}
+        )
+        return Ok({
+            "accepted": True,
+            "skill_id": canonical_skill_id,
+            **started,
+            "activity_transition": transition,
+        })
     try:
         snapshot = _skill_snapshot(await runner.start(
             skill_name=str(skill or "").strip().lower(),
@@ -757,6 +870,89 @@ async def do_list_skills(plugin, *, include_terminal=True, maid_id=None):
         include_terminal=bool(include_terminal),
     )
     return Ok({"skills": list(skills or [])})
+
+
+def _maid_activity_director(plugin):
+    director = getattr(plugin, "_maid_activity_director", None)
+    if director is None:
+        from .maid_activity import MaidActivityDirector
+        director = MaidActivityDirector(plugin)
+        plugin._maid_activity_director = director
+    return director
+
+
+def _activity_tool_result(result):
+    result = dict(result or {})
+    if result.get("success"):
+        return Ok(result)
+    return {
+        "output": result,
+        "is_error": True,
+        "error": str(result.get("error_code") or "ACTIVITY_REQUEST_FAILED"),
+    }
+
+
+async def do_get_maid_activity(plugin, *, maid_id=None):
+    resolved_id = plugin._resolve_maid_id(maid_id)
+    result = await _maid_activity_director(plugin).get_activity(
+        maid_id=str(resolved_id or "")
+    )
+    return _activity_tool_result(result)
+
+
+async def do_get_maid_capabilities(plugin, *, maid_id=None):
+    resolved_id = plugin._resolve_maid_id(maid_id)
+    result = await _maid_activity_director(plugin).get_capabilities(
+        maid_id=str(resolved_id or "")
+    )
+    return _activity_tool_result(result)
+
+
+async def do_set_maid_activity(
+    plugin,
+    *,
+    activity_type="",
+    task="",
+    kind="",
+    skill="",
+    args=None,
+    switch_policy="cancel_then_switch",
+    request_id="",
+    maid_id=None,
+):
+    target = {"type": str(activity_type or "").strip().lower()}
+    if task:
+        target["task"] = str(task)
+    if kind:
+        target["kind"] = str(kind)
+    if skill:
+        target["skill"] = str(skill)
+    if args is not None:
+        if not isinstance(args, dict):
+            return _action_error(
+                "INVALID_ACTIVITY_ARGUMENTS", "args must be an object"
+            )
+        target["args"] = dict(args)
+    resolved_id = plugin._resolve_maid_id(maid_id)
+    result = await _maid_activity_director(plugin).set_activity(
+        target,
+        maid_id=str(resolved_id or ""),
+        switch_policy=switch_policy,
+        request_id=request_id,
+    )
+    return _activity_tool_result(result)
+
+
+async def do_stop_maid_activity(
+    plugin, *, switch_to_idle=True, request_id="", maid_id=None
+):
+    resolved_id = plugin._resolve_maid_id(maid_id)
+    result = await _maid_activity_director(plugin).stop(
+        maid_id=str(resolved_id or ""),
+        switch_to_idle=bool(switch_to_idle),
+        request_id=request_id,
+    )
+    return _activity_tool_result(result)
 
 
 async def do_use_skill(plugin, *, skill_name=""):
