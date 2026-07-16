@@ -8,6 +8,10 @@
 !neko_minecraft/
 !neko_minecraft/**
 
+# Python runtime/test bytecode is local build output.
+neko_minecraft/**/__pycache__/
+neko_minecraft/**/*.py[cod]
+
 minecraft-mod/.gradle/
 minecraft-mod/build/
 minecraft-mod/maven_cache/

@@ -20,6 +20,7 @@ from neko_minecraft.maid_agent.skills.checkpoint import SkillCheckpointStore
 from neko_minecraft.maid_agent.skills.mine_ore import MineOreSkill
 from neko_minecraft.maid_agent.skills.runner import SkillRunner
 from neko_minecraft.maid_agent.skill_feedback import SkillFeedbackHandler
+from neko_minecraft.maid_agent.service import MaidActionService
 
 
 class FakePlugin:
@@ -37,6 +38,33 @@ class FlakyPushPlugin(FakePlugin):
         if self.attempts <= self.failures:
             raise RuntimeError("temporary context delivery failure")
         self.pushes.append((text, kwargs))
+
+
+class ServiceIntegrationPlugin(FakePlugin):
+    def __init__(self):
+        self.pushes = []
+        self.requests = []
+
+    async def _send_request(self, request, timeout=30):
+        self.requests.append((dict(request), timeout))
+        data = dict(request.get("data") or {})
+        return {
+            "type": "maid_action_started",
+            "data": {
+                "accepted": True,
+                "action_id": data["action_id"],
+                "maid_id": data["maid_id"],
+                "generation": 1,
+                "sequence": 1,
+                "kind": data["kind"],
+                "status": "RUNNING",
+                "stage": "STARTED",
+            },
+        }
+
+    async def _push_minecraft_context(self, text, **kwargs):
+        self.pushes.append((text, kwargs))
+        return True
 
 
 class FakeFeedback:
@@ -333,6 +361,93 @@ class SkillRunnerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(4, plugin.attempts)
             self.assertEqual("respond", plugin.pushes[0][1]["ai_behavior"])
             self.assertIn("必须基于", plugin.pushes[0][0])
+            await runner.close()
+
+    async def test_backpack_full_terminal_reaches_llm_once_via_internal_skill(self):
+        with tempfile.TemporaryDirectory() as directory:
+            plugin = ServiceIntegrationPlugin()
+            service = MaidActionService(plugin)
+            feedback = SkillFeedbackHandler(plugin)
+            runner = SkillRunner(
+                plugin, service, directory, feedback=feedback
+            )
+            runner.register(MineOreSkill())
+            started = await runner.start("mine_ore", "maid", {
+                "selector": {
+                    "type": "tag", "id": "minecraft:diamond_ores",
+                },
+                "target_count": 10,
+                "target_metric": "blocks_harvested",
+            })
+            action_id = started["current_action_id"]
+            self.assertEqual(
+                (started["skill_id"], "internal"),
+                service._owners[action_id],
+            )
+
+            terminal = {
+                "action_id": action_id,
+                "maid_id": "maid",
+                "generation": 1,
+                "sequence": 2,
+                "kind": "autonomous_mining",
+                "status": "FAILED",
+                "stage": "FAILED",
+                "end_reason": "SAFETY_PREEMPTED",
+                "result": {
+                    "phase": "BLOCKED",
+                    "blocked_reason": "backpack_full",
+                    "decision_required": True,
+                    "collected_count": 12,
+                    "target_count": 10,
+                },
+            }
+            consumed = await service.handle_message({
+                "type": "maid_action_finished", "data": terminal,
+            })
+            self.assertTrue(consumed)
+            checkpoint_path = Path(directory) / f"{started['skill_id']}.json"
+
+            def notification_persisted():
+                try:
+                    checkpoint = json.loads(
+                        checkpoint_path.read_text(encoding="utf-8")
+                    )
+                except (FileNotFoundError, json.JSONDecodeError):
+                    return False
+                return checkpoint.get("blocked_notification_revision", 0) > 0
+
+            await wait_until(
+                lambda: len(plugin.pushes) == 1
+                and runner.get_status(started["skill_id"])[
+                    "blocked_notification_revision"
+                ] > 0
+                and notification_persisted(),
+            )
+
+            snapshot = runner.get_status(started["skill_id"])
+            self.assertEqual("BLOCKED", snapshot["status"])
+            self.assertEqual("BACKPACK_FULL", snapshot["last_failure_reason"])
+            self.assertEqual(1, len(plugin.pushes))
+            text, kwargs = plugin.pushes[0]
+            self.assertEqual("respond", kwargs["ai_behavior"])
+            self.assertEqual(
+                "Minecraft 女仆 Skill 阻塞",
+                kwargs["metadata"]["description"],
+            )
+            self.assertIn("背包已满", text)
+            self.assertNotIn("自主挖矿已结束", text)
+
+            checkpoint = json.loads(
+                checkpoint_path.read_text(encoding="utf-8")
+            )
+            self.assertGreater(checkpoint["blocked_notification_revision"], 0)
+
+            await service.handle_message({
+                "type": "maid_action_finished", "data": terminal,
+            })
+            await asyncio.sleep(0)
+            self.assertEqual(1, len(plugin.pushes))
             await runner.close()
 
     async def test_load_reclaims_child_and_reconcile_adopts_server_snapshot(self):

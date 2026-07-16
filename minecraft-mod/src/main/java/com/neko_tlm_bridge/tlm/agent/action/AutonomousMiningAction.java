@@ -27,6 +27,7 @@ import net.minecraft.world.entity.ai.memory.MemoryModuleType;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.pathfinder.Path;
 import net.minecraft.world.phys.Vec3;
@@ -45,6 +46,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Function;
 import java.util.function.Predicate;
 
 /**
@@ -760,6 +762,30 @@ public final class AutonomousMiningAction implements MaidAction {
                     return complete(context, "connected_vein_exhausted");
                 }
                 veinTracker = MaidVeinTracker.unbounded();
+            }
+        }
+        // 没有已提交矿脉时，完成是终态，优先级高于下一轮工作的容量门禁。
+        if (unlockedGoalIsComplete(veinTracker.locked(),
+                state.goalReached())) {
+            return complete(context, "target_minimum_reached");
+        }
+        // 已锁定的矿脉继续挖完，不因容量门禁中途打断；但锁定矿脉可能在本
+        // tick 恰好耗尽并解锁，因此必须在开始下一段工作前重新执行容量门禁。
+        if (!veinTracker.locked()) {
+            List<BlockPos> capacityTargets = discovered.stream()
+                    .limit(MAX_CANDIDATES)
+                    .toList();
+            if (capacityTargets.isEmpty()) {
+                if (isBackpackFull(context.maid())) {
+                    return blocked(context, ActionEndReason.SAFETY_PREEMPTED,
+                            "backpack_full");
+                }
+            } else {
+                discovered = filterStorableTargets(context, capacityTargets);
+            }
+            if (!capacityTargets.isEmpty() && discovered.isEmpty()) {
+                return blocked(context, ActionEndReason.SAFETY_PREEMPTED,
+                        "backpack_full");
             }
         }
         if (discovered.isEmpty()) {
@@ -1835,6 +1861,134 @@ public final class AutonomousMiningAction implements MaidAction {
     private static boolean canReachVisibleFace(
             MaidActionContext context, BlockPos target) {
         return MaidProgressiveBlockBreaker.canReachVisibleFace(context, target);
+    }
+
+    /**
+     * 检测女仆背包是否缺少任何通用的、安全可用容量。
+     *
+     * 未知下一种掉落物时只把有正容量的空 slot 视为通用空间；已有物品的
+     * 未满 stack 可能与下一种掉落物不兼容，不能据此放行。
+     */
+    static boolean isBackpackFull(EntityMaid maid) {
+        IItemHandler inventory = maid.getAvailableBackpackInv();
+        return isBackpackFull(inventory);
+    }
+
+    /**
+     * 检测 IItemHandler 是否没有通用空 slot。
+     * 包内可见以便单元测试,逻辑独立于 EntityMaid。
+     */
+    static boolean isBackpackFull(IItemHandler inventory) {
+        if (inventory == null) {
+            return false;
+        }
+        for (int slot = 0; slot < inventory.getSlots(); slot++) {
+            ItemStack stack = inventory.getStackInSlot(slot);
+            if (stack.isEmpty() && inventory.getSlotLimit(slot) > 0) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    static boolean unlockedGoalIsComplete(
+            boolean veinLocked, boolean goalReached) {
+        return !veinLocked && goalReached;
+    }
+
+    private List<BlockPos> filterStorableTargets(
+            MaidActionContext context, List<BlockPos> targets) {
+        IItemHandler inventory = context.maid().getAvailableBackpackInv();
+        return filterStorableCandidates(inventory, targets, target -> {
+            BlockState targetState = context.level().getBlockState(target);
+            if (!eligibleTarget(target, targetState)) {
+                return null;
+            }
+            BlockEntity blockEntity = targetState.hasBlockEntity()
+                    ? context.level().getBlockEntity(target)
+                    : null;
+            return Block.getDrops(
+                    targetState, context.level(), target, blockEntity,
+                    context.maid(), context.maid().getMainHandItem());
+        });
+    }
+
+    static <T> List<T> filterStorableCandidates(
+            IItemHandler inventory,
+            List<T> candidates,
+            Function<? super T, List<ItemStack>> dropResolver) {
+        if (candidates == null || dropResolver == null) {
+            return List.of();
+        }
+        List<T> storable = new ArrayList<>();
+        for (T candidate : candidates) {
+            List<ItemStack> drops = dropResolver.apply(candidate);
+            if (drops != null && canStoreDrops(inventory, drops)) {
+                storable.add(candidate);
+            }
+        }
+        return List.copyOf(storable);
+    }
+
+    /**
+     * 在内存副本中模拟一组掉落物依次插入 IItemHandler。
+     *
+     * 模拟同时遵守 slotLimit、isItemValid 和物品组件兼容性；不会修改真实背包。
+     */
+    static boolean canStoreDrops(
+            IItemHandler inventory, List<ItemStack> drops) {
+        if (inventory == null || drops == null) {
+            return false;
+        }
+        List<ItemStack> simulated = new ArrayList<>(inventory.getSlots());
+        for (int slot = 0; slot < inventory.getSlots(); slot++) {
+            simulated.add(inventory.getStackInSlot(slot).copy());
+        }
+        for (ItemStack drop : drops) {
+            if (drop == null || drop.isEmpty()) {
+                continue;
+            }
+            ItemStack remaining = drop.copy();
+            for (int slot = 0;
+                    slot < simulated.size() && !remaining.isEmpty(); slot++) {
+                ItemStack present = simulated.get(slot);
+                if (present.isEmpty()
+                        || !inventory.isItemValid(slot, remaining)
+                        || !ItemStack.isSameItemSameComponents(
+                        present, remaining)) {
+                    continue;
+                }
+                int limit = Math.min(inventory.getSlotLimit(slot),
+                        present.getMaxStackSize());
+                int inserted = Math.min(remaining.getCount(),
+                        Math.max(0, limit - present.getCount()));
+                if (inserted > 0) {
+                    present.grow(inserted);
+                    remaining.shrink(inserted);
+                }
+            }
+            for (int slot = 0;
+                    slot < simulated.size() && !remaining.isEmpty(); slot++) {
+                if (!simulated.get(slot).isEmpty()
+                        || !inventory.isItemValid(slot, remaining)) {
+                    continue;
+                }
+                int limit = Math.min(inventory.getSlotLimit(slot),
+                        remaining.getMaxStackSize());
+                int inserted = Math.min(remaining.getCount(),
+                        Math.max(0, limit));
+                if (inserted > 0) {
+                    ItemStack insertedStack = remaining.copy();
+                    insertedStack.setCount(inserted);
+                    simulated.set(slot, insertedStack);
+                    remaining.shrink(inserted);
+                }
+            }
+            if (!remaining.isEmpty()) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private static ToolCandidate findBestTool(

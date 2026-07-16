@@ -145,6 +145,23 @@ class SkillFeedbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("绝不能绕过保护", text)
         self.assertIn("改走不需放置的路线", text)
 
+    async def test_backpack_full_feedback_recommends_return_to_base(self):
+        plugin = FakePlugin()
+        feedback = SkillFeedbackHandler(plugin)
+        await feedback.blocked({
+            "skill_id": "build", "skill_name": "mine_ore", "revision": 9,
+            "blocked_notification_revision": 0, "status": "BLOCKED",
+            "last_failure_reason": "BACKPACK_FULL",
+            "result": {"decision_required": True},
+        })
+        text, kwargs = plugin.pushes[0]
+        self.assertEqual("respond", kwargs["ai_behavior"])
+        self.assertIn("背包已满", text)
+        self.assertIn("返回基地", text)
+        self.assertIn("卸货", text)
+        self.assertIn("可能尚未开始采矿", text)
+        self.assertIn("只换 selector 不能创造背包容量", text)
+
 
 if __name__ == "__main__":
     unittest.main()

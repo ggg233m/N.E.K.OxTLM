@@ -130,6 +130,32 @@ class MineOreSkillTests(unittest.TestCase):
             directive.result["decision"]["adjustable_fields"],
         )
 
+    def test_backpack_full_block_returns_return_to_base_decision(self):
+        definition, run = run_for(execution_mode=None)
+        directive = definition.next_directive(run, terminal(
+            "autonomous_mining", status="FAILED", end_reason="SAFETY_PREEMPTED",
+            result={
+                "phase": "BLOCKED",
+                "blocked_reason": "backpack_full",
+                "collected_count": 12,
+                "target_count": 10,
+                "decision_required": True,
+            },
+        ))
+        self.assertIsInstance(directive, Blocked)
+        decision = directive.result["decision"]
+        self.assertEqual(
+            "unload_or_free_space_before_restart_or_abort",
+            decision["mode"],
+        )
+        self.assertTrue(decision["requires_player_confirmation"])
+        self.assertFalse(decision["in_place_resume_supported"])
+        self.assertFalse(decision["selector_change_without_free_space_supported"])
+        self.assertNotIn(
+            "different selector",
+            " ".join(decision["recommended_actions"]),
+        )
+
     def test_autonomous_blocked_terminal_requests_restart_decision(self):
         definition, run = run_for(execution_mode=None)
         directive = definition.next_directive(run, terminal(

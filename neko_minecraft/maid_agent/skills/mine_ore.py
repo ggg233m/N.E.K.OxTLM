@@ -790,6 +790,18 @@ def _construction_blocked_decision(
             "requires_player_confirmation": True,
             "must_not_bypass_protection": True,
         }
+    if code == "BACKPACK_FULL":
+        return {
+            "mode": "unload_or_free_space_before_restart_or_abort",
+            "recommended_actions": [
+                "navigate the maid back to a storage chest or player to unload the collected ore",
+                "explicitly remove or discard items to create backpack capacity before restarting mine_ore",
+                "abort mining",
+            ],
+            "requires_player_confirmation": True,
+            "in_place_resume_supported": False,
+            "selector_change_without_free_space_supported": False,
+        }
     return {}
 
 
