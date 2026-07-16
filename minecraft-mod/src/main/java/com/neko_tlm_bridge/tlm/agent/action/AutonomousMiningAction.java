@@ -25,13 +25,10 @@ import net.minecraft.tags.FluidTags;
 import net.minecraft.world.entity.ai.behavior.BlockPosTracker;
 import net.minecraft.world.entity.ai.memory.MemoryModuleType;
 import net.minecraft.world.item.ItemStack;
-import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.pathfinder.Path;
-import net.minecraft.world.phys.BlockHitResult;
-import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
 import net.neoforged.neoforge.items.IItemHandler;
 
@@ -62,7 +59,6 @@ public final class AutonomousMiningAction implements MaidAction {
     private static final int MAX_HARVEST_EXPANSIONS = 4_096;
     private static final int MAX_HARVEST_GOALS = 64;
     private static final int MAX_CANDIDATES = 16;
-    private static final double MAX_BREAK_DISTANCE_SQUARED = 4.5D * 4.5D;
     private static final int DRY_RELOCATION_RADIUS = 8;
     private static final int MAX_DRY_RELOCATION_PATH_ATTEMPTS = 32;
     private static final long DRY_RELOCATION_STUCK_TICKS = 80L;
@@ -126,6 +122,7 @@ public final class AutonomousMiningAction implements MaidAction {
     private JsonObject lastNavigatorFailure;
     private int harvestNavigationReplans;
     private final Map<BlockPos, Long> deferredOreTargets = new LinkedHashMap<>();
+    private final Set<HarvestStance> rejectedHarvestStances = new HashSet<>();
     private final ArrayDeque<BlockPos> recentPassagePositions = new ArrayDeque<>();
     private BlockPos lastPassageFrom;
     private BlockPos lastPassageTo;
@@ -793,7 +790,8 @@ public final class AutonomousMiningAction implements MaidAction {
                 return blocked(context, ActionEndReason.TOOL_NOT_FOUND,
                         "tool_not_found");
             }
-            if (canReachVisibleFace(context, target)
+            if (!rejectedHarvestStances.contains(new HarvestStance(start, target))
+                    && canReachVisibleFace(context, target)
                     && !target.equals(start.below())) {
                 currentTarget = target;
                 expectedTargetState = candidateState;
@@ -819,7 +817,9 @@ public final class AutonomousMiningAction implements MaidAction {
                 if (goals.size() >= MAX_HARVEST_GOALS) {
                     break;
                 }
-                if (potentialMiningStance(evaluator, stand, target)) {
+                if (!rejectedHarvestStances.contains(
+                        new HarvestStance(stand, target))
+                        && potentialMiningStance(evaluator, stand, target)) {
                     goals.putIfAbsent(stand.immutable(), target.immutable());
                 }
             }
@@ -951,6 +951,10 @@ public final class AutonomousMiningAction implements MaidAction {
                     return blocked(context, ActionEndReason.TARGET_CHANGED,
                             "target_changed");
                 }
+                if (!canReachVisibleFace(context, currentTarget)) {
+                    return reselectHarvestStance(context,
+                            "ore_stance_not_visible_after_arrival");
+                }
                 breaker = new MaidProgressiveBlockBreaker(
                         currentTarget, expectedTargetState, handLease, true);
                 report(context, AutonomousMiningState.Phase.HARVESTING,
@@ -969,10 +973,14 @@ public final class AutonomousMiningAction implements MaidAction {
         MaidProgressiveBlockBreaker.TickResult tick = breaker.tick(context);
         if (tick.outcome() == MaidProgressiveBlockBreaker.Outcome.FAILED) {
             breaker = null;
+            String message = tick.detail().has("message")
+                    ? tick.detail().get("message").getAsString()
+                    : "ore_break_failed";
+            if (isPositionalReachFailure(message)) {
+                return reselectHarvestStance(context, message);
+            }
             return blocked(context, defaultReason(tick.reason()),
-                    tick.detail().has("message")
-                            ? tick.detail().get("message").getAsString()
-                            : "ore_break_failed");
+                    message);
         }
         if (tick.outcome() == MaidProgressiveBlockBreaker.Outcome.CLEARED) {
             breaker = null;
@@ -980,6 +988,8 @@ public final class AutonomousMiningAction implements MaidAction {
             veinTracker.rememberHarvested(currentTarget);
             state.recordHarvest();
             harvestNavigationReplans = 0;
+            rejectedHarvestStances.removeIf(
+                    stance -> stance.target().equals(currentTarget));
             realEnd = context.maid().blockPosition().immutable();
             currentTarget = null;
             expectedTargetState = null;
@@ -1056,6 +1066,42 @@ public final class AutonomousMiningAction implements MaidAction {
             }
             deferredOreTargets.put(target.immutable(), retryAt);
         }
+    }
+
+    private MaidActionTickResult reselectHarvestStance(
+            MaidActionContext context, String reason) {
+        if (currentTarget == null) {
+            return blocked(context, ActionEndReason.INTERNAL_ERROR,
+                    "harvest_target_missing_during_stance_reselect");
+        }
+        rejectedHarvestStances.add(new HarvestStance(
+                context.maid().blockPosition(), currentTarget));
+        harvestNavigationReplans++;
+        if (harvestNavigationReplans > MAX_HARVEST_NAVIGATION_REPLANS) {
+            if (veinTracker.locked()) {
+                return blocked(context, ActionEndReason.PATH_NOT_FOUND,
+                        "committed_vein_has_no_visible_reachable_stance");
+            }
+            deferOreTargets(List.of(currentTarget));
+            currentTarget = null;
+            expectedTargetState = null;
+            planningPurpose = null;
+            transition(context, AutonomousMiningState.Phase.CONTINUING,
+                    deferredOreDetail(reason, 1));
+            return MaidActionTickResult.running();
+        }
+        currentTarget = null;
+        expectedTargetState = null;
+        planningPurpose = null;
+        JsonObject detail = detail("reselecting_ore_stance");
+        detail.addProperty("reason", reason);
+        detail.addProperty("replan_attempt", harvestNavigationReplans);
+        transition(context, AutonomousMiningState.Phase.SCANNING, detail);
+        return MaidActionTickResult.running();
+    }
+
+    static boolean isPositionalReachFailure(String message) {
+        return "terrain_block_is_not_visible_or_in_reach".equals(message);
     }
 
     private JsonObject deferredOreDetail(String reason, int targetCount) {
@@ -1462,6 +1508,8 @@ public final class AutonomousMiningAction implements MaidAction {
         report.addProperty("prevented_immediate_backtracks",
                 preventedImmediateBacktracks);
         report.addProperty("harvest_navigation_replans", harvestNavigationReplans);
+        report.addProperty("rejected_harvest_stances",
+                rejectedHarvestStances.size());
         if (lastPlannerDecision != null) {
             report.add("planner_decision", lastPlannerDecision.deepCopy());
         }
@@ -1627,6 +1675,8 @@ public final class AutonomousMiningAction implements MaidAction {
         result.addProperty("prevented_immediate_backtracks",
                 preventedImmediateBacktracks);
         result.addProperty("harvest_navigation_replans", harvestNavigationReplans);
+        result.addProperty("rejected_harvest_stances",
+                rejectedHarvestStances.size());
         if (lastPlannerDecision != null) {
             result.add("last_planner_decision",
                     lastPlannerDecision.deepCopy());
@@ -1784,16 +1834,7 @@ public final class AutonomousMiningAction implements MaidAction {
 
     private static boolean canReachVisibleFace(
             MaidActionContext context, BlockPos target) {
-        Vec3 eye = context.maid().getEyePosition();
-        Vec3 center = Vec3.atCenterOf(target);
-        if (eye.distanceToSqr(center) > MAX_BREAK_DISTANCE_SQUARED) {
-            return false;
-        }
-        BlockHitResult hit = context.level().clip(new ClipContext(
-                eye, center, ClipContext.Block.COLLIDER,
-                ClipContext.Fluid.NONE, context.maid()));
-        return hit.getType() == HitResult.Type.BLOCK
-                && hit.getBlockPos().equals(target);
+        return MaidProgressiveBlockBreaker.canReachVisibleFace(context, target);
     }
 
     private static ToolCandidate findBestTool(
@@ -2052,6 +2093,13 @@ public final class AutonomousMiningAction implements MaidAction {
     }
 
     private record ToolCandidate(int slot, double score) {
+    }
+
+    private record HarvestStance(BlockPos stand, BlockPos target) {
+        private HarvestStance {
+            stand = Objects.requireNonNull(stand, "stand").immutable();
+            target = Objects.requireNonNull(target, "target").immutable();
+        }
     }
 
     private record PlannedStep(

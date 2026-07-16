@@ -7,6 +7,7 @@ import com.neko_tlm_bridge.tlm.agent.MaidActionContext;
 import com.neko_tlm_bridge.tlm.agent.path.MaidTerrainWorldEvaluator;
 import com.neko_tlm_bridge.tlm.agent.runtime.HandLease;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.ai.behavior.BlockPosTracker;
 import net.minecraft.world.entity.ai.memory.MemoryModuleType;
@@ -158,14 +159,30 @@ public final class MaidProgressiveBlockBreaker {
         context.maid().setSwingingArms(false);
     }
 
-    private static boolean canReachVisibleFace(MaidActionContext context, BlockPos target) {
+    static boolean canReachVisibleFace(MaidActionContext context, BlockPos target) {
         Vec3 eye = context.maid().getEyePosition();
         Vec3 center = Vec3.atCenterOf(target);
-        if (eye.distanceToSqr(center) > MAX_BREAK_DISTANCE_SQUARED) {
+        if (canReachPoint(context, target, eye, center)) {
+            return true;
+        }
+        for (Direction face : Direction.values()) {
+            Vec3 sample = center.add(face.getStepX() * 0.49D,
+                    face.getStepY() * 0.49D, face.getStepZ() * 0.49D);
+            if (canReachPoint(context, target, eye, sample)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean canReachPoint(
+            MaidActionContext context, BlockPos target, Vec3 eye, Vec3 sample) {
+        if (eye.distanceToSqr(sample) > MAX_BREAK_DISTANCE_SQUARED) {
             return false;
         }
         BlockHitResult hit = context.level().clip(new ClipContext(
-                eye, center, ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, context.maid()));
+                eye, sample, ClipContext.Block.COLLIDER,
+                ClipContext.Fluid.NONE, context.maid()));
         return hit.getType() == HitResult.Type.BLOCK && hit.getBlockPos().equals(target);
     }
 

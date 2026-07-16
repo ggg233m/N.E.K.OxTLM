@@ -26,9 +26,6 @@ import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
-import net.minecraft.world.level.ClipContext;
-import net.minecraft.world.phys.BlockHitResult;
-import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
 import net.neoforged.neoforge.items.IItemHandler;
 
@@ -53,7 +50,6 @@ public final class HarvestBlocksAction implements MaidAction {
     private static final int MAX_PATH_SEARCH_EXPANSIONS = 12_000;
     private static final int MAX_PROSPECT_SEARCH_EXPANSIONS = 64;
     private static final int MAX_TERRAIN_REPLANS = 3;
-    private static final double MAX_BREAK_DISTANCE_SQUARED = 4.5D * 4.5D;
     private static final Direction[] HORIZONTAL_DIRECTIONS = {
             Direction.NORTH, Direction.SOUTH, Direction.WEST, Direction.EAST
     };
@@ -1746,14 +1742,7 @@ public final class HarvestBlocksAction implements MaidAction {
     }
 
     private static boolean canReachVisibleFace(MaidActionContext context, BlockPos target) {
-        Vec3 eye = context.maid().getEyePosition();
-        Vec3 center = Vec3.atCenterOf(target);
-        if (eye.distanceToSqr(center) > MAX_BREAK_DISTANCE_SQUARED) {
-            return false;
-        }
-        BlockHitResult hit = context.level().clip(new ClipContext(
-                eye, center, ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, context.maid()));
-        return hit.getType() == HitResult.Type.BLOCK && hit.getBlockPos().equals(target);
+        return MaidProgressiveBlockBreaker.canReachVisibleFace(context, target);
     }
 
     private static int requireCoordinate(JsonObject parent, String name) {

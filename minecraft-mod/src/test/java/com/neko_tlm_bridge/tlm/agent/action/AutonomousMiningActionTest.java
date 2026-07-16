@@ -195,6 +195,16 @@ class AutonomousMiningActionTest {
         assertFalse(AutonomousMiningAction.isImmediateBacktrack(null, b, b, a));
     }
 
+    @Test
+    void visibilityFailureIsClassifiedAsRecoverableStanceProblem() {
+        assertTrue(AutonomousMiningAction.isPositionalReachFailure(
+                "terrain_block_is_not_visible_or_in_reach"));
+        assertFalse(AutonomousMiningAction.isPositionalReachFailure(
+                "terrain_clear_became_unsafe"));
+        assertFalse(AutonomousMiningAction.isPositionalReachFailure(
+                "held_tool_changed_while_clearing_path"));
+    }
+
     private static JsonObject args(String type, String id) {
         JsonObject selector = new JsonObject();
         selector.addProperty("type", type);
