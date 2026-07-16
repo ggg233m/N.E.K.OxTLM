@@ -1569,6 +1569,7 @@ public final class HarvestBlocksAction implements MaidAction {
         return "native_navigation_cannot_reach_terrain_step".equals(message)
                 || "native_navigation_rejected_terrain_step".equals(message)
                 || "native_navigation_finished_before_terrain_step".equals(message)
+                || "direct_waypoint_made_no_progress".equals(message)
                 || "controlled_descend_made_no_progress".equals(message);
     }
 

@@ -51,6 +51,7 @@ public final class MaidTerrainNavigator {
     private static final long FALLING_CLEARANCE_SETTLE_TIMEOUT_TICKS = 80L;
     private static final int FALLING_ENTITY_SCAN_HEIGHT = 16;
     private static final int MAX_CONTINUOUS_FLAT_STEPS = 6;
+    private static final double DIRECT_TURN_CENTER_TOLERANCE = 0.20D;
 
     private final MaidTerrainPath terrainPath;
     private final HandLease handLease;
@@ -70,6 +71,7 @@ public final class MaidTerrainNavigator {
     private int breakIndex;
     private MaidProgressiveBlockBreaker breaker;
     private boolean movementStarted;
+    private boolean directFlatMovement;
     private double movementStartDistance;
     private double windowStartDistance;
     private long windowStartedAt;
@@ -86,6 +88,7 @@ public final class MaidTerrainNavigator {
     private int nativePathStarts;
     private int hardStops;
     private int chainedTraverseSteps;
+    private int directWaypointStarts;
     private int activeFlatRunEndExclusive = -1;
     private String phase = "pending";
     private ActionEndReason lastFailure;
@@ -287,6 +290,7 @@ public final class MaidTerrainNavigator {
         detail.addProperty("native_path_starts", nativePathStarts);
         detail.addProperty("hard_stops", hardStops);
         detail.addProperty("chained_traverse_steps", chainedTraverseSteps);
+        detail.addProperty("direct_waypoint_starts", directWaypointStarts);
         detail.addProperty("path_cost", terrainPath.totalCost());
         detail.addProperty("expanded_nodes", terrainPath.expandedNodes());
         detail.addProperty("target_x", terrainPath.target().getX());
@@ -697,6 +701,7 @@ public final class MaidTerrainNavigator {
         // Completing only after the entity really occupies the destination
         // also verifies the correct elevation for ascend/descend steps.
         if (context.maid().blockPosition().equals(step.to())
+                && directTurnIsCentered(context, step)
                 && (step.kind() != MaidTerrainStep.Kind.DESCEND
                 || horizontalDistance(context.maid(), step.to())
                 <= DESCEND_CENTER_TOLERANCE)) {
@@ -711,6 +716,10 @@ public final class MaidTerrainNavigator {
             if (stepIndex >= terrainPath.steps().size()) {
                 return arrive(context);
             }
+            if (continueFlatNavigation && directFlatMovement) {
+                commandDirectWaypoint(context,
+                        terrainPath.steps().get(stepIndex).to());
+            }
             return running(stepDetail(step));
         }
 
@@ -722,6 +731,9 @@ public final class MaidTerrainNavigator {
         }
         if (step.kind() == MaidTerrainStep.Kind.DESCEND) {
             return descendDiagonallyControlled(context, step, distance);
+        }
+        if (isContinuousFlatStep(context, step)) {
+            return moveDirectFlatWaypoint(context, step, distance);
         }
 
         if (!movementStarted) {
@@ -771,6 +783,69 @@ public final class MaidTerrainNavigator {
         detail.addProperty("distance", distance);
         detail.addProperty("step_progress", progress(distance));
         return running(detail);
+    }
+
+    /**
+     * Follows the already validated adjacent terrain waypoints directly. TLM's
+     * MaidMoveControl consumes MOVE_TO once per tick, so the target is renewed
+     * every tick. This avoids asking vanilla A* to re-approve each adjacent
+     * clear cell and avoids a stop/restart cycle at turns.
+     */
+    private TickResult moveDirectFlatWaypoint(
+            MaidActionContext context, MaidTerrainStep step, double distance) {
+        if (!movementStarted || !directFlatMovement) {
+            stopLocomotion(context);
+            movementStarted = true;
+            directFlatMovement = true;
+            directWaypointStarts++;
+            movementStartDistance = distance;
+            windowStartDistance = distance;
+            windowStartedAt = context.gameTime();
+            activeFlatRunEndExclusive = -1;
+        }
+        phase = "moving_direct_waypoint";
+        clearNativePathOwnership(context);
+        commandDirectWaypoint(context, step.to());
+        if (context.gameTime() - windowStartedAt >= STUCK_WINDOW_TICKS) {
+            if (windowStartDistance - distance < REQUIRED_STEP_PROGRESS) {
+                return fail(context, ActionEndReason.STUCK,
+                        "direct_waypoint_made_no_progress", true);
+            }
+            windowStartDistance = distance;
+            windowStartedAt = context.gameTime();
+        }
+        JsonObject detail = stepDetail(step);
+        detail.addProperty("movement_controller", "maid_direct_waypoint");
+        detail.addProperty("distance", distance);
+        detail.addProperty("step_progress", progress(distance));
+        return running(detail);
+    }
+
+    private void commandDirectWaypoint(
+            MaidActionContext context, BlockPos target) {
+        context.maid().getBrain().setMemory(MemoryModuleType.LOOK_TARGET,
+                new BlockPosTracker(target));
+        context.maid().getMoveControl().setWantedPosition(
+                target.getX() + 0.5D, target.getY(),
+                target.getZ() + 0.5D, speed);
+    }
+
+    private boolean directTurnIsCentered(
+            MaidActionContext context, MaidTerrainStep current) {
+        if (!directFlatMovement) {
+            return true;
+        }
+        boolean centered = horizontalDistance(context.maid(), current.to())
+                <= DIRECT_TURN_CENTER_TOLERANCE;
+        if (stepIndex + 1 >= terrainPath.steps().size()) {
+            return centered;
+        }
+        MaidTerrainStep next = terrainPath.steps().get(stepIndex + 1);
+        if (isDirectFlatStepGeometry(next)
+                && sameHorizontalDirection(current, next)) {
+            return true;
+        }
+        return centered;
     }
 
     /**
@@ -995,6 +1070,7 @@ public final class MaidTerrainNavigator {
             context.maid().setDeltaMovement(Vec3.ZERO);
             hardStops++;
             activeFlatRunEndExclusive = -1;
+            directFlatMovement = false;
         } else {
             chainedTraverseSteps++;
         }
@@ -1053,13 +1129,20 @@ public final class MaidTerrainNavigator {
     }
 
     private boolean canContinueFlatNavigation(MaidActionContext context) {
-        if (stepIndex + 1 >= terrainPath.steps().size()
-                || stepIndex + 1 >= activeFlatRunEndExclusive
-                || context.maid().getNavigation().isDone()) {
+        if (stepIndex + 1 >= terrainPath.steps().size()) {
             return false;
         }
         MaidTerrainStep current = terrainPath.steps().get(stepIndex);
         MaidTerrainStep next = terrainPath.steps().get(stepIndex + 1);
+        if (directFlatMovement) {
+            return current.kind() == MaidTerrainStep.Kind.TRAVERSE
+                    && current.to().equals(next.from())
+                    && isContinuousFlatStep(context, next);
+        }
+        if (stepIndex + 1 >= activeFlatRunEndExclusive
+                || context.maid().getNavigation().isDone()) {
+            return false;
+        }
         return current.kind() == MaidTerrainStep.Kind.TRAVERSE
                 && canChainFlatSteps(current, next)
                 && isContinuousFlatStep(context, next);
@@ -1124,11 +1207,18 @@ public final class MaidTerrainNavigator {
 
     private boolean isContinuousFlatStep(
             MaidActionContext context, MaidTerrainStep step) {
-        return step.kind() == MaidTerrainStep.Kind.TRAVERSE
-                && step.from().getY() == step.to().getY()
-                && step.toBreak().isEmpty()
+        return isDirectFlatStepGeometry(step)
                 && isStepClearanceOpen(context, step)
                 && isDestinationStillUsable(context, step.to());
+    }
+
+    static boolean isDirectFlatStepGeometry(MaidTerrainStep step) {
+        int dx = Math.abs(step.to().getX() - step.from().getX());
+        int dz = Math.abs(step.to().getZ() - step.from().getZ());
+        return step.kind() == MaidTerrainStep.Kind.TRAVERSE
+                && step.from().getY() == step.to().getY()
+                && dx + dz == 1
+                && step.toBreak().isEmpty();
     }
 
     private boolean activeFlatRunStillValid(MaidActionContext context) {
@@ -1248,6 +1338,16 @@ public final class MaidTerrainNavigator {
     }
 
     private static void stopLocomotion(MaidActionContext context) {
+        clearNativePathOwnership(context);
+        context.maid().getMoveControl().setWantedPosition(
+                context.maid().getX(), context.maid().getY(),
+                context.maid().getZ(), 0.0D);
+        context.maid().setSpeed(0.0F);
+        context.maid().setXxa(0.0F);
+        context.maid().setZza(0.0F);
+    }
+
+    private static void clearNativePathOwnership(MaidActionContext context) {
         context.maid().getNavigation().stop();
         context.maid().getBrain().eraseMemory(MemoryModuleType.PATH);
         context.maid().getBrain().eraseMemory(MemoryModuleType.WALK_TARGET);

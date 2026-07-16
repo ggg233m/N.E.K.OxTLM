@@ -96,6 +96,8 @@ class MaidTerrainNavigatorTest {
                 "native_navigation_finished_before_terrain_step"));
         assertTrue(HarvestBlocksAction.isLocalNavigationEdgeFailure(
                 "controlled_descend_made_no_progress"));
+        assertTrue(HarvestBlocksAction.isLocalNavigationEdgeFailure(
+                "direct_waypoint_made_no_progress"));
         assertFalse(HarvestBlocksAction.isLocalNavigationEdgeFailure(
                 "no_safe_prospecting_step_found"));
     }
@@ -169,6 +171,19 @@ class MaidTerrainNavigatorTest {
                 new Node(1, 10, 0), new Node(3, 10, 0)), target, true);
         assertFalse(MaidTerrainNavigator.isStraightCorridorPath(
                 reversed, from, target));
+    }
+
+    @Test
+    void directWaypointOnlyAcceptsAdjacentClearLevelTraverse() {
+        assertTrue(MaidTerrainNavigator.isDirectFlatStepGeometry(
+                step(MaidTerrainStep.Kind.TRAVERSE,
+                        new BlockPos(0, 10, 0), new BlockPos(1, 10, 0))));
+        assertFalse(MaidTerrainNavigator.isDirectFlatStepGeometry(
+                step(MaidTerrainStep.Kind.ASCEND,
+                        new BlockPos(0, 10, 0), new BlockPos(1, 11, 0))));
+        assertFalse(MaidTerrainNavigator.isDirectFlatStepGeometry(
+                step(MaidTerrainStep.Kind.TRAVERSE,
+                        new BlockPos(0, 10, 0), new BlockPos(2, 10, 0))));
     }
 
     private static MaidTerrainStep step(
