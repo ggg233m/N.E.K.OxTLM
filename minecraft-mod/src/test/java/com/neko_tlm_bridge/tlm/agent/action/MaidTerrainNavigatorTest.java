@@ -186,6 +186,21 @@ class MaidTerrainNavigatorTest {
                         new BlockPos(0, 10, 0), new BlockPos(2, 10, 0))));
     }
 
+    @Test
+    void signedWaypointArrivalAcceptsCenterOvershootButRejectsLateralDrift() {
+        MaidTerrainStep east = step(MaidTerrainStep.Kind.TRAVERSE,
+                new BlockPos(0, 10, 0), new BlockPos(1, 10, 0));
+
+        assertTrue(MaidTerrainNavigator.directWaypointReached(
+                1.55D, 0.50D, east, 0.20D));
+        assertTrue(MaidTerrainNavigator.directWaypointReached(
+                1.75D, 0.50D, east, 0.20D));
+        assertFalse(MaidTerrainNavigator.directWaypointReached(
+                1.20D, 0.50D, east, 0.20D));
+        assertFalse(MaidTerrainNavigator.directWaypointReached(
+                1.55D, 0.80D, east, 0.20D));
+    }
+
     private static MaidTerrainStep step(
             MaidTerrainStep.Kind kind, BlockPos from, BlockPos to) {
         return new MaidTerrainStep(kind, from, to,

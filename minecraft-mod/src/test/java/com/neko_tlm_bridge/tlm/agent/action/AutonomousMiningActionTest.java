@@ -183,6 +183,18 @@ class AutonomousMiningActionTest {
         assertEquals(0, result.get("collected_count").getAsInt());
     }
 
+    @Test
+    void immediateSuccessfulEdgeCannotBeSelectedInReverse() {
+        BlockPos a = new BlockPos(0, 10, 0);
+        BlockPos b = new BlockPos(1, 10, 0);
+        BlockPos c = new BlockPos(2, 10, 0);
+
+        assertTrue(AutonomousMiningAction.isImmediateBacktrack(a, b, b, a));
+        assertFalse(AutonomousMiningAction.isImmediateBacktrack(a, b, b, c));
+        assertFalse(AutonomousMiningAction.isImmediateBacktrack(a, b, c, a));
+        assertFalse(AutonomousMiningAction.isImmediateBacktrack(null, b, b, a));
+    }
+
     private static JsonObject args(String type, String id) {
         JsonObject selector = new JsonObject();
         selector.addProperty("type", type);

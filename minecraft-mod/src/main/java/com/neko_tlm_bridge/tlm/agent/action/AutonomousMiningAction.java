@@ -127,6 +127,9 @@ public final class AutonomousMiningAction implements MaidAction {
     private int harvestNavigationReplans;
     private final Map<BlockPos, Long> deferredOreTargets = new LinkedHashMap<>();
     private final ArrayDeque<BlockPos> recentPassagePositions = new ArrayDeque<>();
+    private BlockPos lastPassageFrom;
+    private BlockPos lastPassageTo;
+    private long preventedImmediateBacktracks;
     private boolean followingNaturalPassage;
     private long naturalPassageSteps;
     private int consecutiveNaturalPassageSteps;
@@ -699,6 +702,7 @@ public final class AutonomousMiningAction implements MaidAction {
             state.recordRouteClearance(1);
         }
         for (BlockPos crossed : navigator.drainCompletedStepPositions()) {
+            recordPassageTransition(crossed);
             state.recordExcavationStep(0);
             rememberPassagePosition(crossed);
             stepsInCurrentSegment++;
@@ -1154,6 +1158,7 @@ public final class AutonomousMiningAction implements MaidAction {
 
     private PlannedStep choosePlannedStep(
             MaidActionContext context, BlockPos live) {
+        alignPassageTransition(live);
         if (failedPlannerOrigin == null || !failedPlannerOrigin.equals(live)) {
             failedPlannerOrigin = live.immutable();
             failedPlannerCandidates.clear();
@@ -1187,6 +1192,10 @@ public final class AutonomousMiningAction implements MaidAction {
                         step.candidate().id())) {
                     continue;
                 }
+                if (isImmediateBacktrack(live, step.destination())) {
+                    preventedImmediateBacktracks++;
+                    continue;
+                }
                 candidates.add(step.candidate());
                 steps.put(step.candidate().id(), step);
             }
@@ -1196,6 +1205,9 @@ public final class AutonomousMiningAction implements MaidAction {
         lastPlannerDecision = plannerDecisionJson(decision, attempted);
         plannerDecisionCount++;
         MiningPlanner.Candidate selected = decision.selected().orElse(null);
+        if (selected == null && attempted > 0 && lastPassageFrom != null) {
+            lastPlannerFailure = "only_immediate_backtrack_or_unsafe_routes";
+        }
         return selected == null ? null : steps.get(selected.id());
     }
 
@@ -1329,6 +1341,38 @@ public final class AutonomousMiningAction implements MaidAction {
         }
     }
 
+    private void alignPassageTransition(BlockPos live) {
+        BlockPos immutable = live.immutable();
+        if (lastPassageTo == null || !lastPassageTo.equals(immutable)) {
+            lastPassageFrom = null;
+            lastPassageTo = immutable;
+        }
+    }
+
+    private void recordPassageTransition(BlockPos crossed) {
+        BlockPos immutable = crossed.immutable();
+        if (lastPassageTo == null) {
+            lastPassageTo = immutable;
+            return;
+        }
+        if (!lastPassageTo.equals(immutable)) {
+            lastPassageFrom = lastPassageTo;
+            lastPassageTo = immutable;
+        }
+    }
+
+    private boolean isImmediateBacktrack(BlockPos live, BlockPos destination) {
+        return isImmediateBacktrack(
+                lastPassageFrom, lastPassageTo, live, destination);
+    }
+
+    static boolean isImmediateBacktrack(
+            BlockPos lastFrom, BlockPos lastTo,
+            BlockPos live, BlockPos destination) {
+        return lastFrom != null && lastTo != null
+                && lastTo.equals(live) && lastFrom.equals(destination);
+    }
+
     private MaidActionTickResult alternateOrBlocked(
             MaidActionContext context, ActionEndReason reason, String message) {
         if (directionMode != DirectionMode.AUTO
@@ -1415,6 +1459,8 @@ public final class AutonomousMiningAction implements MaidAction {
                 ? "natural_passage" : "excavation");
         report.addProperty("natural_passage_steps", naturalPassageSteps);
         report.addProperty("planner_decisions", plannerDecisionCount);
+        report.addProperty("prevented_immediate_backtracks",
+                preventedImmediateBacktracks);
         report.addProperty("harvest_navigation_replans", harvestNavigationReplans);
         if (lastPlannerDecision != null) {
             report.add("planner_decision", lastPlannerDecision.deepCopy());
@@ -1578,6 +1624,8 @@ public final class AutonomousMiningAction implements MaidAction {
         result.addProperty("deferred_ore_targets", deferredOreTargets.size());
         result.addProperty("natural_passage_steps", naturalPassageSteps);
         result.addProperty("planner_decisions", plannerDecisionCount);
+        result.addProperty("prevented_immediate_backtracks",
+                preventedImmediateBacktracks);
         result.addProperty("harvest_navigation_replans", harvestNavigationReplans);
         if (lastPlannerDecision != null) {
             result.add("last_planner_decision",

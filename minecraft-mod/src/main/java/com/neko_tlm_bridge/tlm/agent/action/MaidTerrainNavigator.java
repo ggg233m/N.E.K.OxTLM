@@ -835,8 +835,9 @@ public final class MaidTerrainNavigator {
         if (!directFlatMovement) {
             return true;
         }
-        boolean centered = horizontalDistance(context.maid(), current.to())
-                <= DIRECT_TURN_CENTER_TOLERANCE;
+        boolean centered = directWaypointReached(
+                context.maid().getX(), context.maid().getZ(), current,
+                DIRECT_TURN_CENTER_TOLERANCE);
         if (stepIndex + 1 >= terrainPath.steps().size()) {
             return centered;
         }
@@ -846,6 +847,22 @@ public final class MaidTerrainNavigator {
             return true;
         }
         return centered;
+    }
+
+    static boolean directWaypointReached(
+            double maidX, double maidZ, MaidTerrainStep step, double tolerance) {
+        if (!Double.isFinite(maidX) || !Double.isFinite(maidZ)
+                || !Double.isFinite(tolerance) || tolerance < 0.0D
+                || !isDirectFlatStepGeometry(step)) {
+            return false;
+        }
+        int dx = step.to().getX() - step.from().getX();
+        int dz = step.to().getZ() - step.from().getZ();
+        double remainingX = step.to().getX() + 0.5D - maidX;
+        double remainingZ = step.to().getZ() + 0.5D - maidZ;
+        double forwardRemaining = remainingX * dx + remainingZ * dz;
+        double lateralError = Math.abs(remainingX * dz - remainingZ * dx);
+        return forwardRemaining <= tolerance && lateralError <= tolerance;
     }
 
     /**
