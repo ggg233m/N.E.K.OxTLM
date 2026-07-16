@@ -25,16 +25,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class BackpackCapacityTest {
     @Test
-    void completedUnlockedGoalIsTerminalBeforeCapacityGate() {
-        ItemStackHandler fullInventory = new ItemStackHandler(1);
-        fullInventory.setStackInSlot(0, new ItemStack(Items.DIAMOND, 64));
-
-        assertTrue(AutonomousMiningAction.isBackpackFull(fullInventory));
-        assertTrue(AutonomousMiningAction.unlockedGoalIsComplete(false, true));
-        assertFalse(AutonomousMiningAction.unlockedGoalIsComplete(true, true));
-    }
-
-    @Test
     void nullInventoryIsNotFull() {
         assertFalse(AutonomousMiningAction.isBackpackFull((ItemStackHandler) null));
     }

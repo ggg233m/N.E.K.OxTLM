@@ -758,48 +758,77 @@ public final class AutonomousMiningAction implements MaidAction {
                     return blocked(context, ActionEndReason.ENTITY_UNLOADED,
                             "committed_vein_boundary_unloaded");
                 }
-                if (state.goalReached()) {
-                    return complete(context, "connected_vein_exhausted");
+                switch (reduceExhaustedCommitment(state.goalReached())) {
+                    case COMPLETE_CURRENT -> {
+                        // Keep the exhausted commitment until complete()
+                        // snapshots vein_complete, but hide unrelated veins.
+                        discovered = List.of();
+                    }
+                    case RELEASE_FOR_NEXT ->
+                            veinTracker = MaidVeinTracker.unbounded();
                 }
-                veinTracker = MaidVeinTracker.unbounded();
             }
-        }
-        // 没有已提交矿脉时，完成是终态，优先级高于下一轮工作的容量门禁。
-        if (unlockedGoalIsComplete(veinTracker.locked(),
-                state.goalReached())) {
-            return complete(context, "target_minimum_reached");
         }
         // 已锁定的矿脉继续挖完，不因容量门禁中途打断；但锁定矿脉可能在本
         // tick 恰好耗尽并解锁，因此必须在开始下一段工作前重新执行容量门禁。
-        if (!veinTracker.locked()) {
+        boolean capacityAvailable = true;
+        if (!veinTracker.locked() && !state.goalReached()) {
             List<BlockPos> capacityTargets = discovered.stream()
                     .limit(MAX_CANDIDATES)
                     .toList();
             if (capacityTargets.isEmpty()) {
                 if (isBackpackFull(context.maid())) {
-                    return blocked(context, ActionEndReason.SAFETY_PREEMPTED,
-                            "backpack_full");
+                    capacityAvailable = false;
                 }
             } else {
                 discovered = filterStorableTargets(context, capacityTargets);
-            }
-            if (!capacityTargets.isEmpty() && discovered.isEmpty()) {
-                return blocked(context, ActionEndReason.SAFETY_PREEMPTED,
-                        "backpack_full");
+                capacityAvailable = !discovered.isEmpty();
             }
         }
-        if (discovered.isEmpty()) {
-            if (state.goalReached()) {
-                return complete(context, "target_minimum_reached");
+        ScanDecision decision = reduceScanDecision(new ScanDecisionFacts(
+                veinTracker.locked(), state.goalReached(),
+                !discovered.isEmpty(), capacityAvailable));
+        return switch (decision) {
+            case COMPLETE -> complete(context, veinTracker.locked()
+                    ? "connected_vein_exhausted" : "target_minimum_reached");
+            case CONTINUE -> {
+                transition(context, AutonomousMiningState.Phase.CONTINUING,
+                        detail("no_target_found"));
+                yield MaidActionTickResult.running();
             }
-            transition(context, AutonomousMiningState.Phase.CONTINUING,
-                    detail("no_target_found"));
-            return MaidActionTickResult.running();
+            case BLOCK_CAPACITY -> blocked(context,
+                    ActionEndReason.SAFETY_PREEMPTED, "backpack_full");
+            case HARVEST -> {
+                List<BlockPos> candidates = veinTracker.locked()
+                        ? discovered
+                        : discovered.stream().limit(MAX_CANDIDATES).toList();
+                yield planHarvestApproach(context, candidates);
+            }
+        };
+    }
+
+    static ScanDecision reduceScanDecision(ScanDecisionFacts facts) {
+        Objects.requireNonNull(facts, "facts");
+        // A committed vein always wins while it still has targets: reaching
+        // the minimum or filling the backpack must not leave a half-dug vein.
+        if (facts.veinLocked() && facts.targetsAvailable()) {
+            return ScanDecision.HARVEST;
         }
-        List<BlockPos> candidates = veinTracker.locked()
-                ? discovered
-                : discovered.stream().limit(MAX_CANDIDATES).toList();
-        return planHarvestApproach(context, candidates);
+        if (facts.goalReached()) {
+            return ScanDecision.COMPLETE;
+        }
+        if (!facts.capacityAvailable()) {
+            return ScanDecision.BLOCK_CAPACITY;
+        }
+        return facts.targetsAvailable()
+                ? ScanDecision.HARVEST : ScanDecision.CONTINUE;
+    }
+
+    static ExhaustedCommitmentDecision reduceExhaustedCommitment(
+            boolean goalReached) {
+        return goalReached
+                ? ExhaustedCommitmentDecision.COMPLETE_CURRENT
+                : ExhaustedCommitmentDecision.RELEASE_FOR_NEXT;
     }
 
     private MaidActionTickResult planHarvestApproach(
@@ -1682,8 +1711,18 @@ public final class AutonomousMiningAction implements MaidAction {
         result.addProperty("cleared_blocks", state.clearedBlocks());
         result.add("origin", position(origin));
         result.add("real_end", position(realEnd));
-        result.addProperty("blocked_reason",
-                AutonomousMiningState.normalizeReason(blockedReason));
+        String normalizedReason = AutonomousMiningState.normalizeReason(blockedReason);
+        result.addProperty("blocked_reason", normalizedReason);
+        // 容量感知重启事实:Java 只提供权威计数,Python 据此构造完整 restart_parameters。
+        // remaining_target_count 恒为非负;collected 已超 target 时为 0。
+        RestartProjection restart = restartProjection(
+                normalizedReason, state.targetCount(), state.collectedCount());
+        result.addProperty("remaining_target_count",
+                restart.remainingTargetCount());
+        // restart_supported 只是 Java 对 backpack_full 的直接重启能力提示。
+        // Python 会独立校验此布尔值，并按其他 blocked 原因的安全策略决定是否
+        // 能生成带前置条件的重启模板；false 不代表 remaining 进度事实无效。
+        result.addProperty("restart_supported", restart.restartSupported());
         result.addProperty("decision_required", decisionRequired);
         result.addProperty("selector", selectorDescription);
         result.addProperty("segment_length", segmentLength);
@@ -1891,9 +1930,16 @@ public final class AutonomousMiningAction implements MaidAction {
         return true;
     }
 
-    static boolean unlockedGoalIsComplete(
-            boolean veinLocked, boolean goalReached) {
-        return !veinLocked && goalReached;
+    static RestartProjection restartProjection(
+            String blockedReason, int targetCount, int collectedCount) {
+        if (targetCount < 1 || collectedCount < 0) {
+            throw new IllegalArgumentException(
+                    "terminal mining counts must be non-negative and target positive");
+        }
+        String normalizedReason = AutonomousMiningState.normalizeReason(blockedReason);
+        int remaining = Math.max(0, targetCount - collectedCount);
+        return new RestartProjection(remaining,
+                "backpack_full".equals(normalizedReason) && remaining > 0);
     }
 
     private List<BlockPos> filterStorableTargets(
@@ -2239,6 +2285,36 @@ public final class AutonomousMiningAction implements MaidAction {
                     "placement_policy must be disabled or "
                             + "safe_support_and_water_seal");
         }
+    }
+
+    enum ScanDecision {
+        COMPLETE,
+        CONTINUE,
+        HARVEST,
+        BLOCK_CAPACITY
+    }
+
+    enum ExhaustedCommitmentDecision {
+        COMPLETE_CURRENT,
+        RELEASE_FOR_NEXT
+    }
+
+    record ScanDecisionFacts(
+            boolean veinLocked,
+            boolean goalReached,
+            boolean targetsAvailable,
+            boolean capacityAvailable) {
+        ScanDecisionFacts {
+            if (veinLocked && !targetsAvailable && !goalReached) {
+                throw new IllegalArgumentException(
+                        "an exhausted incomplete vein must be unlocked before reduction");
+            }
+        }
+    }
+
+    record RestartProjection(
+            int remainingTargetCount,
+            boolean restartSupported) {
     }
 
     private enum PlanningPurpose {

@@ -343,6 +343,9 @@ class SkillRunnerTests(unittest.IsolatedAsyncioTestCase):
                     "decision_required": True,
                     "collected_count": 0,
                     "target_count": 1,
+                    "remaining_target_count": 1,
+                    "restart_supported": False,
+                    "vein_locked": False,
                 },
             }
             consumed = await runner.on_action_event(
@@ -398,8 +401,11 @@ class SkillRunnerTests(unittest.IsolatedAsyncioTestCase):
                     "phase": "BLOCKED",
                     "blocked_reason": "backpack_full",
                     "decision_required": True,
-                    "collected_count": 12,
+                    "collected_count": 5,
                     "target_count": 10,
+                    "remaining_target_count": 5,
+                    "restart_supported": True,
+                    "vein_locked": False,
                 },
             }
             consumed = await service.handle_message({
@@ -428,6 +434,10 @@ class SkillRunnerTests(unittest.IsolatedAsyncioTestCase):
             snapshot = runner.get_status(started["skill_id"])
             self.assertEqual("BLOCKED", snapshot["status"])
             self.assertEqual("BACKPACK_FULL", snapshot["last_failure_reason"])
+            self.assertEqual(
+                5,
+                snapshot["decision_context"]["restart_template"]["target_count"],
+            )
             self.assertEqual(1, len(plugin.pushes))
             text, kwargs = plugin.pushes[0]
             self.assertEqual("respond", kwargs["ai_behavior"])
@@ -442,6 +452,9 @@ class SkillRunnerTests(unittest.IsolatedAsyncioTestCase):
                 checkpoint_path.read_text(encoding="utf-8")
             )
             self.assertGreater(checkpoint["blocked_notification_revision"], 0)
+            self.assertEqual(
+                snapshot["decision_context"], checkpoint["decision_context"]
+            )
 
             await service.handle_message({
                 "type": "maid_action_finished", "data": terminal,

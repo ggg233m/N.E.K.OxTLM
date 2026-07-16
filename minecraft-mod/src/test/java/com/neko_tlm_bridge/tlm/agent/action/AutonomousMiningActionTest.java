@@ -128,6 +128,8 @@ class AutonomousMiningActionTest {
         assertEquals("VALIDATING", result.get("phase").getAsString());
         assertEquals(0, result.get("collected_count").getAsInt());
         assertEquals(1, result.get("target_count").getAsInt());
+        assertEquals(1, result.get("remaining_target_count").getAsInt());
+        assertFalse(result.get("restart_supported").getAsBoolean());
         assertEquals(0, result.get("segments_dug").getAsInt());
         assertEquals(0, result.get("cleared_blocks").getAsInt());
         assertEquals("requested", result.get("blocked_reason").getAsString());
@@ -212,5 +214,45 @@ class AutonomousMiningActionTest {
         JsonObject args = new JsonObject();
         args.add("selector", selector);
         return args;
+    }
+
+    @Test
+    void backpackCapacityRestartProjectionUsesRemainingTarget() {
+        AutonomousMiningAction.RestartProjection projection =
+                AutonomousMiningAction.restartProjection(
+                        "Backpack Full", 10, 5);
+        AutonomousMiningAction.RestartProjection zeroProgress =
+                AutonomousMiningAction.restartProjection(
+                        "backpack_full", 10, 0);
+
+        assertEquals(5, projection.remainingTargetCount());
+        assertTrue(projection.restartSupported());
+        assertEquals(10, zeroProgress.remainingTargetCount());
+        assertTrue(zeroProgress.restartSupported());
+    }
+
+    @Test
+    void restartProjectionClampsOvershootAndRejectsOtherReasons() {
+        AutonomousMiningAction.RestartProjection overshoot =
+                AutonomousMiningAction.restartProjection(
+                        "backpack_full", 10, 12);
+        AutonomousMiningAction.RestartProjection otherReason =
+                AutonomousMiningAction.restartProjection(
+                        "lava_hazard", 10, 3);
+
+        assertEquals(0, overshoot.remainingTargetCount());
+        assertFalse(overshoot.restartSupported());
+        assertEquals(7, otherReason.remainingTargetCount());
+        assertFalse(otherReason.restartSupported());
+    }
+
+    @Test
+    void restartProjectionRejectsInvalidCounters() {
+        assertThrows(IllegalArgumentException.class,
+                () -> AutonomousMiningAction.restartProjection(
+                        "backpack_full", 0, 0));
+        assertThrows(IllegalArgumentException.class,
+                () -> AutonomousMiningAction.restartProjection(
+                        "backpack_full", 1, -1));
     }
 }

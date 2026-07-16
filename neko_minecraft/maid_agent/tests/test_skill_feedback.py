@@ -162,6 +162,26 @@ class SkillFeedbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("可能尚未开始采矿", text)
         self.assertIn("只换 selector 不能创造背包容量", text)
 
+    async def test_duplicate_backpack_full_terminal_does_not_repeat_feedback(self):
+        # 重复 terminal(skill_id+revision 相同)不重复推送反馈
+        plugin = FakePlugin()
+        feedback = SkillFeedbackHandler(plugin)
+        snapshot = {
+            "skill_id": "dup", "skill_name": "mine_ore", "revision": 7,
+            "blocked_notification_revision": 0, "status": "BLOCKED",
+            "last_failure_reason": "BACKPACK_FULL",
+            "result": {
+                "decision_required": True,
+                "remaining_target_count": 5,
+                "restart_supported": True,
+            },
+        }
+        first = await feedback.blocked(snapshot)
+        second = await feedback.blocked(snapshot)
+        self.assertTrue(first)
+        self.assertFalse(second)
+        self.assertEqual(1, len(plugin.pushes))
+
 
 if __name__ == "__main__":
     unittest.main()

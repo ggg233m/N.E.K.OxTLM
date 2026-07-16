@@ -210,17 +210,6 @@ class MineOreSkill:
 
         terminal = dict(terminal_snapshot)
         result = _result(terminal)
-        reported_count = max(
-            0,
-            _integer(
-                result.get(
-                    "collected_count",
-                    result.get("blocks_harvested", result.get("harvested", 0)),
-                ),
-                0,
-            ),
-        )
-        run.collected_count = max(run.collected_count, reported_count)
         status = _status(terminal)
         phase = str(result.get("phase") or "").strip().upper()
         blocked_reason = str(
@@ -231,25 +220,92 @@ class MineOreSkill:
         decision_required = bool(result.get("decision_required", False))
 
         if decision_required or phase == "BLOCKED":
-            current_parameters = self._autonomous_action_args(run)
+            facts, fact_errors = _validate_blocked_restart_facts(
+                run, result, blocked_reason
+            )
+            if fact_errors:
+                return Fail(
+                    "SERVER_RESULT_INCONSISTENT",
+                    {
+                        **result,
+                        "message": "Java BLOCKED terminal restart facts are inconsistent",
+                        "fact_errors": fact_errors,
+                        "restart_supported": False,
+                        "restart_parameters": None,
+                        "execution_mode": "autonomous",
+                        "planner_owner": "java",
+                        "child_terminal": terminal,
+                    },
+                    tuple(terminal.get("warnings") or ()),
+                )
+
+            run.collected_count = facts["collected_count"]
+            if facts["remaining_target_count"] == 0:
+                if facts["vein_locked"] is False:
+                    return Complete({
+                        **result,
+                        "message": "mine_ore_target_reached_before_blocked_restart",
+                        "completion_source": "blocked_terminal_goal_already_reached",
+                        "execution_mode": "autonomous",
+                        "planner_owner": "java",
+                        "selector": dict(run.args["selector"]),
+                        "target_metric": "blocks_harvested",
+                        "target_count": int(run.args["target_count"]),
+                        "blocks_harvested": run.collected_count,
+                        "target_overshoot": max(
+                            0,
+                            run.collected_count - int(run.args["target_count"]),
+                        ),
+                    }, tuple(terminal.get("warnings") or ()))
+
+            current_parameters = dict(run.args)
+            policy = _blocked_restart_policy(blocked_reason)
+            if facts["vein_locked"] is True:
+                policy = {
+                    "mode": "committed_vein_requires_recovery_or_explicit_abandon",
+                    "restart_template_allowed": False,
+                    "required_preconditions": [
+                        "use_a_future_committed_vein_resume_protocol_or_explicitly_abandon_the_committed_vein",
+                    ],
+                    "allowed_overrides": [],
+                    "requires_player_confirmation": True,
+                    "committed_vein_must_not_be_superseded": True,
+                }
+            restart_template = None
+            if policy.pop("restart_template_allowed", False):
+                restart_template = dict(current_parameters)
+                restart_template["target_count"] = facts["remaining_target_count"]
             decision = {
-                "mode": "restart_with_adjusted_parameters",
-                "adjustable_fields": [
-                    "direction",
-                    "shape",
-                    "segment_length",
-                    "speed",
-                    "discovery_mode",
-                    "placement_policy",
-                    "max_placements",
-                ],
+                "mode": "manual_review_or_abort",
+                "adjustable_fields": list(policy.get("allowed_overrides", ())),
+                "allowed_overrides": list(policy.get("allowed_overrides", ())),
+                "required_preconditions": list(
+                    policy.get("required_preconditions", ())
+                ),
                 "current_parameters": current_parameters,
+                "restart_template": restart_template,
+                "restart_parameters": restart_template,
+                "restart_parameters_are_skill_args": restart_template is not None,
+                "java_restart_supported": facts["java_restart_supported"],
+                "conditional_restart_supported": restart_template is not None,
+                "restart_template_available": restart_template is not None,
+                "same_selector_progress_credit_applied": restart_template is not None,
+                "different_selector_progress_credit_applied": False,
+                "different_selector_requires_new_target_count": True,
+                "progress_facts": {
+                    "collected_so_far": facts["collected_count"],
+                    "original_target_count": facts["target_count"],
+                    "remaining_target_count": facts["remaining_target_count"],
+                    "remaining_target_count_is_minimum": True,
+                },
+                "collected_so_far": facts["collected_count"],
+                "original_target_count": facts["target_count"],
+                "remaining_target_count": facts["remaining_target_count"],
+                "remaining_target_count_is_minimum": True,
                 "requires_player_confirmation": True,
                 "in_place_resume_supported": False,
             }
-            decision.update(_construction_blocked_decision(
-                blocked_reason, current_parameters
-            ))
+            decision.update(policy)
             blocked_result = {
                 **result,
                 "execution_mode": "autonomous",
@@ -266,6 +322,18 @@ class MineOreSkill:
                 blocked_result,
                 tuple(terminal.get("warnings") or ()),
             )
+
+        reported_count = max(
+            0,
+            _integer(
+                result.get(
+                    "collected_count",
+                    result.get("blocks_harvested", result.get("harvested", 0)),
+                ),
+                0,
+            ),
+        )
+        run.collected_count = max(run.collected_count, reported_count)
 
         if status == "SUCCEEDED" and (phase in {"", "COMPLETED"}):
             if run.collected_count < int(run.args["target_count"]):
@@ -735,10 +803,8 @@ def _bounded_number(value: Any, name: str, minimum: float, maximum: float) -> fl
     return number
 
 
-def _construction_blocked_decision(
-    reason: Any, current_parameters: Mapping[str, Any]
-) -> dict[str, Any]:
-    """Attach a concrete, non-looping response for construction failures."""
+def _blocked_restart_policy(reason: Any) -> dict[str, Any]:
+    """Return a conservative restart-template policy for one BLOCKED reason."""
     code = _reason_code(reason, "AUTONOMOUS_MINING_BLOCKED")
     if code == "NO_BUILDING_MATERIAL":
         return {
@@ -747,6 +813,15 @@ def _construction_blocked_decision(
                 "put ordinary full-cube blocks in the maid backpack",
                 "restart with placement_policy=disabled and a different direction",
                 "abort mining",
+            ],
+            "restart_template_allowed": True,
+            "required_preconditions": [
+                "provide_safe_full_cube_building_material_or_disable_construction",
+                "if_construction_is_disabled_change_to_a_route_that_needs_no_placement",
+            ],
+            "allowed_overrides": [
+                "direction", "shape", "segment_length",
+                "placement_policy", "max_placements",
             ],
             "requires_player_confirmation": True,
         }
@@ -758,6 +833,13 @@ def _construction_blocked_decision(
                 "choose a different direction or shape",
                 "abort mining",
             ],
+            "restart_template_allowed": True,
+            "required_preconditions": [
+                "raise_or_remove_the_placement_budget_or_choose_a_route_with_fewer_placements",
+            ],
+            "allowed_overrides": [
+                "direction", "shape", "segment_length", "max_placements",
+            ],
             "requires_player_confirmation": True,
         }
     if code == "WATER_SEAL_FAILED":
@@ -767,6 +849,11 @@ def _construction_blocked_decision(
                 "choose a different direction or shape",
                 "abort mining",
             ],
+            "restart_template_allowed": False,
+            "required_preconditions": [
+                "obtain_player_confirmation_for_a_verified_safe_route_away_from_the_water_hazard",
+            ],
+            "allowed_overrides": [],
             "requires_player_confirmation": True,
         }
     if code == "WATER_SEAL_REQUIRES_DRY_START":
@@ -777,6 +864,12 @@ def _construction_blocked_decision(
                 "restart with a different direction or shape",
                 "abort mining",
             ],
+            "restart_template_allowed": False,
+            "required_preconditions": [
+                "move_the_maid_to_verified_dry_supported_ground",
+                "reassess_the_water_hazard_before_creating_a_new_skill",
+            ],
+            "allowed_overrides": [],
             "requires_player_confirmation": True,
         }
     if code == "PLACEMENT_PROTECTED":
@@ -787,6 +880,11 @@ def _construction_blocked_decision(
                 "choose a route that does not require placement",
                 "abort mining",
             ],
+            "restart_template_allowed": False,
+            "required_preconditions": [
+                "leave_the_protected_area_or_obtain_authorized_player_action",
+            ],
+            "allowed_overrides": [],
             "requires_player_confirmation": True,
             "must_not_bypass_protection": True,
         }
@@ -798,11 +896,178 @@ def _construction_blocked_decision(
                 "explicitly remove or discard items to create backpack capacity before restarting mine_ore",
                 "abort mining",
             ],
+            "restart_template_allowed": True,
+            "required_preconditions": [
+                "create_real_backpack_capacity_by_unloading_or_removing_items",
+                "recheck_capacity_before_starting_the_new_skill",
+            ],
+            "allowed_overrides": [],
             "requires_player_confirmation": True,
             "in_place_resume_supported": False,
             "selector_change_without_free_space_supported": False,
+            "automatic_unload_supported": False,
+            "requires_manual_inventory_change": True,
+            "restart_requires_capacity_recheck": True,
         }
-    return {}
+    if code in {"TOOL_NOT_FOUND", "NO_CORRECT_TOOL"}:
+        return {
+            "mode": "equip_correct_tool_then_restart_or_abort",
+            "restart_template_allowed": True,
+            "required_preconditions": [
+                "equip_and_verify_a_correct_harvest_tool_in_the_maid_main_hand",
+            ],
+            "allowed_overrides": [],
+            "recommended_actions": [
+                "equip the correct tool and verify it before restarting",
+                "abort mining",
+            ],
+        }
+    if code == "TARGET_CHANGED":
+        return {
+            "mode": "rescan_then_restart_or_abort",
+            "restart_template_allowed": True,
+            "required_preconditions": [
+                "rescan_and_confirm_the_selector_still_has_a_valid_target",
+            ],
+            "allowed_overrides": ["discovery_mode"],
+        }
+
+    denied_fragments = (
+        "PROTECTED", "HAZARD", "LAVA", "WATER", "ENTITY_UNLOADED",
+        "COMMITTED_VEIN", "INTERNAL", "SUPERSEDED", "HAND_CONFLICT",
+        "SERVER_STATE_LOST", "UNBREAKABLE", "BLOCK_PROTECTED", "UNSAFE",
+    )
+    if any(fragment in code for fragment in denied_fragments):
+        return {
+            "mode": "manual_review_or_abort",
+            "restart_template_allowed": False,
+            "required_preconditions": [
+                "obtain_new_server_verified_safety_or_authorization_evidence",
+            ],
+            "allowed_overrides": [],
+        }
+
+    route_failure = (
+        code in {"PATH_NOT_FOUND", "STUCK"}
+        or "NAVIGATION" in code
+        or "TERRAIN_STEP" in code
+        or code.endswith("_STUCK")
+        or "NO_PROGRESS" in code
+    )
+    if route_failure:
+        return {
+            "mode": "restart_with_verified_route_change_or_abort",
+            "restart_template_allowed": True,
+            "restart_template_ready_without_overrides": False,
+            "restart_template_must_not_be_submitted_unchanged": True,
+            "minimum_required_override_count": 1,
+            "required_preconditions": [
+                "change_at_least_one_allowed_route_override",
+                "use_new_server_verified_route_evidence",
+            ],
+            "allowed_overrides": [
+                "direction", "shape", "segment_length", "speed",
+                "discovery_mode", "placement_policy", "max_placements",
+            ],
+        }
+    return {
+        "mode": "manual_review_or_abort",
+        "restart_template_allowed": False,
+        "required_preconditions": [
+            "obtain_reason_specific_server_or_player_evidence_before_restarting",
+        ],
+        "allowed_overrides": [],
+    }
+
+
+def _validate_blocked_restart_facts(
+    run: SkillRun,
+    terminal_result: Mapping[str, Any],
+    blocked_reason: Any,
+) -> tuple[dict[str, Any], list[str]]:
+    """Validate Java restart facts against the durable Python checkpoint."""
+    result = dict(terminal_result or {})
+    errors: list[str] = []
+
+    target_count = _strict_nonnegative_integer_field(
+        result, "target_count", errors
+    )
+    collected_count = _strict_nonnegative_integer_field(
+        result, "collected_count", errors
+    )
+    remaining_target_count = _strict_nonnegative_integer_field(
+        result, "remaining_target_count", errors
+    )
+    restart_supported = _strict_boolean_field(
+        result, "restart_supported", errors
+    )
+
+    expected_target = int(run.args["target_count"])
+    checkpoint_collected = max(0, int(run.collected_count))
+    if target_count is not None and target_count != expected_target:
+        errors.append("terminal_target_count_does_not_match_skill_args")
+    if collected_count is not None and collected_count < checkpoint_collected:
+        errors.append("terminal_collected_count_regressed_below_checkpoint")
+
+    effective_collected = (
+        collected_count if collected_count is not None else checkpoint_collected
+    )
+    expected_remaining = max(0, expected_target - effective_collected)
+    if (remaining_target_count is not None
+            and remaining_target_count != expected_remaining):
+        errors.append("terminal_remaining_target_count_is_inconsistent")
+
+    code = _reason_code(blocked_reason, "AUTONOMOUS_MINING_BLOCKED")
+    if code == "BACKPACK_FULL":
+        expected_java_restart = expected_remaining > 0
+        if (restart_supported is not None
+                and restart_supported != expected_java_restart):
+            errors.append("terminal_restart_supported_is_inconsistent")
+
+    if "vein_locked" not in result:
+        errors.append("terminal_vein_locked_is_missing")
+        vein_locked = None
+    else:
+        vein_locked_value = result.get("vein_locked")
+        if not isinstance(vein_locked_value, bool):
+            errors.append("terminal_vein_locked_must_be_boolean")
+            vein_locked = None
+        else:
+            vein_locked = vein_locked_value
+
+    return {
+        "target_count": expected_target,
+        "collected_count": effective_collected,
+        "remaining_target_count": expected_remaining,
+        "java_restart_supported": restart_supported,
+        "vein_locked": vein_locked,
+    }, errors
+
+
+def _strict_nonnegative_integer_field(
+    source: Mapping[str, Any], name: str, errors: list[str]
+) -> Optional[int]:
+    if name not in source:
+        errors.append(f"terminal_{name}_is_missing")
+        return None
+    value = source.get(name)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        errors.append(f"terminal_{name}_must_be_a_nonnegative_integer")
+        return None
+    return value
+
+
+def _strict_boolean_field(
+    source: Mapping[str, Any], name: str, errors: list[str]
+) -> Optional[bool]:
+    if name not in source:
+        errors.append(f"terminal_{name}_is_missing")
+        return None
+    value = source.get(name)
+    if not isinstance(value, bool):
+        errors.append(f"terminal_{name}_must_be_boolean")
+        return None
+    return value
 
 
 def _execution_mode(run: SkillRun) -> str:

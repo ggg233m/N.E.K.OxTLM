@@ -117,6 +117,11 @@ class MineOreSkillTests(unittest.TestCase):
             result={
                 "phase": "BLOCKED",
                 "blocked_reason": "no_building_material",
+                "collected_count": 0,
+                "target_count": 5,
+                "remaining_target_count": 5,
+                "restart_supported": False,
+                "vein_locked": False,
                 "decision_required": True,
             },
         ))
@@ -130,8 +135,12 @@ class MineOreSkillTests(unittest.TestCase):
             directive.result["decision"]["adjustable_fields"],
         )
 
-    def test_backpack_full_block_returns_return_to_base_decision(self):
-        definition, run = run_for(execution_mode=None)
+    def test_backpack_full_after_goal_unlocked_completes_without_restart(self):
+        definition, run = run_for({
+            "selector": {"type": "tag", "id": "minecraft:diamond_ores"},
+            "target_count": 10,
+            "target_metric": "blocks_harvested",
+        }, execution_mode=None)
         directive = definition.next_directive(run, terminal(
             "autonomous_mining", status="FAILED", end_reason="SAFETY_PREEMPTED",
             result={
@@ -139,21 +148,17 @@ class MineOreSkillTests(unittest.TestCase):
                 "blocked_reason": "backpack_full",
                 "collected_count": 12,
                 "target_count": 10,
+                "remaining_target_count": 0,
+                "restart_supported": False,
+                "vein_locked": False,
                 "decision_required": True,
             },
         ))
-        self.assertIsInstance(directive, Blocked)
-        decision = directive.result["decision"]
+        self.assertIsInstance(directive, Complete)
+        self.assertEqual(12, directive.result["blocks_harvested"])
         self.assertEqual(
-            "unload_or_free_space_before_restart_or_abort",
-            decision["mode"],
-        )
-        self.assertTrue(decision["requires_player_confirmation"])
-        self.assertFalse(decision["in_place_resume_supported"])
-        self.assertFalse(decision["selector_change_without_free_space_supported"])
-        self.assertNotIn(
-            "different selector",
-            " ".join(decision["recommended_actions"]),
+            "blocked_terminal_goal_already_reached",
+            directive.result["completion_source"],
         )
 
     def test_autonomous_blocked_terminal_requests_restart_decision(self):
@@ -165,6 +170,9 @@ class MineOreSkillTests(unittest.TestCase):
                 "collected_count": 3,
                 "target_count": 5,
                 "blocked_reason": "lava_hazard",
+                "remaining_target_count": 2,
+                "restart_supported": False,
+                "vein_locked": False,
                 "decision_required": True,
                 "segments_dug": 2,
                 "cleared_blocks": 8,
@@ -174,7 +182,8 @@ class MineOreSkillTests(unittest.TestCase):
         self.assertEqual("LAVA_HAZARD", directive.reason)
         self.assertTrue(directive.result["decision_required"])
         decision = directive.result["decision"]
-        self.assertEqual("restart_with_adjusted_parameters", decision["mode"])
+        self.assertEqual("manual_review_or_abort", decision["mode"])
+        self.assertIsNone(decision["restart_template"])
         self.assertFalse(decision["in_place_resume_supported"])
         self.assertEqual(3, directive.result["blocks_harvested"])
 
@@ -326,6 +335,343 @@ class MineOreSkillTests(unittest.TestCase):
             with self.subTest(field=field):
                 with self.assertRaises(ValueError):
                     definition.normalize_args({**base, field: value})
+
+    # ===== M0b: remaining_target_count 容量感知重启事实 =====
+
+    def _backpack_full_directive(self, collected, target):
+        """构造一个 collected/target 的 BACKPACK_FULL 终态指令,用于 remaining 断言。"""
+        definition, run = run_for({
+            "selector": {"type": "tag", "id": "minecraft:diamond_ores"},
+            "target_count": target,
+            "target_metric": "blocks_harvested",
+        }, execution_mode=None)
+        remaining = max(0, target - collected)
+        directive = definition.next_directive(run, terminal(
+            "autonomous_mining", status="FAILED", end_reason="SAFETY_PREEMPTED",
+            result={
+                "phase": "BLOCKED",
+                "blocked_reason": "backpack_full",
+                "collected_count": collected,
+                "target_count": target,
+                "remaining_target_count": remaining,
+                "restart_supported": remaining > 0,
+                "vein_locked": False,
+                "decision_required": True,
+            },
+        ))
+        return directive
+
+    def test_backpack_full_partial_progress_5_of_10_restarts_with_5(self):
+        # 已采 5/10 → remaining=5, restart_supported=true,
+        # restart_parameters.target_count=5, 保留原 selector
+        directive = self._backpack_full_directive(collected=5, target=10)
+        self.assertIsInstance(directive, Blocked)
+        decision = directive.result["decision"]
+        self.assertEqual(5, decision["remaining_target_count"])
+        self.assertTrue(decision["conditional_restart_supported"])
+        self.assertTrue(decision["java_restart_supported"])
+        restart_params = decision["restart_template"]
+        self.assertIsNotNone(restart_params)
+        self.assertEqual(5, restart_params["target_count"])
+        self.assertEqual("blocks_harvested", restart_params["target_metric"])
+        self.assertEqual(
+            {"type": "tag", "id": "minecraft:diamond_ores"},
+            restart_params["selector"],
+        )
+        self.assertEqual(
+            restart_params,
+            MineOreSkill().normalize_args(restart_params),
+        )
+        # 保留原路线参数
+        self.assertIn("direction", restart_params)
+        self.assertIn("shape", restart_params)
+        self.assertIn("segment_length", restart_params)
+
+    def test_backpack_full_zero_progress_0_of_10_restarts_with_10(self):
+        # 已采 0/10 → remaining=10, restart_supported=true,
+        # restart_parameters.target_count=10 (原值)
+        directive = self._backpack_full_directive(collected=0, target=10)
+        self.assertIsInstance(directive, Blocked)
+        decision = directive.result["decision"]
+        self.assertEqual(10, decision["remaining_target_count"])
+        self.assertTrue(decision["conditional_restart_supported"])
+        restart_params = decision["restart_template"]
+        self.assertIsNotNone(restart_params)
+        self.assertEqual(10, restart_params["target_count"])
+
+    def test_backpack_full_collected_exceeds_target_without_vein_fact_fails(self):
+        directive = self._backpack_full_directive(collected=12, target=10)
+        # helper supplies vein_locked=False, so an achieved minimum is complete.
+        self.assertIsInstance(directive, Complete)
+
+    def test_backpack_full_checkpoint_and_decision_carry_same_remaining(self):
+        # checkpoint(run.result) 和 LLM(decision) 收到相同的 remaining_target_count
+        directive = self._backpack_full_directive(collected=5, target=10)
+        self.assertIsInstance(directive, Blocked)
+        # directive.result 是 Blocked 的结果,包含 Java 原始字段(**result)和 decision
+        # checkpoint 侧保存 directive.result(含 remaining_target_count from Java)
+        # LLM 侧读取 directive.result["decision"]["remaining_target_count"]
+        java_remaining = directive.result.get("remaining_target_count")
+        llm_remaining = directive.result["decision"]["remaining_target_count"]
+        self.assertEqual(5, java_remaining)
+        self.assertEqual(java_remaining, llm_remaining)
+        # collected_count / target_count 也应一致
+        self.assertEqual(
+            directive.result.get("collected_count"),
+            directive.result["decision"]["collected_so_far"],
+        )
+        self.assertEqual(
+            directive.result.get("target_count"),
+            directive.result["decision"]["original_target_count"],
+        )
+
+    def test_backpack_full_restart_parameters_preserves_all_route_fields(self):
+        # restart_parameters 必须保留所有原路线参数,仅 target_count 被缩减
+        directive = self._backpack_full_directive(collected=3, target=7)
+        self.assertIsInstance(directive, Blocked)
+        restart_params = directive.result["decision"]["restart_template"]
+        self.assertEqual(4, restart_params["target_count"])  # 7 - 3 = 4
+        # 验证所有 adjustable_fields 都被保留
+        for field in (
+            "selector", "direction", "shape", "segment_length",
+            "speed", "discovery_mode", "placement_policy", "max_placements",
+        ):
+            self.assertIn(field, restart_params)
+
+    def test_backpack_full_without_java_restart_facts_is_inconsistent(self):
+        definition, run = run_for({
+            "selector": {"type": "tag", "id": "minecraft:coal_ores"},
+            "target_count": 8,
+            "target_metric": "blocks_harvested",
+        }, execution_mode=None)
+        directive = definition.next_directive(run, terminal(
+            "autonomous_mining", status="FAILED", end_reason="SAFETY_PREEMPTED",
+            result={
+                "phase": "BLOCKED",
+                "blocked_reason": "backpack_full",
+                "collected_count": 3,
+                "target_count": 8,
+                "decision_required": True,
+                # 注意:故意不包含 remaining_target_count / restart_supported
+            },
+        ))
+        self.assertEqual("SERVER_RESULT_INCONSISTENT", directive.reason)
+        self.assertIsNone(directive.result["restart_parameters"])
+
+    def test_non_backpack_path_block_uses_same_selector_remaining_template(self):
+        definition, run = run_for({
+            "selector": {"type": "tag", "id": "minecraft:coal_ores"},
+            "target_count": 10,
+            "target_metric": "blocks_harvested",
+        }, execution_mode=None)
+        directive = definition.next_directive(run, terminal(
+            "autonomous_mining", status="FAILED", end_reason="PATH_NOT_FOUND",
+            result={
+                "phase": "BLOCKED", "blocked_reason": "path_not_found",
+                "collected_count": 5, "target_count": 10,
+                "remaining_target_count": 5, "restart_supported": False,
+                "vein_locked": False, "decision_required": True,
+            },
+        ))
+        self.assertIsInstance(directive, Blocked)
+        decision = directive.result["decision"]
+        self.assertEqual(5, decision["restart_template"]["target_count"])
+        self.assertFalse(decision["java_restart_supported"])
+        self.assertTrue(decision["conditional_restart_supported"])
+        self.assertTrue(decision["same_selector_progress_credit_applied"])
+        self.assertIn("direction", decision["allowed_overrides"])
+        self.assertIn(
+            "change_at_least_one_allowed_route_override",
+            decision["required_preconditions"],
+        )
+        self.assertEqual(1, decision["minimum_required_override_count"])
+        self.assertTrue(
+            decision["restart_template_must_not_be_submitted_unchanged"]
+        )
+
+    def test_protected_block_never_emits_restart_template(self):
+        definition, run = run_for(execution_mode=None)
+        directive = definition.next_directive(run, terminal(
+            "autonomous_mining", status="FAILED", end_reason="BLOCK_PROTECTED",
+            result={
+                "phase": "BLOCKED", "blocked_reason": "placement_protected",
+                "collected_count": 1, "target_count": 5,
+                "remaining_target_count": 4, "restart_supported": False,
+                "vein_locked": False, "decision_required": True,
+            },
+        ))
+        self.assertIsInstance(directive, Blocked)
+        decision = directive.result["decision"]
+        self.assertFalse(decision["conditional_restart_supported"])
+        self.assertIsNone(decision["restart_template"])
+        self.assertFalse(decision["same_selector_progress_credit_applied"])
+        self.assertEqual([], decision["allowed_overrides"])
+
+    def test_terminal_count_below_checkpoint_disables_restart(self):
+        definition, run = run_for({
+            "selector": {"type": "tag", "id": "minecraft:diamond_ores"},
+            "target_count": 10, "target_metric": "blocks_harvested",
+        }, execution_mode=None)
+        run.collected_count = 5
+        directive = definition.next_directive(run, terminal(
+            "autonomous_mining", status="FAILED", end_reason="SAFETY_PREEMPTED",
+            result={
+                "phase": "BLOCKED", "blocked_reason": "backpack_full",
+                "collected_count": 4, "target_count": 10,
+                "remaining_target_count": 6, "restart_supported": True,
+                "vein_locked": False, "decision_required": True,
+            },
+        ))
+        self.assertEqual("SERVER_RESULT_INCONSISTENT", directive.reason)
+        self.assertIn(
+            "terminal_collected_count_regressed_below_checkpoint",
+            directive.result["fact_errors"],
+        )
+
+    def test_inconsistent_java_remaining_disables_restart(self):
+        definition, run = run_for({
+            "selector": {"type": "tag", "id": "minecraft:diamond_ores"},
+            "target_count": 10, "target_metric": "blocks_harvested",
+        }, execution_mode=None)
+        directive = definition.next_directive(run, terminal(
+            "autonomous_mining", status="FAILED", end_reason="SAFETY_PREEMPTED",
+            result={
+                "phase": "BLOCKED", "blocked_reason": "backpack_full",
+                "collected_count": 5, "target_count": 10,
+                "remaining_target_count": 9, "restart_supported": True,
+                "vein_locked": False, "decision_required": True,
+            },
+        ))
+        self.assertEqual("SERVER_RESULT_INCONSISTENT", directive.reason)
+        self.assertIsNone(directive.result["restart_parameters"])
+
+    def test_goal_reached_with_locked_vein_stays_blocked_without_template(self):
+        definition, run = run_for(execution_mode=None)
+        directive = definition.next_directive(run, terminal(
+            "autonomous_mining", status="FAILED", end_reason="SAFETY_PREEMPTED",
+            result={
+                "phase": "BLOCKED", "blocked_reason": "backpack_full",
+                "collected_count": 5, "target_count": 5,
+                "remaining_target_count": 0, "restart_supported": False,
+                "vein_locked": True, "decision_required": True,
+            },
+        ))
+        self.assertIsInstance(directive, Blocked)
+        decision = directive.result["decision"]
+        self.assertEqual(
+            "committed_vein_requires_recovery_or_explicit_abandon",
+            decision["mode"],
+        )
+        self.assertEqual(0, decision["remaining_target_count"])
+        self.assertIsNone(decision["restart_template"])
+        self.assertTrue(decision["committed_vein_must_not_be_superseded"])
+
+    def test_target_changed_with_locked_vein_has_no_new_skill_template(self):
+        definition, run = run_for(execution_mode=None)
+        directive = definition.next_directive(run, terminal(
+            "autonomous_mining", status="FAILED", end_reason="TARGET_CHANGED",
+            result={
+                "phase": "BLOCKED", "blocked_reason": "target_changed",
+                "collected_count": 1, "target_count": 5,
+                "remaining_target_count": 4, "restart_supported": False,
+                "vein_locked": True, "decision_required": True,
+            },
+        ))
+        self.assertIsInstance(directive, Blocked)
+        decision = directive.result["decision"]
+        self.assertEqual(
+            "committed_vein_requires_recovery_or_explicit_abandon",
+            decision["mode"],
+        )
+        self.assertIsNone(decision["restart_template"])
+        self.assertFalse(decision["conditional_restart_supported"])
+
+    def test_missing_vein_lock_fact_is_inconsistent(self):
+        definition, run = run_for(execution_mode=None)
+        directive = definition.next_directive(run, terminal(
+            "autonomous_mining", status="FAILED", end_reason="PATH_NOT_FOUND",
+            result={
+                "phase": "BLOCKED", "blocked_reason": "path_not_found",
+                "collected_count": 1, "target_count": 5,
+                "remaining_target_count": 4, "restart_supported": False,
+                "decision_required": True,
+            },
+        ))
+        self.assertEqual("SERVER_RESULT_INCONSISTENT", directive.reason)
+        self.assertIn(
+            "terminal_vein_locked_is_missing", directive.result["fact_errors"]
+        )
+
+    def test_danger_committed_internal_and_unloaded_blocks_have_no_template(self):
+        definition, run = run_for(execution_mode=None)
+        for reason in (
+            "lava_hazard", "committed_vein_remaining_unreachable",
+            "internal_error", "entity_unloaded", "hand_conflict",
+            "superseded",
+        ):
+            with self.subTest(reason=reason):
+                run.collected_count = 0
+                directive = definition.next_directive(run, terminal(
+                    "autonomous_mining", status="FAILED", end_reason="BLOCKED",
+                    result={
+                        "phase": "BLOCKED", "blocked_reason": reason,
+                        "collected_count": 0, "target_count": 5,
+                        "remaining_target_count": 5,
+                        "restart_supported": False, "vein_locked": False,
+                        "decision_required": True,
+                    },
+                ))
+                self.assertIsInstance(directive, Blocked)
+                self.assertIsNone(
+                    directive.result["decision"]["restart_template"]
+                )
+
+    def test_invalid_restart_fact_types_and_target_mismatch_fail(self):
+        definition, run = run_for(execution_mode=None)
+        cases = (
+            ({
+                "collected_count": True, "target_count": 5,
+                "remaining_target_count": 5, "restart_supported": True,
+            }, "terminal_collected_count_must_be_a_nonnegative_integer"),
+            ({
+                "collected_count": 0, "target_count": 6,
+                "remaining_target_count": 6, "restart_supported": True,
+            }, "terminal_target_count_does_not_match_skill_args"),
+            ({
+                "collected_count": 0, "target_count": 5,
+                "remaining_target_count": 5, "restart_supported": "true",
+            }, "terminal_restart_supported_must_be_boolean"),
+        )
+        for facts, expected_error in cases:
+            with self.subTest(expected_error=expected_error):
+                result = {
+                    "phase": "BLOCKED", "blocked_reason": "backpack_full",
+                    "vein_locked": False, "decision_required": True,
+                    **facts,
+                }
+                directive = definition.next_directive(run, terminal(
+                    "autonomous_mining", status="FAILED",
+                    end_reason="SAFETY_PREEMPTED", result=result,
+                ))
+                self.assertEqual("SERVER_RESULT_INCONSISTENT", directive.reason)
+                self.assertIn(expected_error, directive.result["fact_errors"])
+
+    def test_missing_required_restart_fact_fails(self):
+        definition, run = run_for(execution_mode=None)
+        directive = definition.next_directive(run, terminal(
+            "autonomous_mining", status="FAILED",
+            end_reason="SAFETY_PREEMPTED", result={
+                "phase": "BLOCKED", "blocked_reason": "backpack_full",
+                "target_count": 5, "collected_count": 0,
+                "restart_supported": True, "vein_locked": False,
+                "decision_required": True,
+            },
+        ))
+        self.assertEqual("SERVER_RESULT_INCONSISTENT", directive.reason)
+        self.assertIn(
+            "terminal_remaining_target_count_is_missing",
+            directive.result["fact_errors"],
+        )
 
 
 if __name__ == "__main__":
