@@ -118,6 +118,28 @@ class MaidTerrainNavigatorTest {
         assertTrue(HarvestBlocksAction.nextUntriedHorizontalDirection(next, tried) == null);
     }
 
+    @Test
+    void onlyConsecutiveClearLevelTraversesMayShareNativeNavigation() {
+        MaidTerrainStep first = step(MaidTerrainStep.Kind.TRAVERSE,
+                new BlockPos(0, 10, 0), new BlockPos(1, 10, 0));
+        MaidTerrainStep second = step(MaidTerrainStep.Kind.TRAVERSE,
+                new BlockPos(1, 10, 0), new BlockPos(2, 10, 0));
+        assertTrue(MaidTerrainNavigator.canChainFlatSteps(first, second));
+
+        assertFalse(MaidTerrainNavigator.canChainFlatSteps(first,
+                step(MaidTerrainStep.Kind.ASCEND,
+                        new BlockPos(1, 10, 0), new BlockPos(2, 11, 0))));
+        assertFalse(MaidTerrainNavigator.canChainFlatSteps(first,
+                step(MaidTerrainStep.Kind.TRAVERSE,
+                        new BlockPos(2, 10, 0), new BlockPos(3, 10, 0))));
+        MaidTerrainStep obstructed = new MaidTerrainStep(
+                MaidTerrainStep.Kind.TRAVERSE,
+                new BlockPos(1, 10, 0), new BlockPos(2, 10, 0),
+                List.of(new BlockPos(2, 10, 0), new BlockPos(2, 11, 0)),
+                List.of(new BlockPos(2, 11, 0)), 2.0D);
+        assertFalse(MaidTerrainNavigator.canChainFlatSteps(first, obstructed));
+    }
+
     private static MaidTerrainStep step(
             MaidTerrainStep.Kind kind, BlockPos from, BlockPos to) {
         return new MaidTerrainStep(kind, from, to,

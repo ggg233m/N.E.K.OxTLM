@@ -61,6 +61,7 @@ public final class MaidTerrainNavigator {
     private final Set<BlockPos> clearedBlocks = new LinkedHashSet<>();
     private final ArrayDeque<ClearedBlock> clearedEvents = new ArrayDeque<>();
     private final ArrayDeque<PlacedBlock> placedEvents = new ArrayDeque<>();
+    private final ArrayDeque<BlockPos> completedStepEvents = new ArrayDeque<>();
 
     private Path debugPath;
     private int stepIndex;
@@ -81,6 +82,9 @@ public final class MaidTerrainNavigator {
     private boolean fallingClearanceObserved;
     private boolean fallingStabilizationRequired;
     private int placementsUsed;
+    private int nativePathStarts;
+    private int hardStops;
+    private int chainedTraverseSteps;
     private String phase = "pending";
     private ActionEndReason lastFailure;
 
@@ -233,6 +237,15 @@ public final class MaidTerrainNavigator {
         return List.copyOf(drained);
     }
 
+    /** Logical terrain cells crossed since the previous action tick. */
+    public List<BlockPos> drainCompletedStepPositions() {
+        List<BlockPos> drained = new ArrayList<>(completedStepEvents.size());
+        while (!completedStepEvents.isEmpty()) {
+            drained.add(completedStepEvents.removeFirst());
+        }
+        return List.copyOf(drained);
+    }
+
     public boolean cleared(BlockPos pos) {
         return clearedBlocks.contains(pos);
     }
@@ -254,6 +267,9 @@ public final class MaidTerrainNavigator {
         detail.addProperty("cleared_blocks", clearedBlocks.size());
         detail.addProperty("falling_blocks_cleared", fallingBlocksCleared);
         detail.addProperty("placements_used", placementsUsed);
+        detail.addProperty("native_path_starts", nativePathStarts);
+        detail.addProperty("hard_stops", hardStops);
+        detail.addProperty("chained_traverse_steps", chainedTraverseSteps);
         detail.addProperty("path_cost", terrainPath.totalCost());
         detail.addProperty("expanded_nodes", terrainPath.expandedNodes());
         detail.addProperty("target_x", terrainPath.target().getX());
@@ -667,11 +683,14 @@ public final class MaidTerrainNavigator {
                 && (step.kind() != MaidTerrainStep.Kind.DESCEND
                 || horizontalDistance(context.maid(), step.to())
                 <= DESCEND_CENTER_TOLERANCE)) {
-            TickResult settling = settleAtDestination(context, step);
-            if (settling != null) {
-                return settling;
+            boolean continueFlatNavigation = canContinueFlatNavigation(context);
+            if (!continueFlatNavigation) {
+                TickResult settling = settleAtDestination(context, step);
+                if (settling != null) {
+                    return settling;
+                }
             }
-            completeStep(context);
+            completeStep(context, continueFlatNavigation);
             if (stepIndex >= terrainPath.steps().size()) {
                 return arrive(context);
             }
@@ -690,7 +709,8 @@ public final class MaidTerrainNavigator {
 
         if (!movementStarted) {
             phase = "moving";
-            Path nativePath = context.maid().getNavigation().createPath(step.to(), 0);
+            BlockPos nativeTarget = continuousFlatTarget(context, stepIndex);
+            Path nativePath = context.maid().getNavigation().createPath(nativeTarget, 0);
             if (nativePath == null || nativePath.getNodeCount() == 0 || !nativePath.canReach()) {
                 return fail(context, ActionEndReason.PATH_NOT_FOUND,
                         "native_navigation_cannot_reach_terrain_step", true);
@@ -701,6 +721,7 @@ public final class MaidTerrainNavigator {
                 return fail(context, ActionEndReason.PATH_NOT_FOUND,
                         "native_navigation_rejected_terrain_step", true);
             }
+            nativePathStarts++;
             movementStarted = true;
             movementStartDistance = distance;
             windowStartDistance = distance;
@@ -943,18 +964,33 @@ public final class MaidTerrainNavigator {
         return first.getX() == second.getX() && first.getZ() == second.getZ();
     }
 
-    private void completeStep(MaidActionContext context) {
-        context.maid().getNavigation().stop();
-        context.maid().setDeltaMovement(Vec3.ZERO);
+    private void completeStep(MaidActionContext context,
+                              boolean continueFlatNavigation) {
+        MaidTerrainStep completed = terrainPath.steps().get(stepIndex);
+        if (!continueFlatNavigation) {
+            context.maid().getNavigation().stop();
+            context.maid().setDeltaMovement(Vec3.ZERO);
+            hardStops++;
+        } else {
+            chainedTraverseSteps++;
+        }
         if (debugPath != null && !debugPath.isDone()) {
             debugPath.advance();
         }
+        completedStepEvents.addLast(completed.to().immutable());
         stepIndex++;
         pendingBreaks = List.of();
         breakIndex = 0;
         breaker = null;
-        movementStarted = false;
+        movementStarted = continueFlatNavigation;
         movementStartDistance = 0.0D;
+        if (continueFlatNavigation && stepIndex < terrainPath.steps().size()) {
+            double nextDistance = distance(
+                    context.maid(), terrainPath.steps().get(stepIndex).to());
+            movementStartDistance = nextDistance;
+            windowStartDistance = nextDistance;
+            windowStartedAt = context.gameTime();
+        }
         arrivalSettleStartedAt = Long.MIN_VALUE;
         controlledDescendRecoveryStartedAt = Long.MIN_VALUE;
         fallingClearanceWaitStartedAt = Long.MIN_VALUE;
@@ -962,6 +998,62 @@ public final class MaidTerrainNavigator {
         fallingClearanceObserved = false;
         fallingStabilizationRequired = false;
         phase = "step_complete";
+    }
+
+    /**
+     * Extends one native path across consecutive clear, supported level cells.
+     * Terrain semantics still advance one logical edge at a time; only the
+     * stop/zero/restart cycle is removed.
+     */
+    private BlockPos continuousFlatTarget(MaidActionContext context, int fromIndex) {
+        MaidTerrainStep first = terrainPath.steps().get(fromIndex);
+        if (!isContinuousFlatStep(context, first)) {
+            return first.to();
+        }
+        BlockPos target = first.to();
+        MaidTerrainStep previous = first;
+        for (int index = fromIndex + 1; index < terrainPath.steps().size(); index++) {
+            MaidTerrainStep next = terrainPath.steps().get(index);
+            if (!canChainFlatSteps(previous, next)
+                    || !isContinuousFlatStep(context, next)) {
+                break;
+            }
+            target = next.to();
+            previous = next;
+        }
+        return target;
+    }
+
+    private boolean canContinueFlatNavigation(MaidActionContext context) {
+        if (stepIndex + 1 >= terrainPath.steps().size()
+                || context.maid().getNavigation().isDone()) {
+            return false;
+        }
+        MaidTerrainStep current = terrainPath.steps().get(stepIndex);
+        MaidTerrainStep next = terrainPath.steps().get(stepIndex + 1);
+        return current.kind() == MaidTerrainStep.Kind.TRAVERSE
+                && canChainFlatSteps(current, next)
+                && isContinuousFlatStep(context, next);
+    }
+
+    static boolean canChainFlatSteps(
+            MaidTerrainStep current, MaidTerrainStep next) {
+        return current.kind() == MaidTerrainStep.Kind.TRAVERSE
+                && next.kind() == MaidTerrainStep.Kind.TRAVERSE
+                && current.to().equals(next.from())
+                && current.from().getY() == current.to().getY()
+                && next.from().getY() == next.to().getY()
+                && current.toBreak().isEmpty()
+                && next.toBreak().isEmpty();
+    }
+
+    private boolean isContinuousFlatStep(
+            MaidActionContext context, MaidTerrainStep step) {
+        return step.kind() == MaidTerrainStep.Kind.TRAVERSE
+                && step.from().getY() == step.to().getY()
+                && step.toBreak().isEmpty()
+                && isStepClearanceOpen(context, step)
+                && isDestinationStillUsable(context, step.to());
     }
 
     private TickResult arrive(MaidActionContext context) {

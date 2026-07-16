@@ -70,6 +70,7 @@ public final class AutonomousMiningAction implements MaidAction {
     private static final int MAX_DEFERRED_ORE_TARGETS = 256;
     private static final int RECENT_PASSAGE_MEMORY = 48;
     private static final int MAX_CONSECUTIVE_PASSAGE_STEPS = 24;
+    private static final int NATURAL_PASSAGE_LOOKAHEAD = 6;
     private static final Set<String> ALLOWED_ARGS = Set.of(
             "selector", "target_count", "direction", "shape",
             "segment_length", "speed", "discovery_mode",
@@ -516,6 +517,20 @@ public final class AutonomousMiningAction implements MaidAction {
             }
         }
 
+        MaidTerrainPath naturalRun = buildNaturalPassageRun(context, planned);
+        if (naturalRun.steps().size() > 1) {
+            stepTo = naturalRun.target();
+            terrainSearch = null;
+            planningPurpose = PlanningPurpose.EXCAVATION;
+            navigator = new MaidTerrainNavigator(
+                    naturalRun, handLease, speed, true, constructionEnabled(),
+                    remainingPlacementBudget());
+            navigator.start(context);
+            transition(context, AutonomousMiningState.Phase.EXCAVATING,
+                    stepDetail("moving_natural_passage"));
+            return MaidActionTickResult.running();
+        }
+
         terrainSearch = new MaidTerrainSearch(stepFrom, Set.of(stepTo), evaluator,
                 MAX_EXCAVATION_EXPANSIONS, EnumSet.of(stepKind));
         terrainGoalTargets = Map.of();
@@ -681,6 +696,15 @@ public final class AutonomousMiningAction implements MaidAction {
             recordRouteClearedBlock(event.pos(), event.state());
             state.recordRouteClearance(1);
         }
+        for (BlockPos crossed : navigator.drainCompletedStepPositions()) {
+            state.recordExcavationStep(0);
+            rememberPassagePosition(crossed);
+            stepsInCurrentSegment++;
+            if (followingNaturalPassage) {
+                naturalPassageSteps++;
+                consecutiveNaturalPassageSteps++;
+            }
+        }
         if (tick.outcome() == MaidTerrainNavigator.Outcome.FAILED) {
             lastNavigatorFailure = tick.detail().deepCopy();
             navigator = null;
@@ -691,17 +715,10 @@ public final class AutonomousMiningAction implements MaidAction {
             navigator = null;
             planningPurpose = null;
             realEnd = context.maid().blockPosition().immutable();
-            state.recordExcavationStep(0);
-            rememberPassagePosition(realEnd);
             failedPlannerOrigin = realEnd;
             failedPlannerCandidates.clear();
             selectedPlannerCandidateId = "";
             lastPlannerFailure = "none";
-            if (followingNaturalPassage) {
-                naturalPassageSteps++;
-                consecutiveNaturalPassageSteps++;
-            }
-            stepsInCurrentSegment++;
             transition(context, AutonomousMiningState.Phase.SCANNING,
                     stepDetail("step_complete"));
             return MaidActionTickResult.running();
@@ -1083,6 +1100,35 @@ public final class AutonomousMiningAction implements MaidAction {
         return constructionEnabled()
                 && remainingPlacementBudget() > 0
                 && MaidTerrainBuilder.chooseMaterial(context.maid()).isPresent();
+    }
+
+    /** Builds one continuous native route through an already-open level corridor. */
+    private MaidTerrainPath buildNaturalPassageRun(
+            MaidActionContext context, PlannedStep first) {
+        if (!first.candidate().naturalPassage()
+                || first.shape() != ExcavateSegmentAction.Shape.LEVEL
+                || first.kind() != MaidTerrainStep.Kind.TRAVERSE) {
+            return new MaidTerrainPath(List.of(), first.destination(), 0.0D, 0);
+        }
+        int remainingInSegment = Math.max(1, segmentLength - stepsInCurrentSegment);
+        int limit = Math.min(NATURAL_PASSAGE_LOOKAHEAD, remainingInSegment);
+        List<MaidTerrainStep> steps = new ArrayList<>(limit);
+        BlockPos from = context.maid().blockPosition().immutable();
+        for (int index = 0; index < limit; index++) {
+            BlockPos to = from.relative(first.direction()).immutable();
+            if (!isDrySafeStance(context, to)
+                    || recentPassagePositions.contains(to)) {
+                break;
+            }
+            List<BlockPos> clearance = List.of(to, to.above());
+            steps.add(new MaidTerrainStep(MaidTerrainStep.Kind.TRAVERSE,
+                    from, to, clearance, List.of(), 1.0D));
+            from = to;
+        }
+        if (steps.isEmpty()) {
+            return new MaidTerrainPath(List.of(), first.destination(), 0.0D, 0);
+        }
+        return new MaidTerrainPath(steps, from, steps.size(), 0);
     }
 
     private PlannedStep choosePlannedStep(
