@@ -5,6 +5,8 @@ import com.neko_tlm_bridge.tlm.agent.path.MaidTerrainWorldEvaluator;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.pathfinder.Node;
+import net.minecraft.world.level.pathfinder.Path;
 import org.junit.jupiter.api.Test;
 
 import java.util.EnumSet;
@@ -132,12 +134,41 @@ class MaidTerrainNavigatorTest {
         assertFalse(MaidTerrainNavigator.canChainFlatSteps(first,
                 step(MaidTerrainStep.Kind.TRAVERSE,
                         new BlockPos(2, 10, 0), new BlockPos(3, 10, 0))));
+        assertFalse(MaidTerrainNavigator.canChainFlatSteps(first,
+                step(MaidTerrainStep.Kind.TRAVERSE,
+                        new BlockPos(1, 10, 0), new BlockPos(1, 10, 1))));
+        assertFalse(MaidTerrainNavigator.canChainFlatSteps(first,
+                step(MaidTerrainStep.Kind.TRAVERSE,
+                        new BlockPos(1, 10, 0), new BlockPos(3, 10, 0))));
         MaidTerrainStep obstructed = new MaidTerrainStep(
                 MaidTerrainStep.Kind.TRAVERSE,
                 new BlockPos(1, 10, 0), new BlockPos(2, 10, 0),
                 List.of(new BlockPos(2, 10, 0), new BlockPos(2, 11, 0)),
                 List.of(new BlockPos(2, 11, 0)), 2.0D);
         assertFalse(MaidTerrainNavigator.canChainFlatSteps(first, obstructed));
+    }
+
+    @Test
+    void chainedNativePathMustStayInsideStraightMonotonicCorridor() {
+        BlockPos from = new BlockPos(0, 10, 0);
+        BlockPos target = new BlockPos(3, 10, 0);
+        Path straight = new Path(List.of(
+                new Node(0, 10, 0), new Node(1, 10, 0),
+                new Node(2, 10, 0), new Node(3, 10, 0)), target, true);
+        assertTrue(MaidTerrainNavigator.isStraightCorridorPath(
+                straight, from, target));
+
+        Path detour = new Path(List.of(
+                new Node(0, 10, 0), new Node(1, 10, 1),
+                new Node(3, 10, 0)), target, true);
+        assertFalse(MaidTerrainNavigator.isStraightCorridorPath(
+                detour, from, target));
+
+        Path reversed = new Path(List.of(
+                new Node(0, 10, 0), new Node(2, 10, 0),
+                new Node(1, 10, 0), new Node(3, 10, 0)), target, true);
+        assertFalse(MaidTerrainNavigator.isStraightCorridorPath(
+                reversed, from, target));
     }
 
     private static MaidTerrainStep step(

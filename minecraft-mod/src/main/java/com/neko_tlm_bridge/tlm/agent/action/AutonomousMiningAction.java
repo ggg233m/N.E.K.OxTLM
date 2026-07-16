@@ -71,6 +71,7 @@ public final class AutonomousMiningAction implements MaidAction {
     private static final int RECENT_PASSAGE_MEMORY = 48;
     private static final int MAX_CONSECUTIVE_PASSAGE_STEPS = 24;
     private static final int NATURAL_PASSAGE_LOOKAHEAD = 6;
+    private static final int MAX_HARVEST_NAVIGATION_REPLANS = 3;
     private static final Set<String> ALLOWED_ARGS = Set.of(
             "selector", "target_count", "direction", "shape",
             "segment_length", "speed", "discovery_mode",
@@ -123,6 +124,7 @@ public final class AutonomousMiningAction implements MaidAction {
     private double dryRelocationWindowDistance;
     private long dryRelocationWindowStartedAt = Long.MIN_VALUE;
     private JsonObject lastNavigatorFailure;
+    private int harvestNavigationReplans;
     private final Map<BlockPos, Long> deferredOreTargets = new LinkedHashMap<>();
     private final ArrayDeque<BlockPos> recentPassagePositions = new ArrayDeque<>();
     private boolean followingNaturalPassage;
@@ -909,6 +911,24 @@ public final class AutonomousMiningAction implements MaidAction {
             state.recordRouteClearance(cleared);
             if (tick.outcome() == MaidTerrainNavigator.Outcome.FAILED) {
                 lastNavigatorFailure = tick.detail().deepCopy();
+                if (tick.replanRecommended()
+                        && harvestNavigationReplans
+                        < MAX_HARVEST_NAVIGATION_REPLANS
+                        && currentTarget != null
+                        && eligibleTarget(currentTarget,
+                        context.level().getBlockState(currentTarget))) {
+                    harvestNavigationReplans++;
+                    navigator = null;
+                    planningPurpose = null;
+                    currentTarget = null;
+                    expectedTargetState = null;
+                    JsonObject detail = detail("ore_approach_replan");
+                    detail.addProperty("replan_attempt", harvestNavigationReplans);
+                    detail.addProperty("replan_limit",
+                            MAX_HARVEST_NAVIGATION_REPLANS);
+                    transition(context, AutonomousMiningState.Phase.SCANNING, detail);
+                    return MaidActionTickResult.running();
+                }
                 return blocked(context, defaultReason(tick.reason()),
                         tickMessage(tick, "ore_approach_failed"));
             }
@@ -955,6 +975,7 @@ public final class AutonomousMiningAction implements MaidAction {
             harvestedPositions.add(currentTarget.immutable());
             veinTracker.rememberHarvested(currentTarget);
             state.recordHarvest();
+            harvestNavigationReplans = 0;
             realEnd = context.maid().blockPosition().immutable();
             currentTarget = null;
             expectedTargetState = null;
@@ -1394,6 +1415,7 @@ public final class AutonomousMiningAction implements MaidAction {
                 ? "natural_passage" : "excavation");
         report.addProperty("natural_passage_steps", naturalPassageSteps);
         report.addProperty("planner_decisions", plannerDecisionCount);
+        report.addProperty("harvest_navigation_replans", harvestNavigationReplans);
         if (lastPlannerDecision != null) {
             report.add("planner_decision", lastPlannerDecision.deepCopy());
         }
@@ -1556,6 +1578,7 @@ public final class AutonomousMiningAction implements MaidAction {
         result.addProperty("deferred_ore_targets", deferredOreTargets.size());
         result.addProperty("natural_passage_steps", naturalPassageSteps);
         result.addProperty("planner_decisions", plannerDecisionCount);
+        result.addProperty("harvest_navigation_replans", harvestNavigationReplans);
         if (lastPlannerDecision != null) {
             result.add("last_planner_decision",
                     lastPlannerDecision.deepCopy());

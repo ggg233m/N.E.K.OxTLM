@@ -50,6 +50,7 @@ public final class MaidTerrainNavigator {
     private static final int FALLING_CLEARANCE_STABLE_TICKS = 3;
     private static final long FALLING_CLEARANCE_SETTLE_TIMEOUT_TICKS = 80L;
     private static final int FALLING_ENTITY_SCAN_HEIGHT = 16;
+    private static final int MAX_CONTINUOUS_FLAT_STEPS = 6;
 
     private final MaidTerrainPath terrainPath;
     private final HandLease handLease;
@@ -85,6 +86,7 @@ public final class MaidTerrainNavigator {
     private int nativePathStarts;
     private int hardStops;
     private int chainedTraverseSteps;
+    private int activeFlatRunEndExclusive = -1;
     private String phase = "pending";
     private ActionEndReason lastFailure;
 
@@ -151,10 +153,25 @@ public final class MaidTerrainNavigator {
         if (stepIndex >= terrainPath.steps().size()) {
             return arrive(context);
         }
+        // Native navigation can cross multiple cells between server ticks.
+        // Synchronize the logical cursor before applying support, clearance or
+        // construction effects to what may already be a cell behind the maid.
+        synchronizeReachedFlatSteps(context);
+        if (stepIndex >= terrainPath.steps().size()) {
+            return arrive(context);
+        }
+        if (movementStarted && activeFlatRunEndExclusive > stepIndex + 1
+                && !activeFlatRunStillValid(context)) {
+            stopLocomotion(context);
+            movementStarted = false;
+            activeFlatRunEndExclusive = -1;
+            phase = "flat_run_invalidated";
+        }
 
         MaidTerrainStep step = terrainPath.steps().get(stepIndex);
         if (!movementStarted && breaker == null && breakIndex == 0
-                && !context.maid().blockPosition().equals(step.from())) {
+                && !context.maid().blockPosition().equals(step.from())
+                && !context.maid().blockPosition().equals(step.to())) {
             return fail(context, ActionEndReason.TARGET_CHANGED,
                     "maid_is_no_longer_at_terrain_step_origin", true);
         }
@@ -711,6 +728,12 @@ public final class MaidTerrainNavigator {
             phase = "moving";
             BlockPos nativeTarget = continuousFlatTarget(context, stepIndex);
             Path nativePath = context.maid().getNavigation().createPath(nativeTarget, 0);
+            if (!nativeTarget.equals(step.to())
+                    && !isStraightCorridorPath(nativePath, step.from(), nativeTarget)) {
+                activeFlatRunEndExclusive = stepIndex + 1;
+                nativeTarget = step.to();
+                nativePath = context.maid().getNavigation().createPath(nativeTarget, 0);
+            }
             if (nativePath == null || nativePath.getNodeCount() == 0 || !nativePath.canReach()) {
                 return fail(context, ActionEndReason.PATH_NOT_FOUND,
                         "native_navigation_cannot_reach_terrain_step", true);
@@ -971,6 +994,7 @@ public final class MaidTerrainNavigator {
             context.maid().getNavigation().stop();
             context.maid().setDeltaMovement(Vec3.ZERO);
             hardStops++;
+            activeFlatRunEndExclusive = -1;
         } else {
             chainedTraverseSteps++;
         }
@@ -1007,12 +1031,15 @@ public final class MaidTerrainNavigator {
      */
     private BlockPos continuousFlatTarget(MaidActionContext context, int fromIndex) {
         MaidTerrainStep first = terrainPath.steps().get(fromIndex);
+        activeFlatRunEndExclusive = fromIndex + 1;
         if (!isContinuousFlatStep(context, first)) {
             return first.to();
         }
         BlockPos target = first.to();
         MaidTerrainStep previous = first;
-        for (int index = fromIndex + 1; index < terrainPath.steps().size(); index++) {
+        int limit = Math.min(terrainPath.steps().size(),
+                fromIndex + MAX_CONTINUOUS_FLAT_STEPS);
+        for (int index = fromIndex + 1; index < limit; index++) {
             MaidTerrainStep next = terrainPath.steps().get(index);
             if (!canChainFlatSteps(previous, next)
                     || !isContinuousFlatStep(context, next)) {
@@ -1020,12 +1047,14 @@ public final class MaidTerrainNavigator {
             }
             target = next.to();
             previous = next;
+            activeFlatRunEndExclusive = index + 1;
         }
         return target;
     }
 
     private boolean canContinueFlatNavigation(MaidActionContext context) {
         if (stepIndex + 1 >= terrainPath.steps().size()
+                || stepIndex + 1 >= activeFlatRunEndExclusive
                 || context.maid().getNavigation().isDone()) {
             return false;
         }
@@ -1041,10 +1070,56 @@ public final class MaidTerrainNavigator {
         return current.kind() == MaidTerrainStep.Kind.TRAVERSE
                 && next.kind() == MaidTerrainStep.Kind.TRAVERSE
                 && current.to().equals(next.from())
+                && sameHorizontalDirection(current, next)
                 && current.from().getY() == current.to().getY()
                 && next.from().getY() == next.to().getY()
                 && current.toBreak().isEmpty()
                 && next.toBreak().isEmpty();
+    }
+
+    private static boolean sameHorizontalDirection(
+            MaidTerrainStep first, MaidTerrainStep second) {
+        int firstX = first.to().getX() - first.from().getX();
+        int firstZ = first.to().getZ() - first.from().getZ();
+        int secondX = second.to().getX() - second.from().getX();
+        int secondZ = second.to().getZ() - second.from().getZ();
+        return Math.abs(firstX) + Math.abs(firstZ) == 1
+                && Math.abs(secondX) + Math.abs(secondZ) == 1
+                && firstX == secondX && firstZ == secondZ;
+    }
+
+    private int synchronizeReachedFlatSteps(MaidActionContext context) {
+        if (!movementStarted || stepIndex >= terrainPath.steps().size()) {
+            return 0;
+        }
+        BlockPos live = context.maid().blockPosition();
+        int reachedIndex = -1;
+        MaidTerrainStep previous = terrainPath.steps().get(stepIndex);
+        int runEnd = Math.min(terrainPath.steps().size(),
+                activeFlatRunEndExclusive < 0
+                        ? stepIndex + 1 : activeFlatRunEndExclusive);
+        for (int index = stepIndex; index < runEnd; index++) {
+            MaidTerrainStep candidate = terrainPath.steps().get(index);
+            if (index > stepIndex && !canChainFlatSteps(previous, candidate)) {
+                break;
+            }
+            if (!isContinuousFlatStep(context, candidate)) {
+                break;
+            }
+            if (index > stepIndex && candidate.to().equals(live)) {
+                reachedIndex = index;
+            }
+            previous = candidate;
+        }
+        int completed = 0;
+        // Catch up only the cells strictly before the one currently occupied.
+        // The occupied cell still goes through the normal arrival/grounded
+        // checks below, especially at a run end or before a turn.
+        while (stepIndex < reachedIndex) {
+            completeStep(context, true);
+            completed++;
+        }
+        return completed;
     }
 
     private boolean isContinuousFlatStep(
@@ -1054,6 +1129,48 @@ public final class MaidTerrainNavigator {
                 && step.toBreak().isEmpty()
                 && isStepClearanceOpen(context, step)
                 && isDestinationStillUsable(context, step.to());
+    }
+
+    private boolean activeFlatRunStillValid(MaidActionContext context) {
+        int runEnd = Math.min(terrainPath.steps().size(), activeFlatRunEndExclusive);
+        for (int index = stepIndex; index < runEnd; index++) {
+            if (!isContinuousFlatStep(context, terrainPath.steps().get(index))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    static boolean isStraightCorridorPath(Path path, BlockPos from, BlockPos target) {
+        if (path == null || path.getNodeCount() == 0
+                || from.getY() != target.getY()) {
+            return false;
+        }
+        int dx = Integer.compare(target.getX(), from.getX());
+        int dz = Integer.compare(target.getZ(), from.getZ());
+        if ((dx == 0) == (dz == 0)) {
+            return false;
+        }
+        int previous = dx != 0 ? from.getX() : from.getZ();
+        for (int index = 0; index < path.getNodeCount(); index++) {
+            Node node = path.getNode(index);
+            if (node.y != from.getY()
+                    || (dx != 0 && node.z != from.getZ())
+                    || (dz != 0 && node.x != from.getX())) {
+                return false;
+            }
+            int coordinate = dx != 0 ? node.x : node.z;
+            int direction = dx != 0 ? dx : dz;
+            if ((coordinate - previous) * direction < 0
+                    || (coordinate - (dx != 0 ? target.getX() : target.getZ()))
+                    * direction > 0) {
+                return false;
+            }
+            previous = coordinate;
+        }
+        Node end = path.getNode(path.getNodeCount() - 1);
+        return end.x == target.getX() && end.y == target.getY()
+                && end.z == target.getZ();
     }
 
     private TickResult arrive(MaidActionContext context) {
