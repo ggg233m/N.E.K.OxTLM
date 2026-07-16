@@ -8,6 +8,7 @@ import com.github.tartaricacid.touhoulittlemaid.entity.passive.EntityMaid;
 import com.github.tartaricacid.touhoulittlemaid.entity.task.TaskManager;
 import com.neko_tlm_bridge.network.debug.MaidAgentNetwork;
 import com.neko_tlm_bridge.network.debug.MaidPathDebugService;
+import com.neko_tlm_bridge.network.hud.MiningHudSyncService;
 import com.neko_tlm_bridge.tlm.NekoWebSocketServerHolder;
 import com.neko_tlm_bridge.tlm.agent.MaidActionKind;
 import com.neko_tlm_bridge.tlm.agent.action.AutonomousMiningAction;
@@ -137,6 +138,7 @@ public class NekoTlmBridge {
     private static void onServerStopping(ServerStoppingEvent event) {
         MaidActionStore.getInstance().shutdown();
         MaidPathDebugService.reset();
+        MiningHudSyncService.reset();
         if (webSocketServer != null) {
             try {
                 GameEventHandler.flushPendingBehaviorEvents();
@@ -161,6 +163,7 @@ public class NekoTlmBridge {
             webSocketServer.tickPendingCommands();
         }
         MaidActionStore.getInstance().tick(event.getServer());
+        MiningHudSyncService.onServerTick(event);
         GameEventHandler.onServerTick(event);
     }
 

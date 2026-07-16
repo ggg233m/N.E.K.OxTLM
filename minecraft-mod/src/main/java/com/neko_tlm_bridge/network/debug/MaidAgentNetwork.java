@@ -1,6 +1,7 @@
 package com.neko_tlm_bridge.network.debug;
 
 import com.neko_tlm_bridge.network.agent.EmergencyStopMaidActionsPayload;
+import com.neko_tlm_bridge.network.hud.MiningHudSnapshotPayload;
 import net.neoforged.neoforge.network.event.RegisterPayloadHandlersEvent;
 import net.neoforged.neoforge.network.registration.PayloadRegistrar;
 
@@ -24,5 +25,9 @@ public final class MaidAgentNetwork {
                 MaidPathNodesPayload.TYPE,
                 MaidPathNodesPayload.STREAM_CODEC,
                 MaidPathNodesPayload::handle);
+        registrar.playToClient(
+                MiningHudSnapshotPayload.TYPE,
+                MiningHudSnapshotPayload.STREAM_CODEC,
+                MiningHudSnapshotPayload::handle);
     }
 }

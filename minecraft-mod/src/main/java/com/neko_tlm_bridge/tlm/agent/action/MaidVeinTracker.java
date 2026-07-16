@@ -80,27 +80,29 @@ public final class MaidVeinTracker {
         }
 
         Set<BlockPos> available = new HashSet<>(ordered);
+        Set<BlockPos> connectivityGraph = new HashSet<>(members);
+        connectivityGraph.addAll(harvestedMembers);
+        connectivityGraph.addAll(available);
         ArrayDeque<BlockPos> open = new ArrayDeque<>();
         Set<BlockPos> reached = new HashSet<>();
-        List<BlockPos> expansionOrder = new ArrayList<>();
         if (harvestedMembers.isEmpty()) {
             return List.of();
         }
-        for (BlockPos pos : ordered) {
-            if (harvestedMembers.contains(pos) || touchesHarvestedMember(pos)) {
+        for (BlockPos pos : harvestedMembers) {
+            if (connectivityGraph.contains(pos)) {
                 open.add(pos);
             }
         }
 
         while (!open.isEmpty()) {
             BlockPos current = open.removeFirst();
-            if (!available.contains(current) || !reached.add(current)) {
+            if (!connectivityGraph.contains(current) || !reached.add(current)) {
                 continue;
             }
-            expansionOrder.add(current);
             for (int[] offset : NEIGHBOUR_OFFSETS) {
                 BlockPos neighbour = current.offset(offset[0], offset[1], offset[2]);
-                if (available.contains(neighbour) && !reached.contains(neighbour)) {
+                if (connectivityGraph.contains(neighbour)
+                        && !reached.contains(neighbour)) {
                     open.addLast(neighbour);
                 }
             }
@@ -112,7 +114,10 @@ public final class MaidVeinTracker {
         members.removeIf(pos -> !harvestedMembers.contains(pos)
                 && available.contains(pos) && !reached.contains(pos));
 
-        for (BlockPos pos : expansionOrder) {
+        for (BlockPos pos : ordered) {
+            if (!reached.contains(pos)) {
+                continue;
+            }
             if (members.contains(pos)) {
                 continue;
             }
@@ -185,15 +190,6 @@ public final class MaidVeinTracker {
 
     public int limit() {
         return limit;
-    }
-
-    private boolean touchesHarvestedMember(BlockPos pos) {
-        for (int[] offset : NEIGHBOUR_OFFSETS) {
-            if (harvestedMembers.contains(pos.offset(offset[0], offset[1], offset[2]))) {
-                return true;
-            }
-        }
-        return false;
     }
 
     private static int[][] createNeighbourOffsets() {

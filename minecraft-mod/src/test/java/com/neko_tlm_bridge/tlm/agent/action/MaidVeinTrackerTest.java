@@ -83,6 +83,26 @@ class MaidVeinTrackerTest {
     }
 
     @Test
+    void disconnectedMultiBlockTailCannotAnchorItself() {
+        MaidVeinTracker tracker = new MaidVeinTracker();
+        BlockPos seed = new BlockPos(0, 10, 0);
+        BlockPos bridge = new BlockPos(1, 10, 0);
+        BlockPos tailStart = new BlockPos(2, 10, 0);
+        BlockPos tailEnd = new BlockPos(3, 10, 0);
+
+        tracker.rememberHarvested(seed);
+        assertEquals(List.of(bridge, tailStart, tailEnd),
+                tracker.retainConnected(
+                        List.of(bridge, tailStart, tailEnd), ORDER));
+
+        tracker.pruneUnharvested(pos -> !pos.equals(bridge));
+        assertEquals(List.of(), tracker.retainConnected(
+                List.of(tailStart, tailEnd), ORDER));
+        assertFalse(tracker.contains(tailStart));
+        assertFalse(tracker.contains(tailEnd));
+    }
+
+    @Test
     void unboundedTrackerDoesNotAbandonVeinsPastLegacyLimit() {
         MaidVeinTracker tracker = MaidVeinTracker.unbounded();
         BlockPos seed = new BlockPos(0, 10, 0);

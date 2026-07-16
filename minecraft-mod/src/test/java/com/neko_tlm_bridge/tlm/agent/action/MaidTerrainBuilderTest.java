@@ -39,6 +39,10 @@ class MaidTerrainBuilderTest {
                 Blocks.ICE,
                 Blocks.COAL_ORE,
                 Blocks.IRON_BLOCK,
+                Blocks.COPPER_BLOCK,
+                Blocks.BONE_BLOCK,
+                Blocks.DRIED_KELP_BLOCK,
+                Blocks.HAY_BLOCK,
                 Blocks.OAK_SLAB
         ).forEach(block -> assertFalse(
                 MaidTerrainBuilder.isSafeStructuralBlock(block.defaultBlockState()),
@@ -82,5 +86,19 @@ class MaidTerrainBuilderTest {
         inventory.setStackInSlot(0, ItemStack.EMPTY);
         inventory.setStackInSlot(2, new ItemStack(Blocks.TNT, 3));
         assertTrue(MaidTerrainBuilder.chooseMaterial(inventory).isEmpty());
+    }
+
+    @Test
+    void selectionRecognizesCobbledDeepslateWithoutLoadedCommonTags() {
+        ItemStackHandler inventory = new ItemStackHandler(2);
+        inventory.setStackInSlot(0, new ItemStack(Blocks.STONE, 64));
+        inventory.setStackInSlot(1, new ItemStack(Blocks.COBBLED_DEEPSLATE, 1));
+
+        MaidTerrainBuilder.MaterialChoice choice =
+                MaidTerrainBuilder.chooseMaterial(inventory).orElseThrow();
+
+        assertEquals(1, choice.slot());
+        assertEquals(BuiltInRegistries.BLOCK.getKey(Blocks.COBBLED_DEEPSLATE),
+                choice.blockId());
     }
 }

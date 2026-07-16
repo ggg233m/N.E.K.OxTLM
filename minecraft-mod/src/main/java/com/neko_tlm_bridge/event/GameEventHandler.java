@@ -150,6 +150,10 @@ public class GameEventHandler {
         monitoredMaidId = maidId != null ? maidId : "";
     }
 
+    public static String getMonitoredMaidId() {
+        return monitoredMaidId;
+    }
+
     public static void setWebSocketServer(NekoWebSocketServer server) {
         webSocketServer = server;
     }
@@ -161,6 +165,7 @@ public class GameEventHandler {
     /** 清理所有静态状态，避免存档切换/服务端重启时残留状态导致误报或内存泄漏 */
     public static void resetState() {
         openInventorySnapshots.clear();
+        monitoredMaidId = "";
         blockActivityAggregates.clear();
         hurtAggregate.reset();
         killAggregate.reset();

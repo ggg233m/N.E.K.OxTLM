@@ -109,7 +109,9 @@ public final class MaidTerrainBuilder {
                 || state.getBlock() instanceof BaseFireBlock
                 || !state.getFluidState().isEmpty()
                 || state.is(Tags.Blocks.ORES)
+                || isOreBlockByIdentity(state)
                 || state.is(Tags.Blocks.STORAGE_BLOCKS)
+                || isStorageBlockByIdentity(state)
                 || state.is(BlockTags.ICE)
                 || state.is(BlockTags.CAMPFIRES)
                 || state.is(BlockTags.FIRE)
@@ -126,6 +128,50 @@ public final class MaidTerrainBuilder {
         return state.canOcclude()
                 && state.isCollisionShapeFullBlock(
                 EmptyBlockGetter.INSTANCE, BlockPos.ZERO);
+    }
+
+    /** Fallback for when NeoForge Tags.Blocks.ORES is not loaded (unitTest). */
+    private static boolean isOreBlockByIdentity(BlockState state) {
+        Block block = state.getBlock();
+        return block == Blocks.COAL_ORE
+                || block == Blocks.DEEPSLATE_COAL_ORE
+                || block == Blocks.IRON_ORE
+                || block == Blocks.DEEPSLATE_IRON_ORE
+                || block == Blocks.COPPER_ORE
+                || block == Blocks.DEEPSLATE_COPPER_ORE
+                || block == Blocks.GOLD_ORE
+                || block == Blocks.DEEPSLATE_GOLD_ORE
+                || block == Blocks.REDSTONE_ORE
+                || block == Blocks.DEEPSLATE_REDSTONE_ORE
+                || block == Blocks.EMERALD_ORE
+                || block == Blocks.DEEPSLATE_EMERALD_ORE
+                || block == Blocks.LAPIS_ORE
+                || block == Blocks.DEEPSLATE_LAPIS_ORE
+                || block == Blocks.DIAMOND_ORE
+                || block == Blocks.DEEPSLATE_DIAMOND_ORE
+                || block == Blocks.NETHER_GOLD_ORE
+                || block == Blocks.NETHER_QUARTZ_ORE
+                || block == Blocks.ANCIENT_DEBRIS;
+    }
+
+    /** Fallback for when NeoForge Tags.Blocks.STORAGE_BLOCKS is not loaded (unitTest). */
+    private static boolean isStorageBlockByIdentity(BlockState state) {
+        Block block = state.getBlock();
+        return block == Blocks.BONE_BLOCK
+                || block == Blocks.COAL_BLOCK
+                || block == Blocks.COPPER_BLOCK
+                || block == Blocks.DIAMOND_BLOCK
+                || block == Blocks.DRIED_KELP_BLOCK
+                || block == Blocks.EMERALD_BLOCK
+                || block == Blocks.GOLD_BLOCK
+                || block == Blocks.HAY_BLOCK
+                || block == Blocks.IRON_BLOCK
+                || block == Blocks.LAPIS_BLOCK
+                || block == Blocks.NETHERITE_BLOCK
+                || block == Blocks.REDSTONE_BLOCK
+                || block == Blocks.RAW_COPPER_BLOCK
+                || block == Blocks.RAW_IRON_BLOCK
+                || block == Blocks.RAW_GOLD_BLOCK;
     }
 
     public static PlacementResult place(
@@ -309,7 +355,7 @@ public final class MaidTerrainBuilder {
 
     private static int materialScore(BlockState state, int count) {
         int category = 100;
-        if (state.is(Tags.Blocks.COBBLESTONES)) {
+        if (state.is(Tags.Blocks.COBBLESTONES) || isCobblestoneByIdentity(state)) {
             category = 500;
         } else if (state.is(BlockTags.BASE_STONE_OVERWORLD)
                 || state.is(BlockTags.BASE_STONE_NETHER)) {
@@ -320,6 +366,14 @@ public final class MaidTerrainBuilder {
             category = 200;
         }
         return category * 1000 + Math.min(999, Math.max(0, count));
+    }
+
+    /** Fallback for when NeoForge Tags.Blocks.COBBLESTONES is not loaded (unitTest). */
+    private static boolean isCobblestoneByIdentity(BlockState state) {
+        Block block = state.getBlock();
+        return block == Blocks.COBBLESTONE
+                || block == Blocks.COBBLED_DEEPSLATE
+                || block == Blocks.MOSSY_COBBLESTONE;
     }
 
     public enum Purpose {

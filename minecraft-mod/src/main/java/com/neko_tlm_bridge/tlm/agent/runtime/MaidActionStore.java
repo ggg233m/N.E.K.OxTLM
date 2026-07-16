@@ -39,6 +39,7 @@ public final class MaidActionStore {
     private static final long MIN_TIMEOUT_MS = 1_000L;
     private static final long MAX_TIMEOUT_MS = 120_000L;
     private static final long PROGRESS_HEARTBEAT_TICKS = 40L;
+    private static final long DETAIL_CACHE_INTERVAL_TICKS = 10L;
 
     private final Map<MaidActionKind, MaidActionFactory> factories = new EnumMap<>(MaidActionKind.class);
     private final Map<MaidActionKind, IMaidTask> appliedTasks = new EnumMap<>(MaidActionKind.class);
@@ -585,6 +586,8 @@ public final class MaidActionStore {
         protected long sequence;
         protected long finishedAtMs;
         protected JsonObject result = new JsonObject();
+        protected JsonObject lastDetail = new JsonObject();
+        protected long lastDetailGameTime = Long.MIN_VALUE;
         protected final List<String> warnings = new ArrayList<>();
 
         private ActionRecord(UUID actionId, UUID maidId, MaidActionKind kind,
@@ -613,6 +616,9 @@ public final class MaidActionStore {
                 json.addProperty("end_reason", endReason.name());
             }
             json.add("result", result.deepCopy());
+            if (lastDetail != null && !lastDetail.isEmpty()) {
+                json.add("detail", lastDetail.deepCopy());
+            }
             JsonArray warningArray = new JsonArray();
             warnings.forEach(warningArray::add);
             json.add("warnings", warningArray);
@@ -684,6 +690,17 @@ public final class MaidActionStore {
 
         private void emitProgress(boolean stageChanged, String newStage, double newProgress,
                                   JsonObject detail, long gameTime) {
+            if (stageChanged && (detail == null || detail.isEmpty())) {
+                this.lastDetail = new JsonObject();
+                this.lastDetailGameTime = gameTime;
+            } else if (detail != null && !detail.isEmpty()
+                    && (stageChanged || lastDetail.isEmpty()
+                    || lastDetailGameTime == Long.MIN_VALUE
+                    || gameTime - lastDetailGameTime
+                    >= DETAIL_CACHE_INTERVAL_TICKS)) {
+                this.lastDetail = detail.deepCopy();
+                this.lastDetailGameTime = gameTime;
+            }
             if (!eventsEnabled) {
                 this.stage = newStage == null ? this.stage : newStage;
                 this.progress = Math.max(0.0, Math.min(1.0, newProgress));

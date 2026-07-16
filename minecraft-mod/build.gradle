@@ -32,12 +32,6 @@ repositories {
 neoForge {
     version = project.neo_version
 
-    // Expose Minecraft/NeoForge classes to src/test so the pure terrain
-    // planner tests can use BlockPos without booting a game server.
-    unitTest {
-        enable()
-    }
-
     runs {
         client {
             client()
@@ -67,6 +61,13 @@ neoForge {
         "${mod_id}" {
             sourceSet sourceSets.main
         }
+    }
+
+    // Expose Minecraft/NeoForge classes to src/test without registering test
+    // output as runtime mod content in normal client/server development runs.
+    unitTest {
+        enable()
+        testedMod = mods."${mod_id}"
     }
 }
 
