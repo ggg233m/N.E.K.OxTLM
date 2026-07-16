@@ -112,7 +112,7 @@ class MaidActionToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["is_error"])
         normalized = plugin.requests[0]["data"]["args"]
         self.assertTrue(normalized["vein_mining"])
-        self.assertEqual(64, normalized["max_blocks"])
+        self.assertEqual(1, normalized["max_blocks"])
         self.assertNotIn("mining_plan", normalized)
         self.assertEqual(0, plugin.requests[0]["data"]["timeout_ms"])
 

@@ -190,7 +190,7 @@ class ActionRegistryTests(unittest.TestCase):
                     "selector": selector,
                 })
                 self.assertTrue(args["vein_mining"])
-                self.assertEqual(64, args["max_blocks"])
+                self.assertEqual(1, args["max_blocks"])
 
     def test_explicit_vein_count_and_single_block_override(self):
         selector = {"type": "tag", "id": "minecraft:iron_ores"}

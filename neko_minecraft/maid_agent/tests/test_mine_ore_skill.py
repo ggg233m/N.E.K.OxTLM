@@ -177,7 +177,7 @@ class MineOreSkillTests(unittest.TestCase):
         self.assertIsInstance(directive, StartAction)
         self.assertEqual("harvest_blocks", directive.kind)
         self.assertTrue(directive.args["vein_mining"])
-        self.assertEqual(64, directive.args["max_blocks"])
+        self.assertEqual(1, directive.args["max_blocks"])
         self.assertEqual({"mode": "nearby"}, directive.args["mining_plan"])
 
     def test_empty_initial_scan_starts_downward_main_segment(self):
@@ -241,7 +241,7 @@ class MineOreSkillTests(unittest.TestCase):
                     "real_end": {"x": 2, "y": 60, "z": -3}},
         ))
         self.assertEqual("harvest_blocks", directive.kind)
-        self.assertEqual(64, directive.args["max_blocks"])
+        self.assertEqual(1, directive.args["max_blocks"])
         self.assertEqual({"x": 2, "y": 63, "z": 0}, run.origin_pos)
 
         run.current_action_request = {"kind": "harvest_blocks"}

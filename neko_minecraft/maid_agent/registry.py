@@ -218,7 +218,9 @@ class ActionRegistry:
             raise ActionValidationError("vein_mining=true requires selector targeting")
 
         max_blocks_limit = 64 if vein_mining else 8
-        max_blocks_default = 64 if vein_mining else 1
+        # In whole-vein mode this is a minimum target, never a cutoff.  One
+        # therefore means "finish the first vein encountered".
+        max_blocks_default = 1
         data = {
             "search_radius": self._integer(
                 args.get("search_radius", 12), "search_radius", 1, 12

@@ -3,8 +3,10 @@ package com.neko_tlm_bridge.tlm.agent.action;
 import net.minecraft.core.BlockPos;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -78,5 +80,34 @@ class MaidVeinTrackerTest {
         tracker.pruneUnharvested(pos -> !pos.equals(bridge));
         assertEquals(List.of(), tracker.retainConnected(List.of(beyond), ORDER));
         assertFalse(tracker.contains(beyond));
+    }
+
+    @Test
+    void unboundedTrackerDoesNotAbandonVeinsPastLegacyLimit() {
+        MaidVeinTracker tracker = MaidVeinTracker.unbounded();
+        BlockPos seed = new BlockPos(0, 10, 0);
+        tracker.rememberHarvested(seed);
+        List<BlockPos> connected = new ArrayList<>();
+        for (int x = 1; x <= 600; x++) {
+            connected.add(new BlockPos(x, 10, 0));
+        }
+
+        assertEquals(connected, tracker.retainConnected(connected, ORDER));
+        assertEquals(601, tracker.knownMembers());
+        assertFalse(tracker.truncated());
+    }
+
+    @Test
+    void durableRestoreKeepsMinedAirAsConnectivityBridge() {
+        BlockPos mined = new BlockPos(0, 10, 0);
+        BlockPos pending = new BlockPos(1, 10, 0);
+        MaidVeinTracker restored = MaidVeinTracker.restore(
+                List.of(mined, pending), List.of(mined));
+
+        assertTrue(restored.locked());
+        assertEquals(Set.of(pending), restored.pendingMembers());
+        assertEquals(List.of(pending, new BlockPos(2, 10, 0)),
+                restored.retainConnected(
+                        List.of(pending, new BlockPos(2, 10, 0)), ORDER));
     }
 }

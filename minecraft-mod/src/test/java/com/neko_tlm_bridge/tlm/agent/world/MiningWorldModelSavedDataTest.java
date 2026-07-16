@@ -8,6 +8,7 @@ import net.minecraft.nbt.Tag;
 import org.junit.jupiter.api.Test;
 
 import java.util.Set;
+import java.util.List;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -50,6 +51,10 @@ class MiningWorldModelSavedDataTest {
                 new BlockPos(9, 44, 1), 2, "lava pocket", 109L);
         data.updateCounts(actionId, 3, 8L, 19L, 110L);
         data.updateConstructionCounts(actionId, 7L, 5L, 2L, 110L);
+        BlockPos veinSeed = new BlockPos(11, 44, 2);
+        BlockPos veinFrontier = new BlockPos(12, 44, 2);
+        data.updateVeinState(actionId,
+                List.of(veinSeed, veinFrontier), List.of(veinSeed), 110L);
         data.updatePhase(actionId, "scanning", 111L);
         data.markBlocked(actionId, "lava_ahead", 112L);
 
@@ -82,6 +87,9 @@ class MiningWorldModelSavedDataTest {
         assertEquals(7L, session.placementsUsed());
         assertEquals(5L, session.bridgeSupportsPlaced());
         assertEquals(2L, session.waterSealsPlaced());
+        assertEquals(Set.of(veinSeed, veinFrontier),
+                Set.copyOf(session.veinMembers()));
+        assertEquals(List.of(veinSeed), session.veinHarvestedMembers());
         assertEquals("lava_ahead", session.blockedReason());
         assertTrue(session.active());
         assertTrue(session.blocked());

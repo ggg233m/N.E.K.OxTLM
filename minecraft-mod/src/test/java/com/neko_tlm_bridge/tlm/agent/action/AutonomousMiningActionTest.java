@@ -160,6 +160,12 @@ class AutonomousMiningActionTest {
 
         JsonObject result = action.terminationResult(null, ActionEndReason.REQUESTED);
         assertEquals(2, result.get("collected_count").getAsInt());
+        assertTrue(result.get("minimum_reached").getAsBoolean());
+        assertTrue(result.get("vein_locked").getAsBoolean());
+        assertFalse(result.get("vein_complete").getAsBoolean());
+        assertEquals(1, result.get("target_overshoot").getAsInt());
+        assertEquals("target_count_is_minimum_finish_committed_vein",
+                result.get("completion_rule").getAsString());
         // target_count is a minimum; route collection does not complete until
         // the locked connected vein is rescanned and exhausted.
         assertEquals("VALIDATING", result.get("phase").getAsString());

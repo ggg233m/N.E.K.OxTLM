@@ -79,7 +79,7 @@ public final class HarvestBlocksAction implements MaidAction {
     private final double speed;
     private final MiningPlan miningPlan;
     private final boolean veinMining;
-    private final MaidVeinTracker veinTracker = new MaidVeinTracker();
+    private final MaidVeinTracker veinTracker;
     private final EnumSet<Direction> prospectDirectionsTried =
             EnumSet.noneOf(Direction.class);
     private final List<Direction> prospectDirectionAttemptOrder = new ArrayList<>();
@@ -163,6 +163,8 @@ public final class HarvestBlocksAction implements MaidAction {
         this.speed = Math.max(0.4D, Math.min(1.0D, speed));
         this.miningPlan = Objects.requireNonNull(miningPlan, "miningPlan");
         this.veinMining = veinMining;
+        this.veinTracker = veinMining
+                ? MaidVeinTracker.unbounded() : new MaidVeinTracker();
         if (veinMining && explicitTarget != null) {
             throw new IllegalArgumentException("vein_mining requires selector targeting");
         }
@@ -212,7 +214,7 @@ public final class HarvestBlocksAction implements MaidAction {
             throw new IllegalArgumentException("vein_mining requires selector targeting");
         }
         int radius = optionalInt(args, "search_radius", 12);
-        int maxBlocks = optionalInt(args, "max_blocks", veinMining ? MAX_VEIN_BLOCKS : 1);
+        int maxBlocks = optionalInt(args, "max_blocks", 1);
         double speed = optionalDouble(args, "speed", 0.7D);
         requireRange(radius, "search_radius", 1, 12);
         requireRange(maxBlocks, "max_blocks", 1, veinMining ? MAX_VEIN_BLOCKS : 8);
@@ -282,13 +284,17 @@ public final class HarvestBlocksAction implements MaidAction {
 
         if (candidates.isEmpty()) {
             if (veinMining && veinTracker.locked()) {
-                if (liveVeinRemaining(context) > 0 && veinStopReason == null) {
+                int remaining = liveVeinRemaining(context);
+                int rejected = veinRejectedCount(context);
+                if ((remaining > 0 || rejected > 0) && veinStopReason == null) {
                     veinStopReason = "remaining_vein_targets_rejected_or_disconnected";
                 }
-                return harvested > 0
-                        ? success(context)
-                        : failure(ActionEndReason.TARGET_CHANGED,
-                        "locked_vein_has_no_remaining_target");
+                if (remaining > 0 || rejected > 0) {
+                    return failure(ActionEndReason.PATH_NOT_FOUND,
+                            "committed_vein_remaining_unreachable");
+                }
+                veinStopReason = null;
+                return success(context);
             }
             if (miningPlan.hasNextStep(prospectSteps, prospectDescentSteps,
                     segmentSteps, segmentDescentSteps)) {
@@ -704,7 +710,7 @@ public final class HarvestBlocksAction implements MaidAction {
             routeBlocksCleared++;
             HarvestRecord record = recordHarvestedTarget(cleared.pos(), cleared.state());
             if (record.harvested()) {
-                if (harvested >= maxBlocks) {
+                if (!veinMining && harvested >= maxBlocks) {
                     navigation.stop(context);
                     navigation = null;
                     return success(context);
@@ -770,7 +776,7 @@ public final class HarvestBlocksAction implements MaidAction {
             routeBlocksCleared++;
             HarvestRecord record = recordHarvestedTarget(cleared.pos(), cleared.state());
             if (record.harvested()) {
-                if (harvested >= maxBlocks) {
+                if (!veinMining && harvested >= maxBlocks) {
                     navigation.stop(context);
                     navigation = null;
                     return success(context);
@@ -1089,7 +1095,7 @@ public final class HarvestBlocksAction implements MaidAction {
         expectedState = null;
         resetTerrainPlan();
         clearProspectDirectionSweep();
-        if (harvested >= maxBlocks || explicitTarget != null) {
+        if ((!veinMining && harvested >= maxBlocks) || explicitTarget != null) {
             return success(context);
         }
         searchOrigin = context.maid().blockPosition().immutable();
@@ -1251,7 +1257,7 @@ public final class HarvestBlocksAction implements MaidAction {
             return null;
         }
         veinStopReason = stopReason;
-        return success(context);
+        return failure(ActionEndReason.PATH_NOT_FOUND, stopReason);
     }
 
     private MaidActionTickResult restartAfterVeinLock(MaidActionContext context) {
@@ -1275,7 +1281,6 @@ public final class HarvestBlocksAction implements MaidAction {
     }
 
     private MaidActionTickResult success(MaidActionContext context) {
-        report(context, Stage.VERIFYING, 1.0D, null);
         JsonObject result = new JsonObject();
         result.addProperty("harvested", harvested);
         result.addProperty("requested", maxBlocks);
@@ -1283,14 +1288,20 @@ public final class HarvestBlocksAction implements MaidAction {
         int veinRejected = veinRejectedCount(context);
         boolean countLimitReached = harvested >= maxBlocks;
         boolean veinTruncated = veinTracker.truncated();
-        boolean veinComplete = veinMining && !veinTruncated
-                && veinRemaining == 0 && veinRejected == 0 && veinStopReason == null;
-        boolean requestSatisfied = veinMining
-                ? veinComplete || countLimitReached : countLimitReached;
-        boolean veinLimitReached = veinMining && countLimitReached && !veinComplete;
-        boolean partial = veinMining
-                ? !veinComplete && (!countLimitReached || maxBlocks == MAX_VEIN_BLOCKS)
-                : harvested < maxBlocks;
+        boolean veinBoundaryLoaded = !committedVeinTouchesUnloadedChunk(context);
+        boolean veinComplete = veinMining
+                && veinRemaining == 0 && veinRejected == 0
+                && veinStopReason == null && veinBoundaryLoaded;
+        if (veinMining && !veinComplete) {
+            return failure(ActionEndReason.PATH_NOT_FOUND,
+                    !veinBoundaryLoaded ? "committed_vein_boundary_unloaded"
+                            : veinStopReason == null
+                            ? "committed_vein_not_exhausted" : veinStopReason);
+        }
+        report(context, Stage.VERIFYING, 1.0D, null);
+        boolean requestSatisfied = veinMining ? veinComplete : countLimitReached;
+        boolean veinLimitReached = false;
+        boolean partial = !veinMining && harvested < maxBlocks;
         result.addProperty("partial", partial);
         result.addProperty("request_satisfied", requestSatisfied);
         if (partial) {
@@ -1325,6 +1336,33 @@ public final class HarvestBlocksAction implements MaidAction {
                 .count();
     }
 
+    private boolean committedVeinTouchesUnloadedChunk(MaidActionContext context) {
+        if (!veinMining || !veinTracker.locked()) {
+            return false;
+        }
+        for (BlockPos member : veinTracker.members()) {
+            for (int dx = -1; dx <= 1; dx++) {
+                for (int dy = -1; dy <= 1; dy++) {
+                    for (int dz = -1; dz <= 1; dz++) {
+                        if (dx == 0 && dy == 0 && dz == 0) {
+                            continue;
+                        }
+                        BlockPos adjacent = member.offset(dx, dy, dz);
+                        if (adjacent.getY() < context.level().getMinBuildHeight()
+                                || adjacent.getY()
+                                >= context.level().getMaxBuildHeight()) {
+                            continue;
+                        }
+                        if (!context.level().hasChunkAt(adjacent)) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
     private void addVeinDiagnostics(JsonObject result, int remaining,
                                     int rejected, boolean truncated,
                                     boolean complete, boolean limitReached) {
@@ -1340,7 +1378,9 @@ public final class HarvestBlocksAction implements MaidAction {
         result.addProperty("vein_harvested", harvested);
         result.addProperty("vein_remaining", remaining);
         result.addProperty("vein_rejected", rejected);
-        result.addProperty("vein_limit", Math.min(maxBlocks, veinTracker.limit()));
+        result.addProperty("minimum_target", maxBlocks);
+        result.addProperty("target_overshoot", Math.max(0, harvested - maxBlocks));
+        result.addProperty("vein_limit", -1);
         result.addProperty("vein_truncated", truncated);
         result.addProperty("vein_complete", complete);
         result.addProperty("vein_limit_reached", limitReached);
@@ -1383,6 +1423,16 @@ public final class HarvestBlocksAction implements MaidAction {
         result.addProperty("diagnostic_code", message);
         result.addProperty("decision_required", true);
         result.addProperty("recoverability", recoverability(reason));
+        if (veinMining) {
+            result.addProperty("minimum_target", maxBlocks);
+            result.addProperty("minimum_reached", harvested >= maxBlocks);
+            result.addProperty("vein_locked", veinTracker.locked());
+            result.addProperty("vein_harvested", harvested);
+            result.addProperty("vein_known", veinTracker.knownMembers());
+            result.addProperty("vein_complete", false);
+            result.addProperty("completion_rule",
+                    "minimum_target_then_finish_connected_vein");
+        }
         addSearchDiagnostics(result, retryHint(reason, message));
         return MaidActionTickResult.failed(reason, result);
     }
@@ -1424,7 +1474,9 @@ public final class HarvestBlocksAction implements MaidAction {
             }
             result.addProperty("vein_discovered", veinTracker.knownMembers());
             result.addProperty("vein_harvested", harvested);
-            result.addProperty("vein_limit", Math.min(maxBlocks, veinTracker.limit()));
+            result.addProperty("minimum_target", maxBlocks);
+            result.addProperty("target_overshoot", Math.max(0, harvested - maxBlocks));
+            result.addProperty("vein_limit", -1);
             result.addProperty("vein_truncated", veinTracker.truncated());
         }
         addProspectingDiagnostics(result);

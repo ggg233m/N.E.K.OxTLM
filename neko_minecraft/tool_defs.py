@@ -218,7 +218,8 @@ MC_START_MAID_ACTION = {
                     "max_blocks、vein_mining、tool_policy(require_correct|allow_wrong)、speed。矿石优先传"
                     "tag selector（如 minecraft:diamond_ores），不要只传单一 minecraft:diamond_ore；tag id"
                     "以 _ores 结尾或 block id 以 _ore 结尾时，省略 vein_mining 会默认 true、max_blocks 默认"
-                    "64 且允许 1..64，按连通矿脉采集。vein_mining=false 时 max_blocks 默认 1、范围 1..8。"
+                    "1 且允许 1..64；此数量只是最低目标，一旦命中就必须采尽整个 26 邻接连通矿脉。"
+                    "不可达、受保护或区块未加载时阻塞/失败，不得按数量提前成功。vein_mining=false 时 max_blocks 默认 1、范围 1..8。"
                     "附近原子采集明确给出数量时设置对应 max_blocks；自动找矿或累计数量改用 mine_ore Skill 的"
                     "target_count。说只挖一块时设置 vein_mining=false,max_blocks=1。显式 mode=nearby 可限制"
                     "为附近扫描。持续探矿是旧协议兼容能力；只有低层调试或明确要求原子动作方案时才传"
@@ -329,7 +330,7 @@ MC_START_SKILL = {
                     },
                     "target_count": {
                         "type": "integer", "minimum": 1, "maximum": 4096,
-                        "description": "最低目标方块数；完整矿脉可使结果超出该数量",
+                        "description": "最低目标方块数，只决定是否寻找下一矿脉；已命中的连通矿脉必须挖尽，结果可超出该数量",
                     },
                     "target_metric": {
                         "type": "string", "enum": ["blocks_harvested"],

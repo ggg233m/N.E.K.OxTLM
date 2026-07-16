@@ -17,6 +17,8 @@ import org.jetbrains.annotations.NotNull;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -68,6 +70,8 @@ public final class MiningWorldModelSavedData extends SavedData {
     private static final String KEY_PLACEMENTS_USED = "PlacementsUsed";
     private static final String KEY_BRIDGE_SUPPORTS_PLACED = "BridgeSupportsPlaced";
     private static final String KEY_WATER_SEALS_PLACED = "WaterSealsPlaced";
+    private static final String KEY_VEIN_MEMBERS = "VeinMembers";
+    private static final String KEY_VEIN_HARVESTED_MEMBERS = "VeinHarvestedMembers";
     private static final String KEY_CREATED = "CreatedGameTime";
     private static final String KEY_UPDATED = "UpdatedGameTime";
     private static final String KEY_ENTRY_NODE = "EntryNode";
@@ -197,7 +201,7 @@ public final class MiningWorldModelSavedData extends SavedData {
                 arguments.targetCount, 0,
                 "validating", null, null,
                 arguments.mainDirection, arguments.shape, arguments.segmentLength,
-                0L, 0L, 0L, 0L, 0L, "",
+                0L, 0L, 0L, 0L, 0L, List.of(), List.of(), "",
                 gameTime, gameTime, null, null);
         operations.put(actionId, created);
         setDirty();
@@ -237,7 +241,8 @@ public final class MiningWorldModelSavedData extends SavedData {
         MutableOperation created = new MutableOperation(
                 operationId, maidId, dimensionId, 0L, OperationStatus.ACTIVE,
                 "{}", "{}", 0, 0, "validating", entrance.immutable(), null,
-                "auto", "auto", 8, 0L, 0L, 0L, 0L, 0L, "",
+                "auto", "auto", 8, 0L, 0L, 0L, 0L, 0L,
+                List.of(), List.of(), "",
                 gameTime, gameTime, entryId, null);
         created.nodes.put(entryId, new TunnelNode(
                 entryId, NodeType.ENTRY, entrance.immutable(), "", 0,
@@ -448,6 +453,30 @@ public final class MiningWorldModelSavedData extends SavedData {
             operation.collectedCount = collectedCount;
             operation.segmentsDug = segmentsDug;
             operation.clearedBlocks = clearedBlocks;
+            touch(operation, gameTime);
+        }
+    }
+
+    /**
+     * Persists the current connected-vein commitment.  The lists are not
+     * artificially capped: abandoning a large vein because a checkpoint
+     * budget was reached would turn a persistence detail into mining policy.
+     */
+    public void updateVeinState(
+            UUID operationId,
+            Collection<BlockPos> knownMembers,
+            Collection<BlockPos> harvestedMembers,
+            long gameTime) {
+        assertMutationThread();
+        Objects.requireNonNull(knownMembers, "knownMembers");
+        Objects.requireNonNull(harvestedMembers, "harvestedMembers");
+        MutableOperation operation = requireOperation(operationId);
+        List<BlockPos> known = immutableDistinctPositions(knownMembers);
+        List<BlockPos> harvested = immutableDistinctPositions(harvestedMembers);
+        if (!known.equals(operation.veinMembers)
+                || !harvested.equals(operation.veinHarvestedMembers)) {
+            operation.veinMembers = known;
+            operation.veinHarvestedMembers = harvested;
             touch(operation, gameTime);
         }
     }
@@ -709,6 +738,11 @@ public final class MiningWorldModelSavedData extends SavedData {
         tag.putLong(KEY_PLACEMENTS_USED, operation.placementsUsed);
         tag.putLong(KEY_BRIDGE_SUPPORTS_PLACED, operation.bridgeSupportsPlaced);
         tag.putLong(KEY_WATER_SEALS_PLACED, operation.waterSealsPlaced);
+        tag.putLongArray(KEY_VEIN_MEMBERS, operation.veinMembers.stream()
+                .mapToLong(BlockPos::asLong).toArray());
+        tag.putLongArray(KEY_VEIN_HARVESTED_MEMBERS,
+                operation.veinHarvestedMembers.stream()
+                        .mapToLong(BlockPos::asLong).toArray());
         tag.putLong(KEY_CREATED, operation.createdGameTime);
         tag.putLong(KEY_UPDATED, operation.updatedGameTime);
         if (operation.entryNodeId != null) {
@@ -739,6 +773,21 @@ public final class MiningWorldModelSavedData extends SavedData {
                 .forEach(dangers::add);
         tag.put(KEY_DANGERS, dangers);
         return tag;
+    }
+
+    private static List<BlockPos> immutableDistinctPositions(
+            Collection<BlockPos> positions) {
+        return positions.stream()
+                .map(pos -> Objects.requireNonNull(pos, "position").immutable())
+                .distinct()
+                .sorted(Comparator.comparingLong(BlockPos::asLong))
+                .toList();
+    }
+
+    private static List<BlockPos> readPositions(long[] packedPositions) {
+        return immutableDistinctPositions(Arrays.stream(packedPositions)
+                .mapToObj(BlockPos::of)
+                .toList());
     }
 
     private static MutableOperation readOperation(CompoundTag tag, String rootDimensionId) {
@@ -774,6 +823,8 @@ public final class MiningWorldModelSavedData extends SavedData {
                 Math.max(0L, tag.getLong(KEY_PLACEMENTS_USED)),
                 Math.max(0L, tag.getLong(KEY_BRIDGE_SUPPORTS_PLACED)),
                 Math.max(0L, tag.getLong(KEY_WATER_SEALS_PLACED)),
+                readPositions(tag.getLongArray(KEY_VEIN_MEMBERS)),
+                readPositions(tag.getLongArray(KEY_VEIN_HARVESTED_MEMBERS)),
                 normalizeText(tag.getString(KEY_BLOCKED_REASON), 256),
                 tag.getLong(KEY_CREATED), tag.getLong(KEY_UPDATED),
                 entryId, workfaceId);
@@ -1212,6 +1263,8 @@ public final class MiningWorldModelSavedData extends SavedData {
             long placementsUsed,
             long bridgeSupportsPlaced,
             long waterSealsPlaced,
+            List<BlockPos> veinMembers,
+            List<BlockPos> veinHarvestedMembers,
             String blockedReason,
             long createdGameTime,
             long updatedGameTime,
@@ -1234,6 +1287,8 @@ public final class MiningWorldModelSavedData extends SavedData {
                     ? null : currentWorkfacePos.immutable();
             mainDirection = defaultPlanText(mainDirection, "auto");
             shape = defaultPlanText(shape, "auto");
+            veinMembers = immutableDistinctPositions(veinMembers);
+            veinHarvestedMembers = immutableDistinctPositions(veinHarvestedMembers);
             blockedReason = normalizeText(blockedReason, 256);
             nodes = Map.copyOf(nodes);
             segments = Map.copyOf(segments);
@@ -1280,6 +1335,8 @@ public final class MiningWorldModelSavedData extends SavedData {
         private long placementsUsed;
         private long bridgeSupportsPlaced;
         private long waterSealsPlaced;
+        private List<BlockPos> veinMembers;
+        private List<BlockPos> veinHarvestedMembers;
         private String blockedReason;
         private final long createdGameTime;
         private long updatedGameTime;
@@ -1298,7 +1355,8 @@ public final class MiningWorldModelSavedData extends SavedData {
                 String mainDirection, String shape, int segmentLength,
                 long segmentsDug, long clearedBlocks,
                 long placementsUsed, long bridgeSupportsPlaced,
-                long waterSealsPlaced, String blockedReason,
+                long waterSealsPlaced, List<BlockPos> veinMembers,
+                List<BlockPos> veinHarvestedMembers, String blockedReason,
                 long createdGameTime, long updatedGameTime,
                 UUID entryNodeId, UUID activeWorkfaceNodeId) {
             this.operationId = operationId;
@@ -1322,6 +1380,9 @@ public final class MiningWorldModelSavedData extends SavedData {
             this.placementsUsed = Math.max(0L, placementsUsed);
             this.bridgeSupportsPlaced = Math.max(0L, bridgeSupportsPlaced);
             this.waterSealsPlaced = Math.max(0L, waterSealsPlaced);
+            this.veinMembers = immutableDistinctPositions(veinMembers);
+            this.veinHarvestedMembers = immutableDistinctPositions(
+                    veinHarvestedMembers);
             this.blockedReason = normalizeText(blockedReason, 256);
             this.createdGameTime = createdGameTime;
             this.updatedGameTime = updatedGameTime;
@@ -1336,6 +1397,7 @@ public final class MiningWorldModelSavedData extends SavedData {
                     originPos, currentWorkfacePos, mainDirection, shape,
                     segmentLength, segmentsDug, clearedBlocks,
                     placementsUsed, bridgeSupportsPlaced, waterSealsPlaced,
+                    veinMembers, veinHarvestedMembers,
                     blockedReason,
                     createdGameTime, updatedGameTime,
                     entryNodeId, activeWorkfaceNodeId,

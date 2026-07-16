@@ -94,7 +94,7 @@ public final class AutonomousMiningAction implements MaidAction {
     private AutonomousMiningState state;
     private final Set<BlockPos> harvestedPositions = new HashSet<>();
 
-    private MaidVeinTracker veinTracker = new MaidVeinTracker(256);
+    private MaidVeinTracker veinTracker = MaidVeinTracker.unbounded();
     private BlockPos origin;
     private BlockPos realEnd;
     private Direction activeDirection;
@@ -275,6 +275,9 @@ public final class AutonomousMiningAction implements MaidAction {
         state = AutonomousMiningState.restore(targetCount,
                 snapshot.collectedCount(), snapshot.segmentsDug(),
                 snapshot.clearedBlocks());
+        veinTracker = MaidVeinTracker.restore(
+                snapshot.veinMembers(), snapshot.veinHarvestedMembers());
+        harvestedPositions.addAll(snapshot.veinHarvestedMembers());
         placementsUsed = Math.toIntExact(Math.min(
                 Integer.MAX_VALUE, snapshot.placementsUsed()));
         bridgeSupportsPlaced = Math.toIntExact(Math.min(
@@ -712,15 +715,31 @@ public final class AutonomousMiningAction implements MaidAction {
     private MaidActionTickResult scanAndPlanHarvest(MaidActionContext context) {
         List<BlockPos> discovered = scan(context);
         if (veinTracker.locked()) {
+            veinTracker.pruneUnharvested(pos -> !loadedBuildPosition(context, pos)
+                    || selector.test(context.level().getBlockState(pos)));
             List<BlockPos> connected = veinTracker.retainConnected(
                     discovered, targetComparator(context));
             if (!connected.isEmpty()) {
                 discovered = connected;
             } else {
+                if (!veinTracker.pendingMembers().isEmpty()) {
+                    boolean unloaded = veinTracker.pendingMembers().stream()
+                            .anyMatch(pos -> !loadedBuildPosition(context, pos));
+                    if (unloaded) {
+                        return blocked(context, ActionEndReason.ENTITY_UNLOADED,
+                                "committed_vein_member_unloaded");
+                    }
+                    return blocked(context, ActionEndReason.PATH_NOT_FOUND,
+                            "committed_vein_remaining_unreachable");
+                }
+                if (committedVeinTouchesUnloadedChunk(context)) {
+                    return blocked(context, ActionEndReason.ENTITY_UNLOADED,
+                            "committed_vein_boundary_unloaded");
+                }
                 if (state.goalReached()) {
                     return complete(context, "connected_vein_exhausted");
                 }
-                veinTracker = new MaidVeinTracker(256);
+                veinTracker = MaidVeinTracker.unbounded();
             }
         }
         if (discovered.isEmpty()) {
@@ -731,9 +750,9 @@ public final class AutonomousMiningAction implements MaidAction {
                     detail("no_target_found"));
             return MaidActionTickResult.running();
         }
-        List<BlockPos> candidates = discovered.stream()
-                .limit(MAX_CANDIDATES)
-                .toList();
+        List<BlockPos> candidates = veinTracker.locked()
+                ? discovered
+                : discovered.stream().limit(MAX_CANDIDATES).toList();
         return planHarvestApproach(context, candidates);
     }
 
@@ -783,6 +802,10 @@ public final class AutonomousMiningAction implements MaidAction {
             }
         }
         if (goals.isEmpty()) {
+            if (veinTracker.locked()) {
+                return blocked(context, ActionEndReason.PATH_NOT_FOUND,
+                        "committed_vein_has_no_safe_mining_stance");
+            }
             deferOreTargets(candidates);
             transition(context, AutonomousMiningState.Phase.CONTINUING,
                     deferredOreDetail("no_safe_mining_stance", candidates.size()));
@@ -813,6 +836,15 @@ public final class AutonomousMiningAction implements MaidAction {
             if (status == MaidTerrainSearch.Status.FAILED) {
                 Set<BlockPos> unreachable = new LinkedHashSet<>(
                         terrainGoalTargets.values());
+                if (veinTracker.locked()) {
+                    terrainSearch = null;
+                    terrainGoalTargets = Map.of();
+                    planningPurpose = null;
+                    currentTarget = null;
+                    expectedTargetState = null;
+                    return blocked(context, ActionEndReason.PATH_NOT_FOUND,
+                            "committed_vein_path_not_found");
+                }
                 deferOreTargets(unreachable);
                 terrainSearch = null;
                 terrainGoalTargets = Map.of();
@@ -934,14 +966,13 @@ public final class AutonomousMiningAction implements MaidAction {
         long excavationStep = state.segmentsDug();
         deferredOreTargets.entrySet().removeIf(
                 entry -> entry.getValue() <= excavationStep);
-        List<BlockPos> discovered = new ArrayList<>();
+        Set<BlockPos> discovered = new LinkedHashSet<>();
         for (BlockPos mutable : BlockPos.betweenClosed(
                 center.offset(-SCAN_RADIUS, -SCAN_RADIUS, -SCAN_RADIUS),
                 center.offset(SCAN_RADIUS, SCAN_RADIUS, SCAN_RADIUS))) {
             BlockPos pos = mutable.immutable();
-            if (discovered.size() >= 512
-                    || harvestedPositions.contains(pos)
-                    || deferredOreTargets.containsKey(pos)
+            if (harvestedPositions.contains(pos)
+                    || (!veinTracker.locked() && deferredOreTargets.containsKey(pos))
                     || !loadedBuildPosition(context, pos)) {
                 continue;
             }
@@ -955,8 +986,21 @@ public final class AutonomousMiningAction implements MaidAction {
             }
             discovered.add(pos);
         }
-        discovered.sort(targetComparator(context));
-        return List.copyOf(discovered);
+        if (veinTracker.locked()) {
+            for (BlockPos pos : veinTracker.pendingMembers()) {
+                if (!loadedBuildPosition(context, pos)
+                        || harvestedPositions.contains(pos)) {
+                    continue;
+                }
+                BlockState state = context.level().getBlockState(pos);
+                if (selector.test(state)
+                        && (discoveryMode != DiscoveryMode.EXPOSED_ONLY
+                        || hasExposedFace(context, pos))) {
+                    discovered.add(pos.immutable());
+                }
+            }
+        }
+        return discovered.stream().sorted(targetComparator(context)).toList();
     }
 
     private void deferOreTargets(Iterable<BlockPos> targets) {
@@ -1287,6 +1331,7 @@ public final class AutonomousMiningAction implements MaidAction {
         report.addProperty("selector", selectorDescription);
         report.addProperty("collected_count", state.collectedCount());
         report.addProperty("target_count", state.targetCount());
+        addVeinStatus(report);
         report.addProperty("segments_dug", state.segmentsDug());
         report.addProperty("cleared_blocks", state.clearedBlocks());
         report.addProperty("segment_steps", stepsInCurrentSegment);
@@ -1331,6 +1376,9 @@ public final class AutonomousMiningAction implements MaidAction {
                 state.clearedBlocks(), context.gameTime());
         model.updateConstructionCounts(context.execution().actionId(),
                 placementsUsed, bridgeSupportsPlaced, waterSealsPlaced,
+                context.gameTime());
+        model.updateVeinState(context.execution().actionId(),
+                veinTracker.members(), veinTracker.harvestedMembers(),
                 context.gameTime());
         model.updateWorkface(context.execution().actionId(),
                 realEnd == null ? context.maid().blockPosition() : realEnd,
@@ -1441,6 +1489,7 @@ public final class AutonomousMiningAction implements MaidAction {
         result.addProperty("phase", state.phase().name());
         result.addProperty("collected_count", state.collectedCount());
         result.addProperty("target_count", state.targetCount());
+        addVeinStatus(result);
         result.addProperty("segments_dug", state.segmentsDug());
         result.addProperty("cleared_blocks", state.clearedBlocks());
         result.add("origin", position(origin));
@@ -1478,9 +1527,25 @@ public final class AutonomousMiningAction implements MaidAction {
     }
 
     private double progress() {
-        return state.goalReached() ? 1.0D
+        return state.phase() == AutonomousMiningState.Phase.COMPLETED ? 1.0D
                 : Math.min(0.99D,
                 (double) state.collectedCount() / state.targetCount());
+    }
+
+    private void addVeinStatus(JsonObject json) {
+        boolean locked = veinTracker.locked();
+        int remainingKnown = veinTracker.pendingMembers().size();
+        json.addProperty("minimum_reached", state.goalReached());
+        json.addProperty("vein_locked", locked);
+        json.addProperty("vein_harvested", veinTracker.harvestedMembers().size());
+        json.addProperty("vein_remaining_known", remainingKnown);
+        json.addProperty("vein_complete",
+                locked && remainingKnown == 0
+                        && state.phase() == AutonomousMiningState.Phase.COMPLETED);
+        json.addProperty("target_overshoot",
+                Math.max(0, state.collectedCount() - state.targetCount()));
+        json.addProperty("completion_rule",
+                "target_count_is_minimum_finish_committed_vein");
     }
 
     private JsonObject detail(String substage) {
@@ -1518,6 +1583,31 @@ public final class AutonomousMiningAction implements MaidAction {
     private static String shapeWireName(ExcavateSegmentAction.Shape shape) {
         return shape == ExcavateSegmentAction.Shape.STAIRCASE_DOWN
                 ? "staircase_down" : "level";
+    }
+
+    /** Completion requires proving that every 26-neighbour boundary is loaded. */
+    private boolean committedVeinTouchesUnloadedChunk(MaidActionContext context) {
+        for (BlockPos member : veinTracker.members()) {
+            for (int dx = -1; dx <= 1; dx++) {
+                for (int dy = -1; dy <= 1; dy++) {
+                    for (int dz = -1; dz <= 1; dz++) {
+                        if (dx == 0 && dy == 0 && dz == 0) {
+                            continue;
+                        }
+                        BlockPos adjacent = member.offset(dx, dy, dz);
+                        if (adjacent.getY() < context.level().getMinBuildHeight()
+                                || adjacent.getY()
+                                >= context.level().getMaxBuildHeight()) {
+                            continue;
+                        }
+                        if (!context.level().hasChunkAt(adjacent)) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        return false;
     }
 
     private static boolean loadedBuildPosition(

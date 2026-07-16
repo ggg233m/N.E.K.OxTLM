@@ -574,7 +574,7 @@ class MineOreSkill:
             "harvest_blocks",
             {
                 "selector": dict(run.args["selector"]),
-                "max_blocks": 64,
+                "max_blocks": 1,
                 "vein_mining": True,
                 "tool_policy": "require_correct",
                 "mining_plan": {"mode": "nearby"},

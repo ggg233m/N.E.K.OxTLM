@@ -27,6 +27,33 @@ public final class MaidVeinTracker {
         this(DEFAULT_LIMIT);
     }
 
+    /**
+     * Creates a tracker without an artificial vein-size cutoff.  Autonomous
+     * mining uses this form because its target count is a minimum, not
+     * permission to abandon the connected component currently being mined.
+     */
+    public static MaidVeinTracker unbounded() {
+        return new MaidVeinTracker(Integer.MAX_VALUE);
+    }
+
+    /** Restores a durable connected-vein commitment after a server reload. */
+    public static MaidVeinTracker restore(
+            Collection<BlockPos> knownMembers,
+            Collection<BlockPos> harvestedMembers) {
+        Objects.requireNonNull(knownMembers, "knownMembers");
+        Objects.requireNonNull(harvestedMembers, "harvestedMembers");
+        MaidVeinTracker tracker = unbounded();
+        for (BlockPos pos : knownMembers) {
+            tracker.members.add(Objects.requireNonNull(pos, "known member").immutable());
+        }
+        for (BlockPos pos : harvestedMembers) {
+            BlockPos immutable = Objects.requireNonNull(pos, "harvested member").immutable();
+            tracker.harvestedMembers.add(immutable);
+            tracker.members.add(immutable);
+        }
+        return tracker;
+    }
+
     MaidVeinTracker(int limit) {
         if (limit <= 0) {
             throw new IllegalArgumentException("limit must be positive");
@@ -137,6 +164,13 @@ public final class MaidVeinTracker {
 
     public Set<BlockPos> harvestedMembers() {
         return Set.copyOf(harvestedMembers);
+    }
+
+    /** Known members that still need to be verified and harvested. */
+    public Set<BlockPos> pendingMembers() {
+        Set<BlockPos> pending = new LinkedHashSet<>(members);
+        pending.removeAll(harvestedMembers);
+        return Set.copyOf(pending);
     }
 
     /** Drops externally removed, never-harvested members from future connectivity. */
