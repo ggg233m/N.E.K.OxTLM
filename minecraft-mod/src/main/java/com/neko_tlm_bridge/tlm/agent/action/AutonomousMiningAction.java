@@ -90,6 +90,7 @@ public final class AutonomousMiningAction implements MaidAction {
     private final PlacementPolicy placementPolicy;
     private final int maxPlacements;
     private final JsonObject normalizedArgs;
+    private final MiningPlanner miningPlanner = new MiningPlanner();
     private AutonomousMiningState state;
     private final Set<BlockPos> harvestedPositions = new HashSet<>();
 
@@ -98,9 +99,6 @@ public final class AutonomousMiningAction implements MaidAction {
     private BlockPos realEnd;
     private Direction activeDirection;
     private ExcavateSegmentAction.Shape activeShape;
-    private List<Direction> directionAttempts = List.of();
-    private int directionAttemptIndex;
-    private BlockPos directionSweepOrigin;
     private int stepsInCurrentSegment;
     private boolean started;
 
@@ -129,6 +127,12 @@ public final class AutonomousMiningAction implements MaidAction {
     private boolean followingNaturalPassage;
     private long naturalPassageSteps;
     private int consecutiveNaturalPassageSteps;
+    private JsonObject lastPlannerDecision;
+    private long plannerDecisionCount;
+    private String selectedPlannerCandidateId = "";
+    private BlockPos failedPlannerOrigin;
+    private final Set<String> failedPlannerCandidates = new LinkedHashSet<>();
+    private String lastPlannerFailure = "none";
     private boolean persistentSessionActive;
 
     public AutonomousMiningAction(Predicate<BlockState> selector,
@@ -447,29 +451,26 @@ public final class AutonomousMiningAction implements MaidAction {
             return alternateOrBlocked(context, ActionEndReason.STUCK,
                     "maid_not_grounded_at_segment_origin");
         }
-        alignDirectionSweep(live, context.maid().getDirection());
-        if (shapeMode == ShapeMode.AUTO || activeShape == null) {
-            activeShape = resolveShape(context);
+        PlannedStep planned = choosePlannedStep(context, live);
+        if (planned == null) {
+            String failure = "none".equals(lastPlannerFailure)
+                    ? "all_planner_candidates_exhausted" : lastPlannerFailure;
+            return blocked(context,
+                    "no_building_material".equals(failure)
+                            ? ActionEndReason.TOOL_NOT_FOUND
+                            : ActionEndReason.PATH_NOT_FOUND,
+                    failure);
         }
-
-        followingNaturalPassage = false;
-        if (directionMode == DirectionMode.AUTO && shapeMode == ShapeMode.AUTO) {
-            NaturalPassageStep passage = chooseNaturalPassageStep(context, live);
-            if (passage != null) {
-                activeDirection = passage.direction();
-                activeShape = passage.shape();
-                followingNaturalPassage = true;
-            }
-        }
+        activeDirection = planned.direction();
+        activeShape = planned.shape();
+        stepFrom = live;
+        stepTo = planned.destination();
+        stepKind = planned.kind();
+        followingNaturalPassage = planned.candidate().naturalPassage();
+        selectedPlannerCandidateId = planned.candidate().id();
         if (!followingNaturalPassage) {
             consecutiveNaturalPassageSteps = 0;
         }
-
-        stepFrom = live;
-        stepTo = ExcavateSegmentAction.nextPosition(
-                stepFrom, activeDirection, activeShape).immutable();
-        stepKind = activeShape == ExcavateSegmentAction.Shape.STAIRCASE_DOWN
-                ? MaidTerrainStep.Kind.DESCEND : MaidTerrainStep.Kind.TRAVERSE;
 
         List<BlockPos> inspected = new ArrayList<>(
                 ExcavateSegmentAction.clearanceFor(stepTo, activeShape));
@@ -481,19 +482,16 @@ public final class AutonomousMiningAction implements MaidAction {
             }
         }
 
+        MaidTerrainWorldEvaluator evaluator = new MaidTerrainWorldEvaluator(
+                context.level(), context.maid(), stepFrom, 3, 3, true,
+                ignored -> true,
+                ignored -> plannerConstructionAvailable(context));
         BlockPos supportPos = stepTo.below();
         BlockState support = context.level().getBlockState(supportPos);
         MaidTerrainWorldEvaluator.SupportAssessment supportAssessment =
                 MaidTerrainWorldEvaluator.assessStandSupport(
                         context.level(), supportPos, support);
-        boolean buildableSupport = constructionEnabled()
-                && support.canBeReplaced()
-                && (supportAssessment
-                == MaidTerrainWorldEvaluator.SupportAssessment.UNSAFE_SUPPORT
-                || supportAssessment
-                == MaidTerrainWorldEvaluator.SupportAssessment.WATER_HAZARD);
-        if (supportAssessment != MaidTerrainWorldEvaluator.SupportAssessment.SAFE
-                && !buildableSupport) {
+        if (!Double.isFinite(evaluator.supportCost(supportPos))) {
             return alternateOrBlocked(context, supportEndReason(supportAssessment),
                     supportAssessment.name());
         }
@@ -502,13 +500,7 @@ public final class AutonomousMiningAction implements MaidAction {
             MaidTerrainWorldEvaluator.ClearanceAssessment clearance =
                     MaidTerrainWorldEvaluator.assessClearance(
                             context.level(), pos, blockState);
-            boolean sealableWater = constructionEnabled()
-                    && clearance
-                    == MaidTerrainWorldEvaluator.ClearanceAssessment.WATER_HAZARD
-                    && blockState.canBeReplaced();
-            if (clearance != MaidTerrainWorldEvaluator.ClearanceAssessment.CLEAR
-                    && clearance != MaidTerrainWorldEvaluator.ClearanceAssessment.BREAKABLE
-                    && !sealableWater) {
+            if (!Double.isFinite(evaluator.clearCost(pos))) {
                 return alternateOrBlocked(context, clearanceEndReason(clearance),
                         clearance.name());
             }
@@ -521,9 +513,6 @@ public final class AutonomousMiningAction implements MaidAction {
             }
         }
 
-        MaidTerrainWorldEvaluator evaluator = new MaidTerrainWorldEvaluator(
-                context.level(), context.maid(), stepFrom, 3, 3, true,
-                ignored -> true, ignored -> constructionEnabled());
         terrainSearch = new MaidTerrainSearch(stepFrom, Set.of(stepTo), evaluator,
                 MAX_EXCAVATION_EXPANSIONS, EnumSet.of(stepKind));
         terrainGoalTargets = Map.of();
@@ -701,6 +690,10 @@ public final class AutonomousMiningAction implements MaidAction {
             realEnd = context.maid().blockPosition().immutable();
             state.recordExcavationStep(0);
             rememberPassagePosition(realEnd);
+            failedPlannerOrigin = realEnd;
+            failedPlannerCandidates.clear();
+            selectedPlannerCandidateId = "";
+            lastPlannerFailure = "none";
             if (followingNaturalPassage) {
                 naturalPassageSteps++;
                 consecutiveNaturalPassageSteps++;
@@ -1042,80 +1035,178 @@ public final class AutonomousMiningAction implements MaidAction {
         return Math.max(0, maxPlacements - placementsUsed);
     }
 
-    private NaturalPassageStep chooseNaturalPassageStep(
+    private boolean plannerConstructionAvailable(MaidActionContext context) {
+        return constructionEnabled()
+                && remainingPlacementBudget() > 0
+                && MaidTerrainBuilder.chooseMaterial(context.maid()).isPresent();
+    }
+
+    private PlannedStep choosePlannedStep(
             MaidActionContext context, BlockPos live) {
-        if (consecutiveNaturalPassageSteps >= MAX_CONSECUTIVE_PASSAGE_STEPS) {
-            return null;
+        if (failedPlannerOrigin == null || !failedPlannerOrigin.equals(live)) {
+            failedPlannerOrigin = live.immutable();
+            failedPlannerCandidates.clear();
+            lastPlannerFailure = "none";
         }
-        int workingY = AutonomousMiningStrategy.targetY(selectorDescription)
-                .orElse(live.getY());
-        boolean shouldDescend = live.getY() > workingY;
-        Direction preferred = activeDirection != null
-                ? activeDirection : resolveDirection(
-                directionMode, context.maid().getDirection());
-        List<Direction> directions = AutonomousMiningStrategy
-                .directionAttempts(preferred);
-        NaturalPassageStep best = null;
-        double bestScore = Double.POSITIVE_INFINITY;
+        Direction preferred = activeDirection == null
+                ? resolveDirection(directionMode, context.maid().getDirection())
+                : activeDirection;
+        List<Direction> directions = directionMode == DirectionMode.AUTO
+                ? AutonomousMiningStrategy.directionAttempts(preferred)
+                : List.of(directionMode.direction);
+        List<ExcavateSegmentAction.Shape> shapes = plannerShapes(live.getY());
+        MaidTerrainWorldEvaluator evaluator = new MaidTerrainWorldEvaluator(
+                context.level(), context.maid(), live, 3, 3, true,
+                ignored -> true,
+                ignored -> plannerConstructionAvailable(context));
+
+        List<MiningPlanner.Candidate> candidates = new ArrayList<>();
+        Map<String, PlannedStep> steps = new LinkedHashMap<>();
+        int attempted = 0;
         for (int directionIndex = 0;
              directionIndex < directions.size(); directionIndex++) {
             Direction direction = directions.get(directionIndex);
-            List<ExcavateSegmentAction.Shape> shapes = shouldDescend
-                    ? List.of(ExcavateSegmentAction.Shape.STAIRCASE_DOWN,
-                    ExcavateSegmentAction.Shape.LEVEL)
-                    : List.of(ExcavateSegmentAction.Shape.LEVEL);
             for (ExcavateSegmentAction.Shape shape : shapes) {
-                BlockPos destination = ExcavateSegmentAction.nextPosition(
-                        live, direction, shape).immutable();
-                if (recentPassagePositions.contains(destination)
-                        || !isOpenNaturalPassageStep(
-                        context, destination, shape)) {
+                attempted++;
+                PlannedStep step = evaluatePlannerCandidate(
+                        context, evaluator, live, preferred,
+                        direction, directionIndex, shape);
+                if (step == null
+                        || failedPlannerCandidates.contains(
+                        step.candidate().id())) {
                     continue;
                 }
-                // Any completely open passage beats excavation. Within that
-                // set, keep descending toward the ore layer, then preserve the
-                // current heading and finally prefer exploring away from the
-                // operation entrance.
-                double score = directionIndex * 2.0D;
-                if (shouldDescend
-                        && shape != ExcavateSegmentAction.Shape.STAIRCASE_DOWN) {
-                    score += 8.0D;
-                }
-                if (origin != null) {
-                    score -= Math.min(4.0D,
-                            Math.sqrt(origin.distSqr(destination)) * 0.05D);
-                }
-                if (score < bestScore) {
-                    bestScore = score;
-                    best = new NaturalPassageStep(direction, shape, destination);
-                }
+                candidates.add(step.candidate());
+                steps.put(step.candidate().id(), step);
             }
         }
-        return best;
+
+        MiningPlanner.Decision decision = miningPlanner.plan(candidates);
+        lastPlannerDecision = plannerDecisionJson(decision, attempted);
+        plannerDecisionCount++;
+        MiningPlanner.Candidate selected = decision.selected().orElse(null);
+        return selected == null ? null : steps.get(selected.id());
     }
 
-    private static boolean isOpenNaturalPassageStep(
-            MaidActionContext context, BlockPos destination,
-            ExcavateSegmentAction.Shape shape) {
-        BlockPos supportPos = destination.below();
-        if (!loadedBuildPosition(context, supportPos)
-                || MaidTerrainWorldEvaluator.assessStandSupport(
-                context.level(), supportPos,
-                context.level().getBlockState(supportPos))
-                != MaidTerrainWorldEvaluator.SupportAssessment.SAFE) {
-            return false;
+    private List<ExcavateSegmentAction.Shape> plannerShapes(int currentY) {
+        if (shapeMode == ShapeMode.LEVEL) {
+            return List.of(ExcavateSegmentAction.Shape.LEVEL);
         }
+        if (shapeMode == ShapeMode.STAIRCASE_DOWN) {
+            return List.of(ExcavateSegmentAction.Shape.STAIRCASE_DOWN);
+        }
+        int workingY = AutonomousMiningStrategy.targetY(selectorDescription)
+                .orElse(currentY);
+        return currentY > workingY
+                ? List.of(ExcavateSegmentAction.Shape.STAIRCASE_DOWN,
+                ExcavateSegmentAction.Shape.LEVEL)
+                : List.of(ExcavateSegmentAction.Shape.LEVEL);
+    }
+
+    private PlannedStep evaluatePlannerCandidate(
+            MaidActionContext context,
+            MaidTerrainWorldEvaluator evaluator,
+            BlockPos live,
+            Direction preferred,
+            Direction direction,
+            int directionIndex,
+            ExcavateSegmentAction.Shape shape) {
+        BlockPos destination = ExcavateSegmentAction.nextPosition(
+                live, direction, shape).immutable();
+        BlockPos support = destination.below();
+        double supportCost = evaluator.supportCost(support);
+        if (!Double.isFinite(supportCost)) {
+            return null;
+        }
+
+        double breakCost = 0.0D;
+        double constructionCost = supportCost > 0.0D ? 1.0D : 0.0D;
+        boolean natural = supportCost == 0.0D;
         for (BlockPos clearance : ExcavateSegmentAction.clearanceFor(
                 destination, shape)) {
-            if (!loadedBuildPosition(context, clearance)
-                    || MaidTerrainWorldEvaluator.assessClearance(
-                    context.level(), clearance,
-                    context.level().getBlockState(clearance))
-                    != MaidTerrainWorldEvaluator.ClearanceAssessment.CLEAR) {
-                return false;
+            double cost = evaluator.clearCost(clearance);
+            if (!Double.isFinite(cost)) {
+                return null;
             }
+            MaidTerrainWorldEvaluator.ClearanceAssessment assessment =
+                    MaidTerrainWorldEvaluator.assessClearance(
+                            context.level(), clearance,
+                            context.level().getBlockState(clearance));
+            if (assessment
+                    == MaidTerrainWorldEvaluator.ClearanceAssessment.WATER_HAZARD) {
+                if (context.level().getFluidState(clearance).is(FluidTags.WATER)) {
+                    constructionCost += cost;
+                } else {
+                    breakCost += cost;
+                    constructionCost += 1.0D;
+                }
+            } else {
+                breakCost += cost;
+            }
+            natural &= cost == 0.0D;
         }
-        return true;
+
+        int currentY = live.getY();
+        int workingY = AutonomousMiningStrategy.targetY(selectorDescription)
+                .orElse(currentY);
+        boolean towardLayer = Math.abs(destination.getY() - workingY)
+                < Math.abs(currentY - workingY);
+        boolean recentlyVisited = recentPassagePositions.contains(destination);
+        double steeringRisk = direction.equals(preferred) ? 0.0D
+                : direction.equals(preferred.getOpposite()) ? 0.15D
+                : 0.03D * Math.max(1, directionIndex);
+        if (natural
+                && consecutiveNaturalPassageSteps
+                >= MAX_CONSECUTIVE_PASSAGE_STEPS) {
+            steeringRisk += 1.0D;
+        }
+        String id = direction.getName() + ":" + shapeWireName(shape);
+        MiningPlanner.Candidate candidate = MiningPlanner.Candidate.builder(
+                        id, direction.getName(), shapeWireName(shape))
+                .breakCost(breakCost)
+                .supportCost(supportCost)
+                .constructionCost(constructionCost)
+                .risk(steeringRisk)
+                .towardTargetLayer(towardLayer)
+                .naturalPassage(natural)
+                .recentlyVisited(recentlyVisited)
+                .build();
+        MaidTerrainStep.Kind kind = shape
+                == ExcavateSegmentAction.Shape.STAIRCASE_DOWN
+                ? MaidTerrainStep.Kind.DESCEND : MaidTerrainStep.Kind.TRAVERSE;
+        return new PlannedStep(direction, shape, destination, kind, candidate);
+    }
+
+    private JsonObject plannerDecisionJson(
+            MiningPlanner.Decision decision, int attempted) {
+        JsonObject json = new JsonObject();
+        json.addProperty("mode", "cost_based");
+        json.addProperty("policy", decision.diagnostics().policy());
+        json.addProperty("reason", decision.diagnostics().reason());
+        json.addProperty("candidates_evaluated", attempted);
+        json.addProperty("candidates_feasible",
+                decision.diagnostics().ranking().size());
+        json.addProperty("candidates_rejected",
+                Math.max(0, attempted - decision.diagnostics().ranking().size()));
+        json.addProperty("previous_failure", lastPlannerFailure);
+        decision.selectedScore().ifPresent(selected -> {
+            MiningPlanner.Candidate candidate = selected.candidate();
+            MiningPlanner.ScoreBreakdown score = selected.score();
+            json.addProperty("choice", candidate.naturalPassage()
+                    ? "natural_passage" : candidate.constructionCost() > 0.0D
+                    ? "terrain_construction" : "excavation");
+            json.addProperty("candidate_id", candidate.id());
+            json.addProperty("direction", candidate.direction());
+            json.addProperty("shape", candidate.shape());
+            json.addProperty("total_cost", score.totalScore());
+            JsonObject costs = new JsonObject();
+            costs.addProperty("estimated_time", score.estimatedTime());
+            costs.addProperty("risk", score.riskPenalty());
+            costs.addProperty("material", score.materialPenalty());
+            costs.addProperty("preference", score.preferenceAdjustment());
+            json.add("costs", costs);
+        });
+        return json;
     }
 
     private void rememberPassagePosition(BlockPos pos) {
@@ -1127,34 +1218,10 @@ public final class AutonomousMiningAction implements MaidAction {
         }
     }
 
-    private ExcavateSegmentAction.Shape resolveShape(MaidActionContext context) {
-        return AutonomousMiningStrategy.chooseShape(
-                shapeMode, selectorDescription,
-                context.maid().blockPosition().getY());
-    }
-
-    private void alignDirectionSweep(BlockPos live, Direction maidFacing) {
-        if (directionSweepOrigin != null && directionSweepOrigin.equals(live)
-                && !directionAttempts.isEmpty()) {
-            activeDirection = directionAttempts.get(directionAttemptIndex);
-            return;
-        }
-        Direction primary = activeDirection == null
-                ? resolveDirection(directionMode, maidFacing) : activeDirection;
-        directionAttempts = directionMode == DirectionMode.AUTO
-                ? AutonomousMiningStrategy.directionAttempts(primary)
-                : List.of(primary);
-        directionAttemptIndex = 0;
-        directionSweepOrigin = live.immutable();
-        activeDirection = directionAttempts.getFirst();
-    }
-
     private MaidActionTickResult alternateOrBlocked(
             MaidActionContext context, ActionEndReason reason, String message) {
         if (directionMode != DirectionMode.AUTO
-                || directionSweepOrigin == null
-                || directionAttemptIndex + 1 >= directionAttempts.size()
-                || !directionSweepOrigin.equals(context.maid().blockPosition())) {
+                && shapeMode != ShapeMode.AUTO) {
             return blocked(context, reason, message);
         }
         if (navigator != null) {
@@ -1163,20 +1230,25 @@ public final class AutonomousMiningAction implements MaidAction {
         }
         terrainSearch = null;
         planningPurpose = null;
-        directionAttemptIndex++;
-        activeDirection = directionAttempts.get(directionAttemptIndex);
+        BlockPos live = context.maid().blockPosition().immutable();
+        if (failedPlannerOrigin == null || !failedPlannerOrigin.equals(live)) {
+            failedPlannerOrigin = live;
+            failedPlannerCandidates.clear();
+        }
+        if (!selectedPlannerCandidateId.isBlank()) {
+            failedPlannerCandidates.add(selectedPlannerCandidateId);
+        }
+        lastPlannerFailure = AutonomousMiningState.normalizeReason(message);
         stepFrom = null;
         stepTo = null;
         stepKind = null;
-        JsonObject detail = detail("alternate_direction");
+        JsonObject detail = detail("planner_replan");
         detail.addProperty("previous_failure",
                 AutonomousMiningState.normalizeReason(message));
-        detail.addProperty("direction_attempt", directionAttemptIndex + 1);
-        if (state.phase() == AutonomousMiningState.Phase.SELECTING_SITE) {
-            report(context, AutonomousMiningState.Phase.SELECTING_SITE, detail);
-        } else {
-            transition(context, AutonomousMiningState.Phase.SELECTING_SITE, detail);
-        }
+        detail.addProperty("rejected_candidate", selectedPlannerCandidateId);
+        detail.addProperty("rejected_candidates_at_origin",
+                failedPlannerCandidates.size());
+        transition(context, AutonomousMiningState.Phase.SELECTING_SITE, detail);
         return MaidActionTickResult.running();
     }
 
@@ -1230,6 +1302,10 @@ public final class AutonomousMiningAction implements MaidAction {
         report.addProperty("route_choice", followingNaturalPassage
                 ? "natural_passage" : "excavation");
         report.addProperty("natural_passage_steps", naturalPassageSteps);
+        report.addProperty("planner_decisions", plannerDecisionCount);
+        if (lastPlannerDecision != null) {
+            report.add("planner_decision", lastPlannerDecision.deepCopy());
+        }
         if (activeDirection != null) {
             report.addProperty("direction", activeDirection.getName());
         }
@@ -1384,6 +1460,11 @@ public final class AutonomousMiningAction implements MaidAction {
                 targetY -> result.addProperty("working_y", targetY));
         result.addProperty("deferred_ore_targets", deferredOreTargets.size());
         result.addProperty("natural_passage_steps", naturalPassageSteps);
+        result.addProperty("planner_decisions", plannerDecisionCount);
+        if (lastPlannerDecision != null) {
+            result.add("last_planner_decision",
+                    lastPlannerDecision.deepCopy());
+        }
         if (lastNavigatorFailure != null) {
             result.add("execution_failure", lastNavigatorFailure.deepCopy());
         }
@@ -1766,9 +1847,11 @@ public final class AutonomousMiningAction implements MaidAction {
     private record ToolCandidate(int slot, double score) {
     }
 
-    private record NaturalPassageStep(
+    private record PlannedStep(
             Direction direction,
             ExcavateSegmentAction.Shape shape,
-            BlockPos destination) {
+            BlockPos destination,
+            MaidTerrainStep.Kind kind,
+            MiningPlanner.Candidate candidate) {
     }
 }

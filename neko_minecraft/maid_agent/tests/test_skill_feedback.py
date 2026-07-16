@@ -72,6 +72,27 @@ class SkillFeedbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(item[1]["ai_behavior"] == "read" for item in plugin.pushes))
         self.assertTrue(all("%" not in item[0] for item in plugin.pushes))
 
+    async def test_progress_exposes_compact_java_planner_choice(self):
+        plugin = FakePlugin()
+        feedback = SkillFeedbackHandler(plugin)
+        await feedback.progress({
+            "skill_id": "planner", "maid_id": "m", "skill_name": "mine_ore",
+            "revision": 3, "status": "WAITING_ACTION", "collected_count": 0,
+            "args": {"target_count": 4},
+            "child_action": {
+                "kind": "autonomous_mining", "stage": "SELECTING_SITE",
+                "detail": {"planner_decision": {
+                    "choice": "natural_passage", "direction": "east",
+                    "shape": "level", "total_cost": 1.25,
+                }},
+            },
+        })
+        text, kwargs = plugin.pushes[0]
+        self.assertEqual("read", kwargs["ai_behavior"])
+        self.assertIn("MiningPlanner 选择 natural_passage", text)
+        self.assertIn("方向 east", text)
+        self.assertNotIn("candidates", text)
+
     async def test_blocked_responds_once_per_revision_and_preserves_suggestions(self):
         plugin = FakePlugin()
         feedback = SkillFeedbackHandler(plugin)

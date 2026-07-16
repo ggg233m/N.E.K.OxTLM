@@ -132,6 +132,17 @@ class ActionFeedbackHandler:
     def _progress_text(record: ActionRecord) -> str:
         kind = _KIND_NAMES.get(record.kind, record.kind or "动作")
         text = f"女仆 Agent 的{kind}动作正在执行，阶段：{record.stage or record.status}。"
+        planner = record.detail.get("planner_decision") \
+            if isinstance(record.detail, dict) else None
+        if isinstance(planner, dict):
+            choice = str(planner.get("choice") or "unknown")
+            direction = str(planner.get("direction") or "unknown")
+            shape = str(planner.get("shape") or "unknown")
+            cost = planner.get("total_cost")
+            text += f" MiningPlanner 选择 {choice}，方向 {direction}，形状 {shape}"
+            if isinstance(cost, (int, float)):
+                text += f"，预计成本 {cost}"
+            text += "。"
         text += "这是执行进度，不要仅因这条进度消息打断玩家。"
         return text
 

@@ -119,6 +119,8 @@ class MaidActionGuidanceTests(unittest.TestCase):
             self.assertIn(value, _TLM_AI_INSTRUCTIONS)
         self.assertIn("不绕过领地保护", skill_text)
         self.assertIn("placement_protected", _TLM_AI_INSTRUCTIONS)
+        self.assertIn("MiningPlanner", skill_text)
+        self.assertIn("综合预计成本", _TLM_AI_INSTRUCTIONS)
 
     def test_guidance_requires_a_concrete_llm_recovery_plan(self):
         self.assertIn("具体解决方案", _TLM_AI_INSTRUCTIONS)

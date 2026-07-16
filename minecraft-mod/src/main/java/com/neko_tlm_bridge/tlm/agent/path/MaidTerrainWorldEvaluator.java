@@ -105,8 +105,8 @@ public final class MaidTerrainWorldEvaluator implements MaidTerrainNodeEvaluator
         }
         BlockState state = level.getBlockState(pos);
         ClearanceAssessment assessment = assessClearance(level, pos, state);
-        boolean sealableWater = assessment == ClearanceAssessment.WATER_HAZARD
-                && state.canBeReplaced() && constructionPolicy.test(pos);
+        int waterSeals = sealableWaterExposureCount(pos, state, assessment);
+        boolean sealableWater = waterSeals > 0;
         if (!sealableWater
                 && assessment != ClearanceAssessment.CLEAR
                 && assessment != ClearanceAssessment.BREAKABLE) {
@@ -122,7 +122,7 @@ public final class MaidTerrainWorldEvaluator implements MaidTerrainNodeEvaluator
 
         if (sealableWater && !state.getFluidState().isEmpty()
                 && state.getCollisionShape(level, pos).isEmpty()) {
-            return 24.0D;
+            return 24.0D * waterSeals;
         }
         float hardness = state.getDestroySpeed(level, pos);
 
@@ -137,7 +137,36 @@ public final class MaidTerrainWorldEvaluator implements MaidTerrainNodeEvaluator
         double ticks = hardness == 0.0F
                 ? 1.0D
                 : Math.ceil(hardness * divisor / Math.max(1.0D, tool.speed()));
-        return Math.max(1.0D, ticks) + (sealableWater ? 24.0D : 0.0D);
+        return Math.max(1.0D, ticks) + 24.0D * waterSeals;
+    }
+
+    private int sealableWaterExposureCount(
+            BlockPos pos, BlockState state, ClearanceAssessment assessment) {
+        if (assessment != ClearanceAssessment.WATER_HAZARD) {
+            return 0;
+        }
+        if (state.getFluidState().is(FluidTags.WATER)) {
+            return state.canBeReplaced() && constructionPolicy.test(pos) ? 1 : 0;
+        }
+        int count = 0;
+        for (Direction direction : FLUID_EXPOSURE_DIRECTIONS) {
+            BlockPos adjacent = pos.relative(direction);
+            if (adjacent.getY() < level.getMinBuildHeight()
+                    || adjacent.getY() >= level.getMaxBuildHeight()
+                    || !level.hasChunkAt(adjacent)) {
+                return 0;
+            }
+            BlockState adjacentState = level.getBlockState(adjacent);
+            if (!adjacentState.getFluidState().is(FluidTags.WATER)) {
+                continue;
+            }
+            if (!adjacentState.canBeReplaced()
+                    || !constructionPolicy.test(adjacent)) {
+                return 0;
+            }
+            count++;
+        }
+        return count;
     }
 
     @Override

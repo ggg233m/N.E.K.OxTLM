@@ -184,10 +184,33 @@ def _progress_text(run: Mapping[str, Any]) -> str:
         if isinstance(run.get("args"), Mapping) else 0
     stage = str(child.get("stage") or result.get("stage") or run.get("status") or "RUNNING")
     kind = str(child.get("kind") or "内部动作")
-    return (
+    text = (
         f"女仆 Skill {run.get('skill_name') or '任务'} 正在执行，内部动作：{kind}，阶段：{stage}，"
         f"已采集 {collected}/{target if target > 0 else '?'} 个目标方块。"
         "这是内部进度，不要仅因本消息打断玩家或另行启动动作。"
+    )
+    detail = child.get("detail") if isinstance(child.get("detail"), Mapping) else {}
+    planner = detail.get("planner_decision") \
+        if isinstance(detail.get("planner_decision"), Mapping) else None
+    if planner is None:
+        java_progress = result.get("java_progress") \
+            if isinstance(result.get("java_progress"), Mapping) else {}
+        planner = java_progress.get("planner_decision") \
+            if isinstance(java_progress.get("planner_decision"), Mapping) else None
+    return text + _planner_progress_summary(planner)
+
+
+def _planner_progress_summary(planner: Any) -> str:
+    if not isinstance(planner, Mapping):
+        return ""
+    choice = str(planner.get("choice") or "unknown")
+    direction = str(planner.get("direction") or "unknown")
+    shape = str(planner.get("shape") or "unknown")
+    cost = planner.get("total_cost")
+    cost_text = f"，预计成本 {cost}" if isinstance(cost, (int, float)) else ""
+    return (
+        f" 本轮 Java MiningPlanner 选择 {choice}，方向 {direction}，形状 {shape}{cost_text}；"
+        "这是服务端成本规划结果，不要逐格改写路线。"
     )
 
 
