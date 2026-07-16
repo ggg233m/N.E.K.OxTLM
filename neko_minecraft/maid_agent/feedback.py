@@ -11,6 +11,7 @@ from .models import ActionRecord
 _KIND_NAMES = {
     "navigate": "寻路",
     "harvest_blocks": "采集",
+    "autonomous_mining": "自主挖矿",
     "attack": "攻击",
 }
 

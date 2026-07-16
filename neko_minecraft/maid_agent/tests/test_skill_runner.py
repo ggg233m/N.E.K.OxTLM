@@ -17,11 +17,26 @@ from neko_minecraft.maid_agent.skills.base import (
     StartAction,
 )
 from neko_minecraft.maid_agent.skills.checkpoint import SkillCheckpointStore
+from neko_minecraft.maid_agent.skills.mine_ore import MineOreSkill
 from neko_minecraft.maid_agent.skills.runner import SkillRunner
+from neko_minecraft.maid_agent.skill_feedback import SkillFeedbackHandler
 
 
 class FakePlugin:
     connected = True
+
+
+class FlakyPushPlugin(FakePlugin):
+    def __init__(self, failures):
+        self.failures = int(failures)
+        self.attempts = 0
+        self.pushes = []
+
+    async def _push_minecraft_context(self, text, **kwargs):
+        self.attempts += 1
+        if self.attempts <= self.failures:
+            raise RuntimeError("temporary context delivery failure")
+        self.pushes.append((text, kwargs))
 
 
 class FakeFeedback:
@@ -265,6 +280,59 @@ class SkillRunnerTests(unittest.IsolatedAsyncioTestCase):
             await runner.reconcile()
             self.assertEqual(1, len(feedback.blocked_runs))
             self.assertEqual([], runner.list_skills(include_terminal=False))
+            await runner.close()
+
+    async def test_autonomous_blocked_feedback_retries_after_delivery_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            plugin = FlakyPushPlugin(failures=3)
+            client = FakeActionClient(directory)
+            feedback = SkillFeedbackHandler(plugin)
+            runner = SkillRunner(
+                plugin, client, directory, feedback=feedback
+            )
+            runner.register(MineOreSkill())
+            started = await runner.start("mine_ore", "maid", {
+                "selector": {
+                    "type": "tag", "id": "minecraft:diamond_ores",
+                },
+                "target_count": 1,
+                "target_metric": "blocks_harvested",
+            })
+            action_id = started["current_action_id"]
+            terminal = {
+                "action_id": action_id,
+                "maid_id": "maid",
+                "generation": 1,
+                "sequence": 46,
+                "kind": "autonomous_mining",
+                "status": "FAILED",
+                "stage": "FAILED",
+                "end_reason": "STUCK",
+                "result": {
+                    "phase": "BLOCKED",
+                    "blocked_reason":
+                        "maid_moved_above_controlled_descend_origin",
+                    "decision_required": True,
+                    "collected_count": 0,
+                    "target_count": 1,
+                },
+            }
+            consumed = await runner.on_action_event(
+                "maid_action_finished", terminal, terminal
+            )
+            self.assertTrue(consumed)
+            await wait_until(
+                lambda: bool(plugin.pushes)
+                and runner.get_status(started["skill_id"])[
+                    "blocked_notification_revision"
+                ] > 0,
+                timeout=6,
+            )
+            snapshot = runner.get_status(started["skill_id"])
+            self.assertEqual("BLOCKED", snapshot["status"])
+            self.assertEqual(4, plugin.attempts)
+            self.assertEqual("respond", plugin.pushes[0][1]["ai_behavior"])
+            self.assertIn("必须基于", plugin.pushes[0][0])
             await runner.close()
 
     async def test_load_reclaims_child_and_reconcile_adopts_server_snapshot(self):

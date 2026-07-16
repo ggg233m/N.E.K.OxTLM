@@ -41,6 +41,7 @@ public final class MaidTerrainNavigator {
     private static final double MIN_CONTROLLED_DESCEND_SPEED = 0.10D;
     private static final double MAX_CONTROLLED_DESCEND_SPEED = 0.18D;
     private static final double DESCEND_CENTER_TOLERANCE = 0.12D;
+    private static final long CONTROLLED_DESCEND_UPWARD_RECOVERY_TICKS = 10L;
 
     private final MaidTerrainPath terrainPath;
     private final HandLease handLease;
@@ -62,6 +63,7 @@ public final class MaidTerrainNavigator {
     private boolean started;
     private boolean terminal;
     private long arrivalSettleStartedAt = Long.MIN_VALUE;
+    private long controlledDescendRecoveryStartedAt = Long.MIN_VALUE;
     private String phase = "pending";
     private ActionEndReason lastFailure;
 
@@ -410,6 +412,34 @@ public final class MaidTerrainNavigator {
                     "invalid_controlled_descend_geometry", false);
         }
         BlockPos live = context.maid().blockPosition();
+        if (isRecoverableControlledDescendUpwardDisplacement(
+                step, live, context.maid().onGround(), movementStarted)) {
+            if (controlledDescendRecoveryStartedAt == Long.MIN_VALUE) {
+                controlledDescendRecoveryStartedAt = context.gameTime();
+            }
+            if (context.gameTime() - controlledDescendRecoveryStartedAt
+                    >= CONTROLLED_DESCEND_UPWARD_RECOVERY_TICKS) {
+                return fail(context, ActionEndReason.STUCK,
+                        "controlled_descend_upward_recovery_timed_out", true);
+            }
+            stopNativeNavigation(context);
+            Vec3 velocity = context.maid().getDeltaMovement();
+            // Cancel a residual jump/MoveControl impulse and let collision plus
+            // gravity return the maid to the validated source cell. Never
+            // steer horizontally from the unplanned elevation.
+            context.maid().setDeltaMovement(
+                    0.0D, Math.min(0.0D, velocity.y), 0.0D);
+            phase = "recovering_above_descend_origin";
+            JsonObject detail = stepDetail(step);
+            detail.addProperty("movement_controller",
+                    "controlled_descend_upward_recovery");
+            detail.addProperty("recovery_ticks", Math.max(0L,
+                    context.gameTime() - controlledDescendRecoveryStartedAt));
+            return running(detail);
+        }
+        if (live.equals(step.from())) {
+            controlledDescendRecoveryStartedAt = Long.MIN_VALUE;
+        }
         if (sameHorizontalColumn(live, step.from())) {
             if (live.getY() != step.from().getY()) {
                 return fail(context, ActionEndReason.STUCK,
@@ -494,6 +524,15 @@ public final class MaidTerrainNavigator {
                 && dx + dz == 1;
     }
 
+    static boolean isRecoverableControlledDescendUpwardDisplacement(
+            MaidTerrainStep step, BlockPos live, boolean onGround,
+            boolean movementStarted) {
+        return movementStarted
+                && !onGround
+                && sameHorizontalColumn(live, step.from())
+                && live.getY() == step.from().getY() + 1;
+    }
+
     private static boolean isControlledDescendPosition(MaidTerrainStep step, BlockPos live) {
         if (live.getY() < step.to().getY() || live.getY() > step.from().getY()) {
             return false;
@@ -520,6 +559,7 @@ public final class MaidTerrainNavigator {
         movementStarted = false;
         movementStartDistance = 0.0D;
         arrivalSettleStartedAt = Long.MIN_VALUE;
+        controlledDescendRecoveryStartedAt = Long.MIN_VALUE;
         phase = "step_complete";
     }
 

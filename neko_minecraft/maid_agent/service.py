@@ -76,16 +76,33 @@ class MaidActionService:
             if callable(claims):
                 claimed = bool(claims(record.action_id))
 
+        consumed = False
         if claimed and consumer is not None:
             callback = getattr(consumer, "on_action_event", None)
             if callable(callback):
-                await callback(event_type, record.as_dict(), dict(payload or {}))
+                try:
+                    callback_result = await callback(
+                        event_type, record.as_dict(), dict(payload or {})
+                    )
+                    # Existing consumers that return None historically mean
+                    # "consumed". A deliberate False means the owner/checkpoint
+                    # was missing, so terminal feedback must fall back to the
+                    # ordinary LLM path instead of disappearing silently.
+                    consumed = callback_result is not False
+                except Exception as exc:
+                    logger = getattr(self.plugin, "logger", None)
+                    if logger is not None:
+                        logger.exception(
+                            "[MaidAgent] skill event consumer failed for %s: %s",
+                            record.action_id, exc,
+                        )
 
-        internal = claimed and (owner is None or owner[1] == "internal")
+        internal = consumed and (owner is None or owner[1] == "internal")
         if not internal:
             if event_type == "maid_action_finished" or record.status in TERMINAL_STATUSES:
                 await self.feedback.finished(record)
-            elif bool(payload.get("requires_decision", False)):
+            elif bool(payload.get("requires_decision", False)
+                      or payload.get("decision_required", False)):
                 await self.feedback.decision_required(record)
             else:
                 await self.feedback.progress(record)

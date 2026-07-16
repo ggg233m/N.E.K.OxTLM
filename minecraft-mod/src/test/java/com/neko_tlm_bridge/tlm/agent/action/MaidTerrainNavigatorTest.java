@@ -30,6 +30,29 @@ class MaidTerrainNavigatorTest {
     }
 
     @Test
+    void controlledDescendOnlyRecoversTransientUpwardImpulseAtSource() {
+        BlockPos from = new BlockPos(4, 20, 7);
+        MaidTerrainStep descend = step(
+                MaidTerrainStep.Kind.DESCEND, from, new BlockPos(5, 19, 7));
+
+        assertTrue(MaidTerrainNavigator
+                .isRecoverableControlledDescendUpwardDisplacement(
+                        descend, from.above(), false, true));
+        assertFalse(MaidTerrainNavigator
+                .isRecoverableControlledDescendUpwardDisplacement(
+                        descend, from.above(), false, false));
+        assertFalse(MaidTerrainNavigator
+                .isRecoverableControlledDescendUpwardDisplacement(
+                        descend, from.above(), true, true));
+        assertFalse(MaidTerrainNavigator
+                .isRecoverableControlledDescendUpwardDisplacement(
+                        descend, from.above(2), false, true));
+        assertFalse(MaidTerrainNavigator
+                .isRecoverableControlledDescendUpwardDisplacement(
+                        descend, new BlockPos(5, 21, 7), false, true));
+    }
+
+    @Test
     void localNavigationEdgeClassifierCoversEveryExecutorDiagnostic() {
         assertTrue(HarvestBlocksAction.isLocalNavigationEdgeFailure(
                 "native_navigation_cannot_reach_terrain_step"));

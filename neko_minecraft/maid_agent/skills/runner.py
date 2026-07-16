@@ -29,6 +29,7 @@ ACTION_TERMINAL_STATUSES = frozenset({
     "TIMEOUT",
 })
 REPLACEMENT_CANCEL_TIMEOUT = 10.0
+BLOCKED_NOTIFICATION_RETRY_DELAYS = (0.5, 1.5, 5.0)
 
 
 class SkillRunner:
@@ -50,6 +51,8 @@ class SkillRunner:
         self._maid_locks: Dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self._drive_tasks: Dict[str, asyncio.Task] = {}
         self._feedback_tasks: set[asyncio.Task] = set()
+        self._notification_retry_tasks: Dict[str, asyncio.Task] = {}
+        self._notification_retry_counts: Dict[str, int] = {}
         self._terminal_events: Dict[str, asyncio.Event] = {}
         self._starts_inflight: set[str] = set()
         self._starting_maids: set[str] = set()
@@ -347,6 +350,10 @@ class SkillRunner:
             unregister(self)
         tasks = [task for task in self._drive_tasks.values() if not task.done()]
         tasks.extend(task for task in self._feedback_tasks if not task.done())
+        tasks.extend(
+            task for task in self._notification_retry_tasks.values()
+            if not task.done()
+        )
         for task in tasks:
             task.cancel()
         if tasks:
@@ -717,16 +724,81 @@ class SkillRunner:
     async def _ensure_drive(self, skill_id: str):
         task = self._drive_tasks.get(skill_id)
         if task is None or task.done():
-            task = asyncio.create_task(self._drive(skill_id))
-            self._drive_tasks[skill_id] = task
+            task = self._create_drive_task(skill_id)
         return await task
 
     def _ensure_drive_background(self, skill_id: str):
         task = self._drive_tasks.get(skill_id)
         if task is None or task.done():
-            task = asyncio.create_task(self._drive(skill_id))
-            self._drive_tasks[skill_id] = task
+            task = self._create_drive_task(skill_id)
         return task
+
+    def _create_drive_task(self, skill_id: str):
+        task = asyncio.create_task(self._drive(skill_id))
+        self._drive_tasks[skill_id] = task
+        task.add_done_callback(
+            lambda completed, key=skill_id: self._drive_task_done(key, completed)
+        )
+        return task
+
+    def _drive_task_done(self, skill_id: str, task: asyncio.Task):
+        if task.cancelled():
+            return
+        try:
+            exception = task.exception()
+        except (asyncio.CancelledError, Exception):
+            return
+        run = self._runs.get(skill_id)
+        if exception is None:
+            if run is None or run.blocked_notification_revision > 0:
+                self._notification_retry_counts.pop(skill_id, None)
+            return
+
+        logger = getattr(self.plugin, "logger", None)
+        if logger is not None:
+            logger.error(
+                "[MaidSkill] background drive failed for %s: %s",
+                skill_id, exception,
+            )
+        if (self._closed or run is None or run.status != "BLOCKED"
+                or run.blocked_notification_revision > 0):
+            return
+        attempt = self._notification_retry_counts.get(skill_id, 0)
+        if attempt >= len(BLOCKED_NOTIFICATION_RETRY_DELAYS):
+            return
+        existing = self._notification_retry_tasks.get(skill_id)
+        if existing is not None and not existing.done():
+            return
+        self._notification_retry_counts[skill_id] = attempt + 1
+        retry = asyncio.create_task(self._retry_blocked_notification(
+            skill_id, BLOCKED_NOTIFICATION_RETRY_DELAYS[attempt]
+        ))
+        self._notification_retry_tasks[skill_id] = retry
+        retry.add_done_callback(
+            lambda completed, key=skill_id:
+            self._notification_retry_done(key, completed)
+        )
+
+    async def _retry_blocked_notification(self, skill_id: str, delay: float):
+        await asyncio.sleep(delay)
+        run = self._runs.get(skill_id)
+        if (self._closed or run is None or run.status != "BLOCKED"
+                or run.blocked_notification_revision > 0):
+            return
+        current = asyncio.current_task()
+        if self._notification_retry_tasks.get(skill_id) is current:
+            self._notification_retry_tasks.pop(skill_id, None)
+        self._ensure_drive_background(skill_id)
+
+    def _notification_retry_done(self, skill_id: str, task: asyncio.Task):
+        if self._notification_retry_tasks.get(skill_id) is task:
+            self._notification_retry_tasks.pop(skill_id, None)
+        if task.cancelled():
+            return
+        try:
+            task.exception()
+        except (asyncio.CancelledError, Exception):
+            pass
 
     def _remember_claim(self, run: SkillRun):
         if not run.current_action_id:

@@ -44,6 +44,12 @@ class FakeSkillConsumer:
         self.events.append((event_type, record, payload))
 
 
+class RejectingSkillConsumer(FakeSkillConsumer):
+    async def on_action_event(self, event_type, record, payload):
+        self.events.append((event_type, record, payload))
+        return False
+
+
 class MaidActionServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_skill_owned_child_action_suppresses_regular_llm_feedback(self):
         plugin = FakePlugin()
@@ -63,6 +69,35 @@ class MaidActionServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(1, len(consumer.events))
         self.assertEqual([], plugin.pushes)
+
+    async def test_unconsumed_internal_terminal_falls_back_to_llm_feedback(self):
+        plugin = FakePlugin()
+        service = MaidActionService(plugin)
+        consumer = RejectingSkillConsumer()
+        service.register_event_consumer(consumer)
+        service.claim_action("a", "missing-skill", feedback_policy="internal")
+
+        await service.handle_message({
+            "type": "maid_action_finished",
+            "data": {
+                "action_id": "a", "maid_id": "m", "generation": 1,
+                "sequence": 46, "kind": "autonomous_mining",
+                "status": "FAILED", "stage": "FAILED",
+                "end_reason": "STUCK",
+                "result": {
+                    "phase": "BLOCKED",
+                    "blocked_reason": "controlled_descend_failed",
+                    "decision_required": True,
+                },
+            },
+        })
+
+        self.assertEqual(1, len(consumer.events))
+        self.assertEqual(1, len(plugin.pushes))
+        text, kwargs = plugin.pushes[0]
+        self.assertEqual("respond", kwargs["ai_behavior"])
+        self.assertIn("自主挖矿", text)
+        self.assertIn("必须给出一个具体方案", text)
 
     async def test_progress_is_throttled_but_stage_change_is_immediate(self):
         plugin = FakePlugin()
@@ -398,6 +433,20 @@ class MaidActionServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("respond", plugin.pushes[0][1]["ai_behavior"])
         self.assertIn("必须基于服务端事实给出", plugin.pushes[0][0])
         self.assertIn("立即调用相应工具执行", plugin.pushes[0][0])
+
+    async def test_decision_required_alias_uses_respond(self):
+        plugin = FakePlugin()
+        service = MaidActionService(plugin)
+        await service.handle_message({
+            "type": "maid_action_progress",
+            "data": {
+                "action_id": "decision-alias", "maid_id": "m",
+                "generation": 1, "sequence": 4,
+                "kind": "autonomous_mining", "status": "RUNNING",
+                "stage": "blocked", "decision_required": True,
+            },
+        })
+        self.assertEqual("respond", plugin.pushes[0][1]["ai_behavior"])
 
     async def test_reconcile_adopts_server_action_and_marks_missing_local_lost(self):
         plugin = FakePlugin(responses=[
