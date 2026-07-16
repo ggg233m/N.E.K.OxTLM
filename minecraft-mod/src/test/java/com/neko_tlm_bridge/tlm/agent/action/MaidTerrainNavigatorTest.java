@@ -3,6 +3,7 @@ package com.neko_tlm_bridge.tlm.agent.action;
 import com.neko_tlm_bridge.tlm.agent.path.MaidTerrainStep;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.world.level.block.Blocks;
 import org.junit.jupiter.api.Test;
 
 import java.util.EnumSet;
@@ -50,6 +51,20 @@ class MaidTerrainNavigatorTest {
         assertFalse(MaidTerrainNavigator
                 .isRecoverableControlledDescendUpwardDisplacement(
                         descend, new BlockPos(5, 21, 7), false, true));
+    }
+
+    @Test
+    void fallingBlockClassifierOnlyAdmitsGravityBlocks() {
+        assertTrue(MaidTerrainNavigator.isFallingBlockState(
+                Blocks.SAND.defaultBlockState()));
+        assertTrue(MaidTerrainNavigator.isFallingBlockState(
+                Blocks.GRAVEL.defaultBlockState()));
+        assertTrue(MaidTerrainNavigator.isFallingBlockState(
+                Blocks.WHITE_CONCRETE_POWDER.defaultBlockState()));
+        assertFalse(MaidTerrainNavigator.isFallingBlockState(
+                Blocks.STONE.defaultBlockState()));
+        assertFalse(MaidTerrainNavigator.isFallingBlockState(
+                Blocks.DIAMOND_ORE.defaultBlockState()));
     }
 
     @Test

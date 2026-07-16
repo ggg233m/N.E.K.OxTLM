@@ -87,7 +87,6 @@ public final class AutonomousMiningAction implements MaidAction {
     private int directionAttemptIndex;
     private BlockPos directionSweepOrigin;
     private int stepsInCurrentSegment;
-    private int currentStepCleared;
     private boolean started;
 
     private HandLease handLease;
@@ -392,7 +391,6 @@ public final class AutonomousMiningAction implements MaidAction {
                 stepFrom, activeDirection, activeShape).immutable();
         stepKind = activeShape == ExcavateSegmentAction.Shape.STAIRCASE_DOWN
                 ? MaidTerrainStep.Kind.DESCEND : MaidTerrainStep.Kind.TRAVERSE;
-        currentStepCleared = 0;
 
         List<BlockPos> inspected = new ArrayList<>(
                 ExcavateSegmentAction.clearanceFor(stepTo, activeShape));
@@ -491,7 +489,7 @@ public final class AutonomousMiningAction implements MaidAction {
                 return blocked(context, ActionEndReason.INTERNAL_ERROR,
                         "route_cleared_ore_invariant_breached");
             }
-            currentStepCleared++;
+            state.recordRouteClearance(1);
         }
         if (tick.outcome() == MaidTerrainNavigator.Outcome.FAILED) {
             navigator = null;
@@ -502,7 +500,7 @@ public final class AutonomousMiningAction implements MaidAction {
             navigator = null;
             planningPurpose = null;
             realEnd = context.maid().blockPosition().immutable();
-            state.recordExcavationStep(currentStepCleared);
+            state.recordExcavationStep(0);
             stepsInCurrentSegment++;
             transition(context, AutonomousMiningState.Phase.SCANNING,
                     stepDetail("step_complete"));
@@ -793,7 +791,6 @@ public final class AutonomousMiningAction implements MaidAction {
         stepFrom = null;
         stepTo = null;
         stepKind = null;
-        currentStepCleared = 0;
         JsonObject detail = detail("alternate_direction");
         detail.addProperty("previous_failure",
                 AutonomousMiningState.normalizeReason(message));

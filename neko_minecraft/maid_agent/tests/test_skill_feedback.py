@@ -16,6 +16,16 @@ class FakePlugin:
         self.pushes.append((text, kwargs))
 
 
+class ReceiptPlugin(FakePlugin):
+    def __init__(self, receipts):
+        super().__init__()
+        self.receipts = list(receipts)
+
+    async def _push_minecraft_context(self, text, **kwargs):
+        self.pushes.append((text, kwargs))
+        return self.receipts.pop(0)
+
+
 class Clock:
     def __init__(self):
         self.value = 0.0
@@ -25,6 +35,18 @@ class Clock:
 
 
 class SkillFeedbackTests(unittest.IsolatedAsyncioTestCase):
+    async def test_false_enqueue_receipt_is_retried_before_marking_delivered(self):
+        plugin = ReceiptPlugin([False, True])
+        feedback = SkillFeedbackHandler(plugin)
+        delivered = await feedback.blocked({
+            "skill_id": "receipt", "skill_name": "mine_ore",
+            "revision": 2, "blocked_notification_revision": 0,
+            "status": "BLOCKED", "last_failure_reason": "SAND",
+            "result": {"decision_required": True},
+        })
+        self.assertTrue(delivered)
+        self.assertEqual(2, len(plugin.pushes))
+
     async def test_progress_is_read_and_throttled_by_child_stage(self):
         plugin = FakePlugin()
         clock = Clock()

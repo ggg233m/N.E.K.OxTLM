@@ -15,7 +15,7 @@ class MinecraftPushRouter:
 
     async def push(self, text, ai_behavior="read", priority=1, metadata=None, aggregate=None, coalesce_key=None):
         if not text:
-            return
+            return False
         if aggregate is None:
             aggregate = ai_behavior == "read" and priority <= 2
         if aggregate:
@@ -23,10 +23,13 @@ class MinecraftPushRouter:
             self._plugin._playmate_debug.record("push", route="aggregate_pending", ai_behavior=ai_behavior, priority=priority, pending=len(self._pending_low), text=str(text)[:160])
             if self._aggregate_window <= 0:
                 await self._flush_pending()
-                return
+                return True
             self._ensure_flush_task()
-            return
-        self._direct_push(text, ai_behavior=ai_behavior, priority=priority, metadata=metadata, coalesce_key=coalesce_key)
+            return True
+        return self._direct_push(
+            text, ai_behavior=ai_behavior, priority=priority,
+            metadata=metadata, coalesce_key=coalesce_key,
+        )
 
     def recent_push_count(self, window_seconds=60):
         now = time.time()
@@ -95,7 +98,7 @@ class MinecraftPushRouter:
     def _direct_push(self, text, ai_behavior="read", priority=1, metadata=None, coalesce_key=None):
         self._push_times.append(time.time())
         self._plugin._playmate_debug.record("push", route="direct", ai_behavior=ai_behavior, priority=priority, coalesce_key=coalesce_key, text=str(text)[:160])
-        self._plugin.push_message(
+        result = self._plugin.push_message(
             source="minecraft",
             ai_behavior=ai_behavior,
             parts=[{"type": "text", "text": text}],
@@ -103,6 +106,13 @@ class MinecraftPushRouter:
             priority=priority,
             coalesce_key=coalesce_key,
         )
+        queued = result is not False
+        self._plugin._playmate_debug.record(
+            "push", route="direct_enqueue_result", queued=queued,
+            ai_behavior=ai_behavior, priority=priority,
+            coalesce_key=coalesce_key,
+        )
+        return queued
 
     def _trim_push_times(self, now, window_seconds):
         while self._push_times and now - self._push_times[0] > window_seconds:

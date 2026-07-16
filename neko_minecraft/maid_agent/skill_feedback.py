@@ -90,6 +90,13 @@ class SkillFeedbackHandler:
             aggregate=False,
             coalesce_key=None,
         )
+        logger = getattr(self._plugin, "logger", None)
+        if logger is not None:
+            logger.info(
+                "[MaidSkill] blocked feedback queued feedback_id=%s reason=%s",
+                f"skill:{skill_id}:blocked:{revision}",
+                str(run.get("last_failure_reason") or "BLOCKED"),
+            )
         self._blocked_sent.add(key)
         self._last_progress.pop(skill_id, None)
         return True
@@ -121,6 +128,12 @@ class SkillFeedbackHandler:
             aggregate=False,
             coalesce_key=None,
         )
+        logger = getattr(self._plugin, "logger", None)
+        if logger is not None:
+            logger.info(
+                "[MaidSkill] terminal feedback queued feedback_id=%s status=%s",
+                f"skill:{skill_id}:terminal:{revision}", status,
+            )
         self._finished_sent.add(key)
         self._last_progress.pop(skill_id, None)
         return True
@@ -130,9 +143,17 @@ class SkillFeedbackHandler:
             if delay:
                 await asyncio.sleep(delay)
             try:
-                await self._plugin._push_minecraft_context(text, **kwargs)
+                queued = await self._plugin._push_minecraft_context(text, **kwargs)
+                if queued is False:
+                    raise RuntimeError("Minecraft context push was not queued")
                 return
-            except Exception:
+            except Exception as exc:
+                logger = getattr(self._plugin, "logger", None)
+                if logger is not None:
+                    logger.warning(
+                        "[MaidSkill] feedback enqueue failed attempt=%s/3: %s",
+                        attempt + 1, exc,
+                    )
                 if attempt == 2:
                     raise
 

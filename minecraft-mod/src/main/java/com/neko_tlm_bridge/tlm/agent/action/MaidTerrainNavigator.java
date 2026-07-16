@@ -10,11 +10,14 @@ import com.neko_tlm_bridge.tlm.agent.path.MaidTerrainStep;
 import com.neko_tlm_bridge.tlm.agent.path.MaidTerrainWorldEvaluator;
 import com.neko_tlm_bridge.tlm.agent.runtime.HandLease;
 import net.minecraft.core.BlockPos;
+import net.minecraft.world.entity.item.FallingBlockEntity;
 import net.minecraft.world.entity.ai.behavior.BlockPosTracker;
 import net.minecraft.world.entity.ai.memory.MemoryModuleType;
+import net.minecraft.world.level.block.FallingBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.pathfinder.Node;
 import net.minecraft.world.level.pathfinder.Path;
+import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 
 import java.util.ArrayDeque;
@@ -42,6 +45,9 @@ public final class MaidTerrainNavigator {
     private static final double MAX_CONTROLLED_DESCEND_SPEED = 0.18D;
     private static final double DESCEND_CENTER_TOLERANCE = 0.12D;
     private static final long CONTROLLED_DESCEND_UPWARD_RECOVERY_TICKS = 10L;
+    private static final int FALLING_CLEARANCE_STABLE_TICKS = 3;
+    private static final long FALLING_CLEARANCE_SETTLE_TIMEOUT_TICKS = 80L;
+    private static final int FALLING_ENTITY_SCAN_HEIGHT = 16;
 
     private final MaidTerrainPath terrainPath;
     private final HandLease handLease;
@@ -64,6 +70,11 @@ public final class MaidTerrainNavigator {
     private boolean terminal;
     private long arrivalSettleStartedAt = Long.MIN_VALUE;
     private long controlledDescendRecoveryStartedAt = Long.MIN_VALUE;
+    private long fallingClearanceWaitStartedAt = Long.MIN_VALUE;
+    private int fallingClearanceStableTicks;
+    private int fallingBlocksCleared;
+    private boolean fallingClearanceObserved;
+    private boolean fallingStabilizationRequired;
     private String phase = "pending";
     private ActionEndReason lastFailure;
 
@@ -129,14 +140,28 @@ public final class MaidTerrainNavigator {
 
         if (pendingBreaks.isEmpty() && breakIndex == 0 && !step.toBreak().isEmpty()) {
             pendingBreaks = new ArrayList<>(step.toBreak());
-            pendingBreaks.sort(Comparator.comparingDouble(
-                    pos -> context.maid().getEyePosition().distanceToSqr(Vec3.atCenterOf(pos))));
+            sortPendingBreaks(context, pendingBreaks);
+        }
+
+        if (fallingStabilizationRequired) {
+            TickResult fallingClearance = stabilizeFallingClearance(context, step);
+            if (fallingClearance != null) {
+                publishDebug(context, false);
+                return fallingClearance;
+            }
+            fallingStabilizationRequired = false;
         }
 
         TickResult clearing = clearNextObstacle(context, step);
         if (clearing != null) {
             publishDebug(context, false);
             return clearing;
+        }
+
+        TickResult fallingClearance = stabilizeFallingClearance(context, step);
+        if (fallingClearance != null) {
+            publishDebug(context, false);
+            return fallingClearance;
         }
 
         TickResult movement = moveToStepDestination(context, step);
@@ -189,6 +214,7 @@ public final class MaidTerrainNavigator {
         detail.addProperty("steps_completed", stepIndex);
         detail.addProperty("current_step", Math.min(stepIndex, terrainPath.steps().size()));
         detail.addProperty("cleared_blocks", clearedBlocks.size());
+        detail.addProperty("falling_blocks_cleared", fallingBlocksCleared);
         detail.addProperty("path_cost", terrainPath.totalCost());
         detail.addProperty("expanded_nodes", terrainPath.expandedNodes());
         detail.addProperty("target_x", terrainPath.target().getX());
@@ -238,8 +264,18 @@ public final class MaidTerrainNavigator {
 
             breaker = null;
             breakIndex++;
-            if (clearedBlocks.add(pos.immutable())) {
-                clearedEvents.addLast(new ClearedBlock(pos, expected));
+            clearedBlocks.add(pos.immutable());
+            // A sand/gravel column can place several physical blocks at the
+            // same position. Emit every committed break for durability/drop
+            // accounting; clearedBlocks remains the unique-position view used
+            // by route diagnostics.
+            clearedEvents.addLast(new ClearedBlock(pos, expected));
+            if (isFallingBlockState(expected)) {
+                fallingClearanceObserved = true;
+                fallingClearanceWaitStartedAt = context.gameTime();
+                fallingClearanceStableTicks = 0;
+                fallingBlocksCleared++;
+                fallingStabilizationRequired = true;
             }
             JsonObject detail = stepDetail(step);
             detail.addProperty("cleared_x", pos.getX());
@@ -248,6 +284,137 @@ public final class MaidTerrainNavigator {
             return running(detail);
         }
         return null;
+    }
+
+    /**
+     * Keeps the maid at the terrain-step origin while gravity blocks settle.
+     * Only a FallingBlock that belongs to an observed fall may be appended to
+     * the existing clearance work; arbitrary player/world changes still flow
+     * into the ordinary TARGET_CHANGED guard below.
+     */
+    private TickResult stabilizeFallingClearance(
+            MaidActionContext context, MaidTerrainStep step) {
+        if (movementStarted) {
+            return null;
+        }
+
+        boolean fallingNow = hasFallingEntityAboveClearance(context, step)
+                || hasUnsupportedFallingSource(context, step);
+        if (fallingNow) {
+            fallingClearanceObserved = true;
+            fallingClearanceStableTicks = 0;
+            stopLocomotion(context);
+            if (fallingClearanceWaitStartedAt == Long.MIN_VALUE) {
+                fallingClearanceWaitStartedAt = context.gameTime();
+            }
+            if (context.gameTime() - fallingClearanceWaitStartedAt
+                    >= FALLING_CLEARANCE_SETTLE_TIMEOUT_TICKS) {
+                return fail(context, ActionEndReason.STUCK,
+                        "falling_block_settle_timeout", true);
+            }
+            phase = "waiting_for_falling_clearance";
+            JsonObject detail = stepDetail(step);
+            detail.addProperty("settle_ticks", Math.max(0L,
+                    context.gameTime() - fallingClearanceWaitStartedAt));
+            detail.addProperty("falling_blocks_cleared", fallingBlocksCleared);
+            return running(detail);
+        }
+
+        List<BlockPos> fallenObstacles = new ArrayList<>();
+        for (BlockPos pos : step.clearance()) {
+            if (!isLoadedBuildPosition(context, pos)) {
+                return null;
+            }
+            BlockState state = context.level().getBlockState(pos);
+            if (state.getFluidState().isEmpty()
+                    && state.getCollisionShape(context.level(), pos).isEmpty()) {
+                continue;
+            }
+            if (!fallingClearanceObserved || !isFallingBlockState(state)
+                    || HarvestBlocksAction.isAnyOre(state)) {
+                return null;
+            }
+            MaidTerrainWorldEvaluator.ClearanceAssessment assessment =
+                    MaidTerrainWorldEvaluator.assessClearance(
+                            context.level(), pos, state);
+            if (assessment != MaidTerrainWorldEvaluator.ClearanceAssessment.BREAKABLE) {
+                return fail(context, ActionEndReason.PATH_NOT_FOUND,
+                        "falling_clearance_became_unsafe", true);
+            }
+            if (requireCorrectTool && state.requiresCorrectToolForDrops()
+                    && !context.maid().getMainHandItem()
+                    .isCorrectToolForDrops(state)) {
+                return fail(context, ActionEndReason.TOOL_NOT_FOUND,
+                        "held_tool_cannot_clear_falling_block", false);
+            }
+            fallenObstacles.add(pos.immutable());
+            plannedBreakStates.put(pos.immutable(), state);
+        }
+
+        if (!fallenObstacles.isEmpty()) {
+            stopLocomotion(context);
+            List<BlockPos> combined = new ArrayList<>(fallenObstacles);
+            for (int index = breakIndex; index < pendingBreaks.size(); index++) {
+                BlockPos remaining = pendingBreaks.get(index);
+                BlockState expected = plannedBreakStates.get(remaining);
+                BlockState current = context.level().getBlockState(remaining);
+                if (expected != null && current.equals(expected)
+                        && (!current.getFluidState().isEmpty()
+                        || !current.getCollisionShape(
+                        context.level(), remaining).isEmpty())
+                        && !combined.contains(remaining)) {
+                    combined.add(remaining.immutable());
+                }
+            }
+            sortPendingBreaks(context, combined);
+            pendingBreaks = combined;
+            breakIndex = 0;
+            breaker = null;
+            fallingStabilizationRequired = false;
+            fallingClearanceStableTicks = 0;
+            fallingClearanceWaitStartedAt = context.gameTime();
+            phase = "clearing_fallen_blocks";
+            JsonObject detail = stepDetail(step);
+            detail.addProperty("fallen_blocks_pending", fallenObstacles.size());
+            detail.addProperty("falling_blocks_cleared", fallingBlocksCleared);
+            return running(detail);
+        }
+
+        fallingClearanceWaitStartedAt = Long.MIN_VALUE;
+        if (fallingClearanceStableTicks < FALLING_CLEARANCE_STABLE_TICKS) {
+            stopLocomotion(context);
+            fallingClearanceStableTicks++;
+            phase = "stabilizing_clearance";
+            JsonObject detail = stepDetail(step);
+            detail.addProperty("stable_ticks", fallingClearanceStableTicks);
+            detail.addProperty("required_stable_ticks",
+                    FALLING_CLEARANCE_STABLE_TICKS);
+            return running(detail);
+        }
+        fallingClearanceObserved = false;
+        fallingClearanceStableTicks = 0;
+        return null;
+    }
+
+    private void sortPendingBreaks(
+            MaidActionContext context, List<BlockPos> positions) {
+        positions.sort((first, second) -> {
+            BlockState firstState = plannedBreakStates.get(first);
+            BlockState secondState = plannedBreakStates.get(second);
+            if (sameHorizontalColumn(first, second)
+                    && isFallingBlockState(firstState)
+                    && isFallingBlockState(secondState)
+                    && first.getY() != second.getY()) {
+                // Clear gravity stacks top-down so breaking a lower cell does
+                // not invalidate another pending target in the same column.
+                return Integer.compare(second.getY(), first.getY());
+            }
+            return Double.compare(
+                    context.maid().getEyePosition()
+                            .distanceToSqr(Vec3.atCenterOf(first)),
+                    context.maid().getEyePosition()
+                            .distanceToSqr(Vec3.atCenterOf(second)));
+        });
     }
 
     private TickResult moveToStepDestination(MaidActionContext context, MaidTerrainStep step) {
@@ -560,6 +727,10 @@ public final class MaidTerrainNavigator {
         movementStartDistance = 0.0D;
         arrivalSettleStartedAt = Long.MIN_VALUE;
         controlledDescendRecoveryStartedAt = Long.MIN_VALUE;
+        fallingClearanceWaitStartedAt = Long.MIN_VALUE;
+        fallingClearanceStableTicks = 0;
+        fallingClearanceObserved = false;
+        fallingStabilizationRequired = false;
         phase = "step_complete";
     }
 
@@ -692,6 +863,63 @@ public final class MaidTerrainNavigator {
             }
         }
         return true;
+    }
+
+    static boolean isFallingBlockState(BlockState state) {
+        return state != null && state.getBlock() instanceof FallingBlock;
+    }
+
+    private static boolean hasUnsupportedFallingSource(
+            MaidActionContext context, MaidTerrainStep step) {
+        for (BlockPos top : clearanceColumnTops(step)) {
+            BlockPos source = top.above();
+            if (!isLoadedBuildPosition(context, source)) {
+                continue;
+            }
+            BlockState state = context.level().getBlockState(source);
+            if (isFallingBlockState(state)
+                    && FallingBlock.isFree(context.level().getBlockState(source.below()))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean hasFallingEntityAboveClearance(
+            MaidActionContext context, MaidTerrainStep step) {
+        int maxY = Math.min(context.level().getMaxBuildHeight(),
+                step.clearance().stream().mapToInt(BlockPos::getY).max()
+                        .orElse(step.to().getY()) + FALLING_ENTITY_SCAN_HEIGHT + 1);
+        int minY = step.clearance().stream().mapToInt(BlockPos::getY).min()
+                .orElse(step.to().getY());
+        for (BlockPos top : clearanceColumnTops(step)) {
+            AABB column = new AABB(
+                    top.getX() - 0.05D, minY, top.getZ() - 0.05D,
+                    top.getX() + 1.05D, maxY, top.getZ() + 1.05D);
+            if (!context.level().getEntitiesOfClass(
+                    FallingBlockEntity.class, column).isEmpty()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static List<BlockPos> clearanceColumnTops(MaidTerrainStep step) {
+        List<BlockPos> tops = new ArrayList<>();
+        for (BlockPos candidate : step.clearance()) {
+            boolean highest = true;
+            for (BlockPos other : step.clearance()) {
+                if (sameHorizontalColumn(candidate, other)
+                        && other.getY() > candidate.getY()) {
+                    highest = false;
+                    break;
+                }
+            }
+            if (highest) {
+                tops.add(candidate.immutable());
+            }
+        }
+        return tops;
     }
 
     private static boolean isLoadedBuildPosition(MaidActionContext context, BlockPos pos) {

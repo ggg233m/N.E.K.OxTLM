@@ -631,6 +631,13 @@ class SkillRunner:
             )
             run.blocked_notification_revision = 0
             await self._persist(run)
+            logger = getattr(self.plugin, "logger", None)
+            if logger is not None:
+                logger.info(
+                    "[MaidSkill] classified BLOCKED skill_id=%s reason=%s "
+                    "revision=%s",
+                    run.skill_id, run.last_failure_reason, run.revision,
+                )
             return "blocked"
         if isinstance(directive, Fail):
             run.status = "FAILED"
@@ -765,11 +772,24 @@ class SkillRunner:
             return
         attempt = self._notification_retry_counts.get(skill_id, 0)
         if attempt >= len(BLOCKED_NOTIFICATION_RETRY_DELAYS):
+            if logger is not None:
+                logger.error(
+                    "[MaidSkill] blocked feedback retries exhausted "
+                    "skill_id=%s attempts=%s",
+                    skill_id, attempt,
+                )
             return
         existing = self._notification_retry_tasks.get(skill_id)
         if existing is not None and not existing.done():
             return
         self._notification_retry_counts[skill_id] = attempt + 1
+        if logger is not None:
+            logger.warning(
+                "[MaidSkill] scheduling blocked feedback retry "
+                "skill_id=%s attempt=%s delay=%ss",
+                skill_id, attempt + 1,
+                BLOCKED_NOTIFICATION_RETRY_DELAYS[attempt],
+            )
         retry = asyncio.create_task(self._retry_blocked_notification(
             skill_id, BLOCKED_NOTIFICATION_RETRY_DELAYS[attempt]
         ))

@@ -212,7 +212,7 @@ class NekoMinecraftPlugin(NekoPluginBase):
         self._bridge.start()
 
     async def _push_minecraft_context(self, text, ai_behavior="read", priority=1, metadata=None, aggregate=None, coalesce_key=None):
-        await self._minecraft_push.push(
+        return await self._minecraft_push.push(
             text,
             ai_behavior=ai_behavior,
             priority=priority,

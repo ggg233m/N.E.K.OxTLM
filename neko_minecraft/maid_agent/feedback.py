@@ -110,9 +110,17 @@ class ActionFeedbackHandler:
             if delay:
                 await asyncio.sleep(delay)
             try:
-                await self._plugin._push_minecraft_context(text, **kwargs)
+                queued = await self._plugin._push_minecraft_context(text, **kwargs)
+                if queued is False:
+                    raise RuntimeError("Minecraft context push was not queued")
                 return
-            except Exception:
+            except Exception as exc:
+                logger = getattr(self._plugin, "logger", None)
+                if logger is not None:
+                    logger.warning(
+                        "[MaidAgent] feedback enqueue failed attempt=%s/3: %s",
+                        attempt + 1, exc,
+                    )
                 if attempt == 2:
                     raise
 

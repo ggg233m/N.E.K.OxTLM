@@ -61,6 +61,19 @@ class MaidActionService:
         payload = self._payload(message)
         record, accepted = self.tracker.apply(payload)
         if not accepted or record is None:
+            status = str(payload.get("status") or "").upper()
+            if status in TERMINAL_STATUSES:
+                current = self.tracker.get(str(payload.get("action_id") or ""))
+                logger = getattr(self.plugin, "logger", None)
+                if logger is not None:
+                    logger.warning(
+                        "[MaidAgent] terminal event rejected action_id=%s "
+                        "incoming=%s/%s current=%s/%s",
+                        payload.get("action_id"), payload.get("generation"),
+                        payload.get("sequence"),
+                        getattr(current, "generation", None),
+                        getattr(current, "sequence", None),
+                    )
             return True
         await self._dispatch_record(msg_type, record, payload)
         return True
@@ -108,6 +121,14 @@ class MaidActionService:
                 await self.feedback.progress(record)
 
         if record.terminal:
+            logger = getattr(self.plugin, "logger", None)
+            if logger is not None:
+                logger.info(
+                    "[MaidAgent] terminal dispatched action_id=%s generation=%s "
+                    "sequence=%s claimed=%s consumed=%s route=%s",
+                    record.action_id, record.generation, record.sequence,
+                    claimed, consumed, "skill" if internal else "action_fallback",
+                )
             self.release_action(record.action_id)
 
     async def start_action(
