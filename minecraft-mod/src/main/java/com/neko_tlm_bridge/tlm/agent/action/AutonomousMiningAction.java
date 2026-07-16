@@ -36,6 +36,7 @@ import net.minecraft.world.phys.Vec3;
 import net.neoforged.neoforge.items.IItemHandler;
 
 import java.util.ArrayList;
+import java.util.ArrayDeque;
 import java.util.Comparator;
 import java.util.EnumSet;
 import java.util.HashSet;
@@ -65,6 +66,10 @@ public final class AutonomousMiningAction implements MaidAction {
     private static final int DRY_RELOCATION_RADIUS = 8;
     private static final int MAX_DRY_RELOCATION_PATH_ATTEMPTS = 32;
     private static final long DRY_RELOCATION_STUCK_TICKS = 80L;
+    private static final long UNREACHABLE_ORE_RETRY_STEPS = 12L;
+    private static final int MAX_DEFERRED_ORE_TARGETS = 256;
+    private static final int RECENT_PASSAGE_MEMORY = 48;
+    private static final int MAX_CONSECUTIVE_PASSAGE_STEPS = 24;
     private static final Set<String> ALLOWED_ARGS = Set.of(
             "selector", "target_count", "direction", "shape",
             "segment_length", "speed", "discovery_mode",
@@ -119,6 +124,11 @@ public final class AutonomousMiningAction implements MaidAction {
     private double dryRelocationWindowDistance;
     private long dryRelocationWindowStartedAt = Long.MIN_VALUE;
     private JsonObject lastNavigatorFailure;
+    private final Map<BlockPos, Long> deferredOreTargets = new LinkedHashMap<>();
+    private final ArrayDeque<BlockPos> recentPassagePositions = new ArrayDeque<>();
+    private boolean followingNaturalPassage;
+    private long naturalPassageSteps;
+    private int consecutiveNaturalPassageSteps;
     private boolean persistentSessionActive;
 
     public AutonomousMiningAction(Predicate<BlockState> selector,
@@ -271,6 +281,7 @@ public final class AutonomousMiningAction implements MaidAction {
                 ? context.maid().blockPosition().immutable()
                 : snapshot.originPos();
         realEnd = context.maid().blockPosition().immutable();
+        rememberPassagePosition(realEnd);
         restoreRoute(snapshot);
         MiningWorldModelSavedData model = MiningWorldModelSavedData.get(context.level());
         model.updateGeneration(context.execution().actionId(),
@@ -437,8 +448,21 @@ public final class AutonomousMiningAction implements MaidAction {
                     "maid_not_grounded_at_segment_origin");
         }
         alignDirectionSweep(live, context.maid().getDirection());
-        if (activeShape == null) {
+        if (shapeMode == ShapeMode.AUTO || activeShape == null) {
             activeShape = resolveShape(context);
+        }
+
+        followingNaturalPassage = false;
+        if (directionMode == DirectionMode.AUTO && shapeMode == ShapeMode.AUTO) {
+            NaturalPassageStep passage = chooseNaturalPassageStep(context, live);
+            if (passage != null) {
+                activeDirection = passage.direction();
+                activeShape = passage.shape();
+                followingNaturalPassage = true;
+            }
+        }
+        if (!followingNaturalPassage) {
+            consecutiveNaturalPassageSteps = 0;
         }
 
         stepFrom = live;
@@ -676,6 +700,11 @@ public final class AutonomousMiningAction implements MaidAction {
             planningPurpose = null;
             realEnd = context.maid().blockPosition().immutable();
             state.recordExcavationStep(0);
+            rememberPassagePosition(realEnd);
+            if (followingNaturalPassage) {
+                naturalPassageSteps++;
+                consecutiveNaturalPassageSteps++;
+            }
             stepsInCurrentSegment++;
             transition(context, AutonomousMiningState.Phase.SCANNING,
                     stepDetail("step_complete"));
@@ -761,8 +790,10 @@ public final class AutonomousMiningAction implements MaidAction {
             }
         }
         if (goals.isEmpty()) {
-            return blocked(context, ActionEndReason.PATH_NOT_FOUND,
-                    "no_safe_mining_stance");
+            deferOreTargets(candidates);
+            transition(context, AutonomousMiningState.Phase.CONTINUING,
+                    deferredOreDetail("no_safe_mining_stance", candidates.size()));
+            return MaidActionTickResult.running();
         }
         terrainGoalTargets = Map.copyOf(goals);
         terrainSearch = new MaidTerrainSearch(start, goals.keySet(), evaluator,
@@ -787,8 +818,18 @@ public final class AutonomousMiningAction implements MaidAction {
             }
             expandedNodes += terrainSearch.expandedNodes();
             if (status == MaidTerrainSearch.Status.FAILED) {
-                return blocked(context, ActionEndReason.PATH_NOT_FOUND,
-                        "ore_path_not_found");
+                Set<BlockPos> unreachable = new LinkedHashSet<>(
+                        terrainGoalTargets.values());
+                deferOreTargets(unreachable);
+                terrainSearch = null;
+                terrainGoalTargets = Map.of();
+                planningPurpose = null;
+                currentTarget = null;
+                expectedTargetState = null;
+                transition(context, AutonomousMiningState.Phase.CONTINUING,
+                        deferredOreDetail(
+                                "ore_path_not_found", unreachable.size()));
+                return MaidActionTickResult.running();
             }
             MaidTerrainPath path = terrainSearch.result().orElse(null);
             terrainSearch = null;
@@ -897,6 +938,9 @@ public final class AutonomousMiningAction implements MaidAction {
 
     private List<BlockPos> scan(MaidActionContext context) {
         BlockPos center = context.maid().blockPosition();
+        long excavationStep = state.segmentsDug();
+        deferredOreTargets.entrySet().removeIf(
+                entry -> entry.getValue() <= excavationStep);
         List<BlockPos> discovered = new ArrayList<>();
         for (BlockPos mutable : BlockPos.betweenClosed(
                 center.offset(-SCAN_RADIUS, -SCAN_RADIUS, -SCAN_RADIUS),
@@ -904,6 +948,7 @@ public final class AutonomousMiningAction implements MaidAction {
             BlockPos pos = mutable.immutable();
             if (discovered.size() >= 512
                     || harvestedPositions.contains(pos)
+                    || deferredOreTargets.containsKey(pos)
                     || !loadedBuildPosition(context, pos)) {
                 continue;
             }
@@ -919,6 +964,28 @@ public final class AutonomousMiningAction implements MaidAction {
         }
         discovered.sort(targetComparator(context));
         return List.copyOf(discovered);
+    }
+
+    private void deferOreTargets(Iterable<BlockPos> targets) {
+        long retryAt = Math.addExact(
+                state.segmentsDug(), UNREACHABLE_ORE_RETRY_STEPS);
+        for (BlockPos target : targets) {
+            if (deferredOreTargets.size() >= MAX_DEFERRED_ORE_TARGETS
+                    && !deferredOreTargets.containsKey(target)) {
+                BlockPos oldest = deferredOreTargets.keySet().iterator().next();
+                deferredOreTargets.remove(oldest);
+            }
+            deferredOreTargets.put(target.immutable(), retryAt);
+        }
+    }
+
+    private JsonObject deferredOreDetail(String reason, int targetCount) {
+        JsonObject detail = detail("ore_candidates_temporarily_deferred");
+        detail.addProperty("defer_reason", reason);
+        detail.addProperty("deferred_targets", targetCount);
+        detail.addProperty("retry_after_excavation_steps",
+                UNREACHABLE_ORE_RETRY_STEPS);
+        return detail;
     }
 
     private Comparator<BlockPos> targetComparator(MaidActionContext context) {
@@ -973,6 +1040,91 @@ public final class AutonomousMiningAction implements MaidAction {
             return Integer.MAX_VALUE;
         }
         return Math.max(0, maxPlacements - placementsUsed);
+    }
+
+    private NaturalPassageStep chooseNaturalPassageStep(
+            MaidActionContext context, BlockPos live) {
+        if (consecutiveNaturalPassageSteps >= MAX_CONSECUTIVE_PASSAGE_STEPS) {
+            return null;
+        }
+        int workingY = AutonomousMiningStrategy.targetY(selectorDescription)
+                .orElse(live.getY());
+        boolean shouldDescend = live.getY() > workingY;
+        Direction preferred = activeDirection != null
+                ? activeDirection : resolveDirection(
+                directionMode, context.maid().getDirection());
+        List<Direction> directions = AutonomousMiningStrategy
+                .directionAttempts(preferred);
+        NaturalPassageStep best = null;
+        double bestScore = Double.POSITIVE_INFINITY;
+        for (int directionIndex = 0;
+             directionIndex < directions.size(); directionIndex++) {
+            Direction direction = directions.get(directionIndex);
+            List<ExcavateSegmentAction.Shape> shapes = shouldDescend
+                    ? List.of(ExcavateSegmentAction.Shape.STAIRCASE_DOWN,
+                    ExcavateSegmentAction.Shape.LEVEL)
+                    : List.of(ExcavateSegmentAction.Shape.LEVEL);
+            for (ExcavateSegmentAction.Shape shape : shapes) {
+                BlockPos destination = ExcavateSegmentAction.nextPosition(
+                        live, direction, shape).immutable();
+                if (recentPassagePositions.contains(destination)
+                        || !isOpenNaturalPassageStep(
+                        context, destination, shape)) {
+                    continue;
+                }
+                // Any completely open passage beats excavation. Within that
+                // set, keep descending toward the ore layer, then preserve the
+                // current heading and finally prefer exploring away from the
+                // operation entrance.
+                double score = directionIndex * 2.0D;
+                if (shouldDescend
+                        && shape != ExcavateSegmentAction.Shape.STAIRCASE_DOWN) {
+                    score += 8.0D;
+                }
+                if (origin != null) {
+                    score -= Math.min(4.0D,
+                            Math.sqrt(origin.distSqr(destination)) * 0.05D);
+                }
+                if (score < bestScore) {
+                    bestScore = score;
+                    best = new NaturalPassageStep(direction, shape, destination);
+                }
+            }
+        }
+        return best;
+    }
+
+    private static boolean isOpenNaturalPassageStep(
+            MaidActionContext context, BlockPos destination,
+            ExcavateSegmentAction.Shape shape) {
+        BlockPos supportPos = destination.below();
+        if (!loadedBuildPosition(context, supportPos)
+                || MaidTerrainWorldEvaluator.assessStandSupport(
+                context.level(), supportPos,
+                context.level().getBlockState(supportPos))
+                != MaidTerrainWorldEvaluator.SupportAssessment.SAFE) {
+            return false;
+        }
+        for (BlockPos clearance : ExcavateSegmentAction.clearanceFor(
+                destination, shape)) {
+            if (!loadedBuildPosition(context, clearance)
+                    || MaidTerrainWorldEvaluator.assessClearance(
+                    context.level(), clearance,
+                    context.level().getBlockState(clearance))
+                    != MaidTerrainWorldEvaluator.ClearanceAssessment.CLEAR) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private void rememberPassagePosition(BlockPos pos) {
+        BlockPos immutable = pos.immutable();
+        recentPassagePositions.remove(immutable);
+        recentPassagePositions.addLast(immutable);
+        while (recentPassagePositions.size() > RECENT_PASSAGE_MEMORY) {
+            recentPassagePositions.removeFirst();
+        }
     }
 
     private ExcavateSegmentAction.Shape resolveShape(MaidActionContext context) {
@@ -1071,6 +1223,13 @@ public final class AutonomousMiningAction implements MaidAction {
         report.addProperty("placements_used", placementsUsed);
         report.addProperty("bridge_supports_placed", bridgeSupportsPlaced);
         report.addProperty("water_seals_placed", waterSealsPlaced);
+        report.addProperty("current_y", context.maid().blockPosition().getY());
+        AutonomousMiningStrategy.targetY(selectorDescription).ifPresent(
+                targetY -> report.addProperty("working_y", targetY));
+        report.addProperty("deferred_ore_targets", deferredOreTargets.size());
+        report.addProperty("route_choice", followingNaturalPassage
+                ? "natural_passage" : "excavation");
+        report.addProperty("natural_passage_steps", naturalPassageSteps);
         if (activeDirection != null) {
             report.addProperty("direction", activeDirection.getName());
         }
@@ -1221,6 +1380,10 @@ public final class AutonomousMiningAction implements MaidAction {
         result.addProperty("placements_used", placementsUsed);
         result.addProperty("bridge_supports_placed", bridgeSupportsPlaced);
         result.addProperty("water_seals_placed", waterSealsPlaced);
+        AutonomousMiningStrategy.targetY(selectorDescription).ifPresent(
+                targetY -> result.addProperty("working_y", targetY));
+        result.addProperty("deferred_ore_targets", deferredOreTargets.size());
+        result.addProperty("natural_passage_steps", naturalPassageSteps);
         if (lastNavigatorFailure != null) {
             result.add("execution_failure", lastNavigatorFailure.deepCopy());
         }
@@ -1317,7 +1480,7 @@ public final class AutonomousMiningAction implements MaidAction {
         if (!evaluator.withinBounds(standPos)
                 || !evaluator.isLoaded(standPos)
                 || !evaluator.isLoaded(standPos.above())
-                || !evaluator.canStandOn(standPos.below())) {
+                || !Double.isFinite(evaluator.supportCost(standPos.below()))) {
             return false;
         }
         double feetCost = evaluator.clearCost(standPos);
@@ -1601,5 +1764,11 @@ public final class AutonomousMiningAction implements MaidAction {
     }
 
     private record ToolCandidate(int slot, double score) {
+    }
+
+    private record NaturalPassageStep(
+            Direction direction,
+            ExcavateSegmentAction.Shape shape,
+            BlockPos destination) {
     }
 }

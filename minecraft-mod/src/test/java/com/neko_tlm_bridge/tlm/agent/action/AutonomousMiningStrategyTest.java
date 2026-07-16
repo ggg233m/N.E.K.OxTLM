@@ -44,6 +44,10 @@ class AutonomousMiningStrategyTest {
         assertEquals(ExcavateSegmentAction.Shape.LEVEL,
                 AutonomousMiningStrategy.chooseShape(
                         AutonomousMiningAction.ShapeMode.AUTO,
+                        "tag:#minecraft:diamond_ores", -60));
+        assertEquals(ExcavateSegmentAction.Shape.LEVEL,
+                AutonomousMiningStrategy.chooseShape(
+                        AutonomousMiningAction.ShapeMode.AUTO,
                         "tag:#examplemod:moon_ores", 100));
     }
 
