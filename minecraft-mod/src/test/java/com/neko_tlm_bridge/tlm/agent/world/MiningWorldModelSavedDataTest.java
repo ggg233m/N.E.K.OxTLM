@@ -49,6 +49,7 @@ class MiningWorldModelSavedDataTest {
                 MiningWorldModelSavedData.DangerSeverity.DANGEROUS,
                 new BlockPos(9, 44, 1), 2, "lava pocket", 109L);
         data.updateCounts(actionId, 3, 8L, 19L, 110L);
+        data.updateConstructionCounts(actionId, 7L, 5L, 2L, 110L);
         data.updatePhase(actionId, "scanning", 111L);
         data.markBlocked(actionId, "lava_ahead", 112L);
 
@@ -73,8 +74,14 @@ class MiningWorldModelSavedDataTest {
         assertEquals(0.85D, session.normalizedArgs().get("speed").getAsDouble());
         assertEquals("loaded_scan",
                 session.normalizedArgs().get("discovery_mode").getAsString());
+        assertEquals("disabled",
+                session.normalizedArgs().get("placement_policy").getAsString());
+        assertEquals(0, session.normalizedArgs().get("max_placements").getAsInt());
         assertEquals(8L, session.segmentsDug());
         assertEquals(19L, session.clearedBlocks());
+        assertEquals(7L, session.placementsUsed());
+        assertEquals(5L, session.bridgeSupportsPlaced());
+        assertEquals(2L, session.waterSealsPlaced());
         assertEquals("lava_ahead", session.blockedReason());
         assertTrue(session.active());
         assertTrue(session.blocked());

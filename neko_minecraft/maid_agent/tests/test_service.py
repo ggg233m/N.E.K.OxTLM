@@ -99,6 +99,32 @@ class MaidActionServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("自主挖矿", text)
         self.assertIn("必须给出一个具体方案", text)
 
+    async def test_construction_failure_fallback_gives_safe_specific_plan(self):
+        cases = (
+            ("no_building_material", "补充普通实心方块"),
+            ("placement_budget_exhausted", "max_placements 改为0"),
+            ("water_seal_failed", "更换方向或矿道形状"),
+            ("placement_protected", "绝不能绕过保护"),
+        )
+        for sequence, (reason, expected) in enumerate(cases, start=60):
+            with self.subTest(reason=reason):
+                plugin = FakePlugin()
+                service = MaidActionService(plugin)
+                await service.handle_message({
+                    "type": "maid_action_finished",
+                    "data": {
+                        "action_id": f"construction-{sequence}",
+                        "maid_id": "m", "generation": 1,
+                        "sequence": sequence, "kind": "autonomous_mining",
+                        "status": "FAILED", "stage": "FAILED",
+                        "end_reason": "PATH_NOT_FOUND",
+                        "result": {"phase": "BLOCKED", "blocked_reason": reason},
+                    },
+                })
+                text, kwargs = plugin.pushes[-1]
+                self.assertEqual("respond", kwargs["ai_behavior"])
+                self.assertIn(expected, text)
+
     async def test_progress_is_throttled_but_stage_change_is_immediate(self):
         plugin = FakePlugin()
         clock = Clock()

@@ -33,6 +33,7 @@ public final class MaidTerrainWorldEvaluator implements MaidTerrainNodeEvaluator
     private final long horizontalRadiusSquared;
     private final boolean requireCorrectTool;
     private final Predicate<BlockPos> clearancePolicy;
+    private final Predicate<BlockPos> constructionPolicy;
 
     public MaidTerrainWorldEvaluator(ServerLevel level, EntityMaid maid, BlockPos origin) {
         this(level, maid, origin, DEFAULT_HORIZONTAL_RADIUS, DEFAULT_VERTICAL_RADIUS, true);
@@ -47,13 +48,22 @@ public final class MaidTerrainWorldEvaluator implements MaidTerrainNodeEvaluator
                                      int horizontalRadius, int verticalRadius,
                                      boolean requireCorrectTool) {
         this(level, maid, origin, horizontalRadius, verticalRadius,
-                requireCorrectTool, ignored -> true);
+                requireCorrectTool, ignored -> true, ignored -> false);
     }
 
     public MaidTerrainWorldEvaluator(ServerLevel level, EntityMaid maid, BlockPos origin,
                                      int horizontalRadius, int verticalRadius,
                                      boolean requireCorrectTool,
                                      Predicate<BlockPos> clearancePolicy) {
+        this(level, maid, origin, horizontalRadius, verticalRadius,
+                requireCorrectTool, clearancePolicy, ignored -> false);
+    }
+
+    public MaidTerrainWorldEvaluator(ServerLevel level, EntityMaid maid, BlockPos origin,
+                                     int horizontalRadius, int verticalRadius,
+                                     boolean requireCorrectTool,
+                                     Predicate<BlockPos> clearancePolicy,
+                                     Predicate<BlockPos> constructionPolicy) {
         this.level = Objects.requireNonNull(level, "level");
         this.maid = Objects.requireNonNull(maid, "maid");
         this.origin = Objects.requireNonNull(origin, "origin").immutable();
@@ -68,6 +78,8 @@ public final class MaidTerrainWorldEvaluator implements MaidTerrainNodeEvaluator
         this.horizontalRadiusSquared = (long) horizontalRadius * horizontalRadius;
         this.requireCorrectTool = requireCorrectTool;
         this.clearancePolicy = Objects.requireNonNull(clearancePolicy, "clearancePolicy");
+        this.constructionPolicy = Objects.requireNonNull(
+                constructionPolicy, "constructionPolicy");
     }
 
     @Override
@@ -92,10 +104,15 @@ public final class MaidTerrainWorldEvaluator implements MaidTerrainNodeEvaluator
             return Double.POSITIVE_INFINITY;
         }
         BlockState state = level.getBlockState(pos);
-        if (!isSafeToClear(level, pos, state)) {
+        ClearanceAssessment assessment = assessClearance(level, pos, state);
+        boolean sealableWater = assessment == ClearanceAssessment.WATER_HAZARD
+                && state.canBeReplaced() && constructionPolicy.test(pos);
+        if (!sealableWater
+                && assessment != ClearanceAssessment.CLEAR
+                && assessment != ClearanceAssessment.BREAKABLE) {
             return Double.POSITIVE_INFINITY;
         }
-        if (state.getFluidState().isEmpty()
+        if (!sealableWater && state.getFluidState().isEmpty()
                 && state.getCollisionShape(level, pos).isEmpty()) {
             return 0.0D;
         }
@@ -103,6 +120,10 @@ public final class MaidTerrainWorldEvaluator implements MaidTerrainNodeEvaluator
             return Double.POSITIVE_INFINITY;
         }
 
+        if (sealableWater && !state.getFluidState().isEmpty()
+                && state.getCollisionShape(level, pos).isEmpty()) {
+            return 24.0D;
+        }
         float hardness = state.getDestroySpeed(level, pos);
 
         // Execution is governed by one HandLease. Price only the real held
@@ -116,16 +137,30 @@ public final class MaidTerrainWorldEvaluator implements MaidTerrainNodeEvaluator
         double ticks = hardness == 0.0F
                 ? 1.0D
                 : Math.ceil(hardness * divisor / Math.max(1.0D, tool.speed()));
-        return Math.max(1.0D, ticks);
+        return Math.max(1.0D, ticks) + (sealableWater ? 24.0D : 0.0D);
     }
 
     @Override
     public boolean canStandOn(BlockPos pos) {
+        return supportCost(pos) == 0.0D;
+    }
+
+    @Override
+    public double supportCost(BlockPos pos) {
         if (!isLoaded(pos)) {
-            return false;
+            return Double.POSITIVE_INFINITY;
         }
         BlockState state = level.getBlockState(pos);
-        return isSafeStandSupport(level, pos, state);
+        SupportAssessment assessment = assessStandSupport(level, pos, state);
+        if (assessment == SupportAssessment.SAFE) {
+            return 0.0D;
+        }
+        if ((assessment == SupportAssessment.UNSAFE_SUPPORT
+                || assessment == SupportAssessment.WATER_HAZARD)
+                && state.canBeReplaced() && constructionPolicy.test(pos)) {
+            return assessment == SupportAssessment.WATER_HAZARD ? 30.0D : 20.0D;
+        }
+        return Double.POSITIVE_INFINITY;
     }
 
     /**

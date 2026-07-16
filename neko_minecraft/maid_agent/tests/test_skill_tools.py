@@ -102,6 +102,12 @@ class SkillToolTests(unittest.IsolatedAsyncioTestCase):
             ["loaded_scan", "exposed_only"],
             mine_args["properties"]["discovery_mode"]["enum"],
         )
+        self.assertEqual(
+            ["disabled", "safe_support_and_water_seal"],
+            mine_args["properties"]["placement_policy"]["enum"],
+        )
+        self.assertEqual(0, mine_args["properties"]["max_placements"]["minimum"])
+        self.assertEqual(4096, mine_args["properties"]["max_placements"]["maximum"])
 
 
 if __name__ == "__main__":

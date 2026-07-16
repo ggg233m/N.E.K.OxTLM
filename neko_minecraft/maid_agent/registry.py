@@ -49,6 +49,8 @@ class ActionRegistry:
             "segment_length",
             "speed",
             "discovery_mode",
+            "placement_policy",
+            "max_placements",
         }
         unknown = sorted(set(args) - allowed)
         if unknown:
@@ -94,6 +96,14 @@ class ActionRegistry:
             raise ActionValidationError(
                 "autonomous_mining.discovery_mode must be loaded_scan or exposed_only"
             )
+        placement_policy = str(
+            args.get("placement_policy", "disabled") or ""
+        ).strip().lower()
+        if placement_policy not in {"disabled", "safe_support_and_water_seal"}:
+            raise ActionValidationError(
+                "autonomous_mining.placement_policy must be disabled or "
+                "safe_support_and_water_seal"
+            )
         return {
             "selector": {"type": selector_type, "id": selector_id},
             "target_count": self._integer(
@@ -117,6 +127,13 @@ class ActionRegistry:
                 1.0,
             ),
             "discovery_mode": discovery_mode,
+            "placement_policy": placement_policy,
+            "max_placements": self._integer(
+                args.get("max_placements", 0),
+                "autonomous_mining.max_placements",
+                0,
+                4096,
+            ),
         }
 
     def _excavate_segment(self, args: Dict[str, Any]) -> Dict[str, Any]:

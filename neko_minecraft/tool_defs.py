@@ -291,6 +291,10 @@ MC_START_SKILL = {
         "启动由 Python SkillRunner 持久化编排的高级女仆技能。当前支持 mine_ore。"
         "mine_ore 默认只启动一个 Java autonomous_mining 子动作；世界感知、选路、开矿道、"
         "重规划和数量累计均由 Java 持续完成，LLM 只提供目标和有限偏好，不编排逐段动作。"
+        "自主矿工的路线清障可挖掘任何允许破坏且工具支持的矿石：目标矿石计入 target_count，"
+        "其他矿石正常掉落但不计入目标。默认 placement_policy=safe_support_and_water_seal，"
+        "会从女仆真实背包消耗普通实心方块来搭桥、补足脚下支撑或封水；不会复制物品，"
+        "不绕过领地保护，不会封岩浆或处理大型水域。"
         "execution_mode=legacy 仅用于显式回退和旧检查点兼容。target_count 是最低目标，"
         "最终 blocks_harvested 可能超出。启动只表示已接受，必须等待异步 Skill 终态。"
         "Java 只有在无法安全继续且 decision_required=true 时才以 BLOCKED 请求决策；"
@@ -357,6 +361,18 @@ MC_START_SKILL = {
                     "discovery_mode": {
                         "type": "string", "enum": ["loaded_scan", "exposed_only"],
                         "description": "默认 loaded_scan 扫描已加载区域；exposed_only 只认暴露矿物",
+                    },
+                    "placement_policy": {
+                        "type": "string",
+                        "enum": ["disabled", "safe_support_and_water_seal"],
+                        "description": (
+                            "默认 safe_support_and_water_seal，允许消耗女仆背包中的普通实心方块"
+                            "搭桥、垫脚和封水；disabled 禁止任何路线放置"
+                        ),
+                    },
+                    "max_placements": {
+                        "type": "integer", "minimum": 0, "maximum": 4096,
+                        "description": "最多消耗的路线建筑方块数；默认0表示不设人工上限，仍受背包材料限制",
                     },
                 },
                 "required": ["selector", "target_count", "target_metric"],

@@ -10,6 +10,8 @@ import com.neko_tlm_bridge.tlm.agent.path.MaidTerrainStep;
 import com.neko_tlm_bridge.tlm.agent.path.MaidTerrainWorldEvaluator;
 import com.neko_tlm_bridge.tlm.agent.runtime.HandLease;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.entity.item.FallingBlockEntity;
 import net.minecraft.world.entity.ai.behavior.BlockPosTracker;
 import net.minecraft.world.entity.ai.memory.MemoryModuleType;
@@ -53,9 +55,12 @@ public final class MaidTerrainNavigator {
     private final HandLease handLease;
     private final double speed;
     private final boolean requireCorrectTool;
+    private final boolean allowConstruction;
+    private final int maxPlacements;
     private final Map<BlockPos, BlockState> plannedBreakStates = new HashMap<>();
     private final Set<BlockPos> clearedBlocks = new LinkedHashSet<>();
     private final ArrayDeque<ClearedBlock> clearedEvents = new ArrayDeque<>();
+    private final ArrayDeque<PlacedBlock> placedEvents = new ArrayDeque<>();
 
     private Path debugPath;
     private int stepIndex;
@@ -75,11 +80,18 @@ public final class MaidTerrainNavigator {
     private int fallingBlocksCleared;
     private boolean fallingClearanceObserved;
     private boolean fallingStabilizationRequired;
+    private int placementsUsed;
     private String phase = "pending";
     private ActionEndReason lastFailure;
 
     public MaidTerrainNavigator(MaidTerrainPath terrainPath, HandLease handLease,
                                 double speed, boolean requireCorrectTool) {
+        this(terrainPath, handLease, speed, requireCorrectTool, false, 0);
+    }
+
+    public MaidTerrainNavigator(MaidTerrainPath terrainPath, HandLease handLease,
+                                double speed, boolean requireCorrectTool,
+                                boolean allowConstruction, int maxPlacements) {
         this.terrainPath = Objects.requireNonNull(terrainPath, "terrainPath");
         this.handLease = Objects.requireNonNull(handLease, "handLease");
         if (!Double.isFinite(speed)) {
@@ -87,6 +99,11 @@ public final class MaidTerrainNavigator {
         }
         this.speed = Math.max(MIN_SPEED, Math.min(MAX_SPEED, speed));
         this.requireCorrectTool = requireCorrectTool;
+        this.allowConstruction = allowConstruction;
+        if (maxPlacements < 0) {
+            throw new IllegalArgumentException("maxPlacements must not be negative");
+        }
+        this.maxPlacements = maxPlacements;
     }
 
     public void start(MaidActionContext context) {
@@ -138,6 +155,12 @@ public final class MaidTerrainNavigator {
                     "maid_is_no_longer_at_terrain_step_origin", true);
         }
 
+        TickResult support = ensureDestinationSupport(context, step);
+        if (support != null) {
+            publishDebug(context, false);
+            return support;
+        }
+
         if (pendingBreaks.isEmpty() && breakIndex == 0 && !step.toBreak().isEmpty()) {
             pendingBreaks = new ArrayList<>(step.toBreak());
             sortPendingBreaks(context, pendingBreaks);
@@ -156,6 +179,13 @@ public final class MaidTerrainNavigator {
         if (clearing != null) {
             publishDebug(context, false);
             return clearing;
+        }
+
+
+        TickResult waterSeal = sealWaterForClearance(context, step);
+        if (waterSeal != null) {
+            publishDebug(context, false);
+            return waterSeal;
         }
 
         TickResult fallingClearance = stabilizeFallingClearance(context, step);
@@ -195,6 +225,14 @@ public final class MaidTerrainNavigator {
         return List.copyOf(drained);
     }
 
+    public List<PlacedBlock> drainPlacedBlocks() {
+        List<PlacedBlock> drained = new ArrayList<>(placedEvents.size());
+        while (!placedEvents.isEmpty()) {
+            drained.add(placedEvents.removeFirst());
+        }
+        return List.copyOf(drained);
+    }
+
     public boolean cleared(BlockPos pos) {
         return clearedBlocks.contains(pos);
     }
@@ -215,6 +253,7 @@ public final class MaidTerrainNavigator {
         detail.addProperty("current_step", Math.min(stepIndex, terrainPath.steps().size()));
         detail.addProperty("cleared_blocks", clearedBlocks.size());
         detail.addProperty("falling_blocks_cleared", fallingBlocksCleared);
+        detail.addProperty("placements_used", placementsUsed);
         detail.addProperty("path_cost", terrainPath.totalCost());
         detail.addProperty("expanded_nodes", terrainPath.expandedNodes());
         detail.addProperty("target_x", terrainPath.target().getX());
@@ -232,6 +271,12 @@ public final class MaidTerrainNavigator {
             BlockPos pos = pendingBreaks.get(breakIndex);
             BlockState expected = plannedBreakStates.get(pos);
             BlockState current = context.level().getBlockState(pos);
+
+            TickResult waterSeal = sealWaterAround(
+                    context, step, pos, current, true);
+            if (waterSeal != null) {
+                return waterSeal;
+            }
 
             if (current.getFluidState().isEmpty()
                     && current.getCollisionShape(context.level(), pos).isEmpty()) {
@@ -286,6 +331,160 @@ public final class MaidTerrainNavigator {
         return null;
     }
 
+    private TickResult ensureDestinationSupport(
+            MaidActionContext context, MaidTerrainStep step) {
+        BlockPos supportPos = step.to().below();
+        if (!isLoadedBuildPosition(context, supportPos)) {
+            return null;
+        }
+        BlockState support = context.level().getBlockState(supportPos);
+        MaidTerrainWorldEvaluator.SupportAssessment assessment =
+                MaidTerrainWorldEvaluator.assessStandSupport(
+                        context.level(), supportPos, support);
+        if (assessment == MaidTerrainWorldEvaluator.SupportAssessment.SAFE
+                || !allowConstruction) {
+            return null;
+        }
+        if (assessment == MaidTerrainWorldEvaluator.SupportAssessment.LAVA_HAZARD
+                || !support.canBeReplaced()) {
+            return null;
+        }
+        MaidTerrainBuilder.Purpose purpose =
+                assessment == MaidTerrainWorldEvaluator.SupportAssessment.WATER_HAZARD
+                        ? MaidTerrainBuilder.Purpose.SEAL_FLUID
+                        : MaidTerrainBuilder.Purpose.BRIDGE_SUPPORT;
+        return placeConstructionBlock(context, supportPos, purpose,
+                purpose == MaidTerrainBuilder.Purpose.SEAL_FLUID
+                        ? "water_seal_failed" : "support_placement_failed");
+    }
+
+    private TickResult sealWaterForClearance(
+            MaidActionContext context, MaidTerrainStep step) {
+        if (!allowConstruction || isStepClearanceOpen(context, step)) {
+            return null;
+        }
+        for (BlockPos pos : step.clearance()) {
+            if (!isLoadedBuildPosition(context, pos)) {
+                continue;
+            }
+            BlockState state = context.level().getBlockState(pos);
+            TickResult result = sealWaterAround(
+                    context, step, pos, state, false);
+            if (result != null) {
+                return result;
+            }
+        }
+        return null;
+    }
+
+    private TickResult sealWaterAround(
+            MaidActionContext context, MaidTerrainStep step,
+            BlockPos obstacle, BlockState state, boolean updateExpectedObstacle) {
+        if (!allowConstruction) {
+            return null;
+        }
+        MaidTerrainWorldEvaluator.ClearanceAssessment assessment =
+                MaidTerrainWorldEvaluator.assessClearance(
+                        context.level(), obstacle, state);
+        boolean directWater = state.getFluidState()
+                .is(net.minecraft.tags.FluidTags.WATER);
+        if ((!directWater && !updateExpectedObstacle)
+                || (!state.getFluidState().isEmpty() && !directWater)
+                || assessment
+                == MaidTerrainWorldEvaluator.ClearanceAssessment.LAVA_HAZARD) {
+            return null;
+        }
+
+        List<BlockPos> candidates = new ArrayList<>();
+        if (!state.getFluidState().isEmpty()) {
+            candidates.add(obstacle.immutable());
+        }
+        for (Direction direction : Direction.values()) {
+            BlockPos adjacent = obstacle.relative(direction);
+            if (isLoadedBuildPosition(context, adjacent)
+                    && !context.level().getBlockState(adjacent)
+                    .getFluidState().isEmpty()) {
+                candidates.add(adjacent.immutable());
+            }
+        }
+        candidates.sort(Comparator.comparingDouble(
+                pos -> context.maid().getEyePosition()
+                        .distanceToSqr(Vec3.atCenterOf(pos))));
+        for (BlockPos target : candidates) {
+            BlockState fluid = context.level().getBlockState(target);
+            if (!fluid.getFluidState().is(net.minecraft.tags.FluidTags.WATER)
+                    || target.equals(step.from())
+                    || target.equals(step.from().above())) {
+                continue;
+            }
+            TickResult placement = placeConstructionBlock(
+                    context, target, MaidTerrainBuilder.Purpose.SEAL_FLUID,
+                    "water_seal_failed");
+            if (placement != null && !placement.detail().has("message")) {
+                if (target.equals(obstacle) && updateExpectedObstacle) {
+                    plannedBreakStates.put(obstacle.immutable(),
+                            context.level().getBlockState(obstacle));
+                } else if (step.clearance().contains(target)) {
+                    plannedBreakStates.put(target.immutable(),
+                            context.level().getBlockState(target));
+                    List<BlockPos> remaining = new ArrayList<>();
+                    for (int index = breakIndex; index < pendingBreaks.size(); index++) {
+                        remaining.add(pendingBreaks.get(index));
+                    }
+                    if (!remaining.contains(target)) {
+                        remaining.add(target.immutable());
+                    }
+                    sortPendingBreaks(context, remaining);
+                    pendingBreaks = remaining;
+                    breakIndex = 0;
+                }
+            }
+            return placement;
+        }
+        return fail(context, ActionEndReason.PATH_NOT_FOUND,
+                "water_seal_failed", true);
+    }
+
+    private TickResult placeConstructionBlock(
+            MaidActionContext context, BlockPos target,
+            MaidTerrainBuilder.Purpose purpose, String failureMessage) {
+        stopLocomotion(context);
+        if (maxPlacements == 0 || placementsUsed >= maxPlacements) {
+            return fail(context, ActionEndReason.PATH_NOT_FOUND,
+                    "placement_budget_exhausted", true);
+        }
+        MaidTerrainBuilder.PlacementResult placement = MaidTerrainBuilder.place(
+                context.maid(), target, purpose);
+        if (placement.placed()) {
+            placementsUsed++;
+            placedEvents.addLast(new PlacedBlock(
+                    target, placement.blockId(), purpose));
+            phase = purpose == MaidTerrainBuilder.Purpose.SEAL_FLUID
+                    ? "sealing_water" : "placing_support";
+            JsonObject detail = stepIndex < terrainPath.steps().size()
+                    ? stepDetail(terrainPath.steps().get(stepIndex))
+                    : new JsonObject();
+            detail.addProperty("construction", purpose.name().toLowerCase());
+            detail.addProperty("placed_x", target.getX());
+            detail.addProperty("placed_y", target.getY());
+            detail.addProperty("placed_z", target.getZ());
+            detail.addProperty("placed_block", String.valueOf(placement.blockId()));
+            detail.addProperty("placements_used", placementsUsed);
+            return running(detail);
+        }
+        ActionEndReason reason = switch (placement.status()) {
+            case NO_SAFE_MATERIAL -> ActionEndReason.TOOL_NOT_FOUND;
+            case PLACE_REJECTED -> ActionEndReason.BLOCK_PROTECTED;
+            default -> ActionEndReason.PATH_NOT_FOUND;
+        };
+        String message = switch (placement.status()) {
+            case NO_SAFE_MATERIAL -> "no_building_material";
+            case PLACE_REJECTED -> "placement_protected";
+            default -> failureMessage;
+        };
+        return fail(context, reason, message, true);
+    }
+
     /**
      * Keeps the maid at the terrain-step origin while gravity blocks settle.
      * Only a FallingBlock that belongs to an observed fall may be appended to
@@ -330,8 +529,7 @@ public final class MaidTerrainNavigator {
                     && state.getCollisionShape(context.level(), pos).isEmpty()) {
                 continue;
             }
-            if (!fallingClearanceObserved || !isFallingBlockState(state)
-                    || HarvestBlocksAction.isAnyOre(state)) {
+            if (!fallingClearanceObserved || !isFallingBlockState(state)) {
                 return null;
             }
             MaidTerrainWorldEvaluator.ClearanceAssessment assessment =
@@ -964,6 +1162,18 @@ public final class MaidTerrainNavigator {
         public ClearedBlock {
             pos = Objects.requireNonNull(pos, "pos").immutable();
             Objects.requireNonNull(state, "state");
+        }
+    }
+
+    /** A committed construction event backed by one real inventory item. */
+    public record PlacedBlock(
+            BlockPos pos,
+            ResourceLocation blockId,
+            MaidTerrainBuilder.Purpose purpose) {
+        public PlacedBlock {
+            pos = Objects.requireNonNull(pos, "pos").immutable();
+            Objects.requireNonNull(blockId, "blockId");
+            Objects.requireNonNull(purpose, "purpose");
         }
     }
 

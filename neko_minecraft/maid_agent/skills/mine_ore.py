@@ -38,6 +38,8 @@ class MineOreSkill:
             "segment_length",
             "speed",
             "discovery_mode",
+            "placement_policy",
+            "max_placements",
         }
         unknown = sorted(set(raw) - allowed)
         if unknown:
@@ -97,6 +99,17 @@ class MineOreSkill:
             raise ValueError(
                 "mine_ore.discovery_mode must be loaded_scan or exposed_only"
             )
+        placement_policy = str(
+            raw.get("placement_policy", "safe_support_and_water_seal") or ""
+        ).strip().lower()
+        if placement_policy not in {"disabled", "safe_support_and_water_seal"}:
+            raise ValueError(
+                "mine_ore.placement_policy must be disabled or "
+                "safe_support_and_water_seal"
+            )
+        max_placements = _bounded_nonnegative_integer(
+            raw.get("max_placements", 0), "max_placements", 4096
+        )
         return {
             "selector": {"type": selector_type, "id": selector_id},
             "target_count": target_count,
@@ -108,6 +121,8 @@ class MineOreSkill:
             "segment_length": segment_length,
             "speed": speed,
             "discovery_mode": discovery_mode,
+            "placement_policy": placement_policy,
+            "max_placements": max_placements,
         }
 
     def initialize(self, run: SkillRun) -> None:
@@ -225,11 +240,16 @@ class MineOreSkill:
                     "segment_length",
                     "speed",
                     "discovery_mode",
+                    "placement_policy",
+                    "max_placements",
                 ],
                 "current_parameters": current_parameters,
                 "requires_player_confirmation": True,
                 "in_place_resume_supported": False,
             }
+            decision.update(_construction_blocked_decision(
+                blocked_reason, current_parameters
+            ))
             blocked_result = {
                 **result,
                 "execution_mode": "autonomous",
@@ -306,6 +326,13 @@ class MineOreSkill:
             "speed": float(run.args.get("speed", 0.7)),
             "discovery_mode": str(
                 run.args.get("discovery_mode") or "loaded_scan"
+            ),
+            "placement_policy": str(
+                run.args.get("placement_policy")
+                or "disabled"
+            ),
+            "max_placements": max(
+                0, min(4096, _integer(run.args.get("max_placements"), 0))
             ),
         }
 
@@ -679,6 +706,21 @@ def _bounded_integer(value: Any, name: str, minimum: int, maximum: int) -> int:
     return number
 
 
+def _bounded_nonnegative_integer(value: Any, name: str, maximum: int) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"mine_ore.{name} must be an integer")
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"mine_ore.{name} must be an integer") from None
+    if str(value).strip() not in {str(number), f"{number}.0"} \
+            and not isinstance(value, int):
+        raise ValueError(f"mine_ore.{name} must be an integer")
+    if number < 0 or number > maximum:
+        raise ValueError(f"mine_ore.{name} must be between 0 and {maximum}")
+    return number
+
+
 def _bounded_number(value: Any, name: str, minimum: float, maximum: float) -> float:
     if isinstance(value, bool):
         raise ValueError(f"mine_ore.{name} must be a number")
@@ -691,6 +733,54 @@ def _bounded_number(value: Any, name: str, minimum: float, maximum: float) -> fl
             f"mine_ore.{name} must be between {minimum} and {maximum}"
         )
     return number
+
+
+def _construction_blocked_decision(
+    reason: Any, current_parameters: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Attach a concrete, non-looping response for construction failures."""
+    code = _reason_code(reason, "AUTONOMOUS_MINING_BLOCKED")
+    if code == "NO_BUILDING_MATERIAL":
+        return {
+            "mode": "provide_material_or_restart_without_construction",
+            "recommended_actions": [
+                "put ordinary full-cube blocks in the maid backpack",
+                "restart with placement_policy=disabled and a different direction",
+                "abort mining",
+            ],
+            "requires_player_confirmation": True,
+        }
+    if code == "PLACEMENT_BUDGET_EXHAUSTED":
+        return {
+            "mode": "raise_placement_limit_or_reroute",
+            "recommended_actions": [
+                "restart with max_placements=0 for no placement limit",
+                "choose a different direction or shape",
+                "abort mining",
+            ],
+            "requires_player_confirmation": True,
+        }
+    if code == "WATER_SEAL_FAILED":
+        return {
+            "mode": "reroute_or_abort_water_hazard",
+            "recommended_actions": [
+                "choose a different direction or shape",
+                "abort mining",
+            ],
+            "requires_player_confirmation": True,
+        }
+    if code == "PLACEMENT_PROTECTED":
+        return {
+            "mode": "leave_protected_area_or_abort",
+            "recommended_actions": [
+                "move the maid outside the protected area before starting a new skill",
+                "choose a route that does not require placement",
+                "abort mining",
+            ],
+            "requires_player_confirmation": True,
+            "must_not_bypass_protection": True,
+        }
+    return {}
 
 
 def _execution_mode(run: SkillRun) -> str:

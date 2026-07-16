@@ -198,8 +198,11 @@ public final class MaidTerrainSearch {
                            double movementCost, BlockPos... clearanceCells) {
         if (!evaluator.withinBounds(destination) || !evaluator.isLoaded(destination)
                 || !evaluator.withinBounds(destination.below())
-                || !evaluator.isLoaded(destination.below())
-                || !evaluator.canStandOn(destination.below())) {
+                || !evaluator.isLoaded(destination.below())) {
+            return;
+        }
+        double supportCost = evaluator.supportCost(destination.below());
+        if (!Double.isFinite(supportCost) || supportCost < 0.0D) {
             return;
         }
 
@@ -225,7 +228,7 @@ public final class MaidTerrainSearch {
             }
         }
 
-        double newCost = from.cost() + movementCost + breakCost;
+        double newCost = from.cost() + movementCost + breakCost + supportCost;
         long key = destination.asLong();
         Double previous = bestCosts.get(key);
         if (previous != null && newCost >= previous - EPSILON) {
@@ -236,7 +239,7 @@ public final class MaidTerrainSearch {
 
         double heuristic = heuristic(destination);
         MaidTerrainStep step = new MaidTerrainStep(kind, from.pos(), destination,
-                clearance, toBreak, movementCost + breakCost);
+                clearance, toBreak, movementCost + breakCost + supportCost);
         open.add(new SearchNode(destination.immutable(), newCost, heuristic,
                 newCost + HEURISTIC_WEIGHT * heuristic, from, step, nextSequence++));
     }

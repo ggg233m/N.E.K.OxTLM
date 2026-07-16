@@ -65,6 +65,9 @@ public final class MiningWorldModelSavedData extends SavedData {
     private static final String KEY_SEGMENT_LENGTH = "SegmentLength";
     private static final String KEY_SEGMENTS_DUG = "SegmentsDug";
     private static final String KEY_CLEARED_BLOCKS = "ClearedBlocks";
+    private static final String KEY_PLACEMENTS_USED = "PlacementsUsed";
+    private static final String KEY_BRIDGE_SUPPORTS_PLACED = "BridgeSupportsPlaced";
+    private static final String KEY_WATER_SEALS_PLACED = "WaterSealsPlaced";
     private static final String KEY_CREATED = "CreatedGameTime";
     private static final String KEY_UPDATED = "UpdatedGameTime";
     private static final String KEY_ENTRY_NODE = "EntryNode";
@@ -194,7 +197,8 @@ public final class MiningWorldModelSavedData extends SavedData {
                 arguments.targetCount, 0,
                 "validating", null, null,
                 arguments.mainDirection, arguments.shape, arguments.segmentLength,
-                0L, 0L, "", gameTime, gameTime, null, null);
+                0L, 0L, 0L, 0L, 0L, "",
+                gameTime, gameTime, null, null);
         operations.put(actionId, created);
         setDirty();
         return created.snapshot();
@@ -233,7 +237,7 @@ public final class MiningWorldModelSavedData extends SavedData {
         MutableOperation created = new MutableOperation(
                 operationId, maidId, dimensionId, 0L, OperationStatus.ACTIVE,
                 "{}", "{}", 0, 0, "validating", entrance.immutable(), null,
-                "auto", "auto", 8, 0L, 0L, "",
+                "auto", "auto", 8, 0L, 0L, 0L, 0L, 0L, "",
                 gameTime, gameTime, entryId, null);
         created.nodes.put(entryId, new TunnelNode(
                 entryId, NodeType.ENTRY, entrance.immutable(), "", 0,
@@ -444,6 +448,34 @@ public final class MiningWorldModelSavedData extends SavedData {
             operation.collectedCount = collectedCount;
             operation.segmentsDug = segmentsDug;
             operation.clearedBlocks = clearedBlocks;
+            touch(operation, gameTime);
+        }
+    }
+
+    /** Absolute monotonic construction counters reported by the autonomous action. */
+    public void updateConstructionCounts(
+            UUID operationId, long placementsUsed,
+            long bridgeSupportsPlaced, long waterSealsPlaced, long gameTime) {
+        assertMutationThread();
+        MutableOperation operation = requireOperation(operationId);
+        if (placementsUsed < operation.placementsUsed
+                || bridgeSupportsPlaced < operation.bridgeSupportsPlaced
+                || waterSealsPlaced < operation.waterSealsPlaced) {
+            throw new IllegalArgumentException(
+                    "construction counters must be monotonic");
+        }
+        if (placementsUsed < 0L || bridgeSupportsPlaced < 0L
+                || waterSealsPlaced < 0L
+                || bridgeSupportsPlaced + waterSealsPlaced > placementsUsed) {
+            throw new IllegalArgumentException(
+                    "construction counters must be non-negative and consistent");
+        }
+        if (operation.placementsUsed != placementsUsed
+                || operation.bridgeSupportsPlaced != bridgeSupportsPlaced
+                || operation.waterSealsPlaced != waterSealsPlaced) {
+            operation.placementsUsed = placementsUsed;
+            operation.bridgeSupportsPlaced = bridgeSupportsPlaced;
+            operation.waterSealsPlaced = waterSealsPlaced;
             touch(operation, gameTime);
         }
     }
@@ -674,6 +706,9 @@ public final class MiningWorldModelSavedData extends SavedData {
         tag.putInt(KEY_SEGMENT_LENGTH, operation.segmentLength);
         tag.putLong(KEY_SEGMENTS_DUG, operation.segmentsDug);
         tag.putLong(KEY_CLEARED_BLOCKS, operation.clearedBlocks);
+        tag.putLong(KEY_PLACEMENTS_USED, operation.placementsUsed);
+        tag.putLong(KEY_BRIDGE_SUPPORTS_PLACED, operation.bridgeSupportsPlaced);
+        tag.putLong(KEY_WATER_SEALS_PLACED, operation.waterSealsPlaced);
         tag.putLong(KEY_CREATED, operation.createdGameTime);
         tag.putLong(KEY_UPDATED, operation.updatedGameTime);
         if (operation.entryNodeId != null) {
@@ -736,6 +771,9 @@ public final class MiningWorldModelSavedData extends SavedData {
                 Math.max(1, Math.min(64, tag.getInt(KEY_SEGMENT_LENGTH))),
                 Math.max(0L, tag.getLong(KEY_SEGMENTS_DUG)),
                 Math.max(0L, tag.getLong(KEY_CLEARED_BLOCKS)),
+                Math.max(0L, tag.getLong(KEY_PLACEMENTS_USED)),
+                Math.max(0L, tag.getLong(KEY_BRIDGE_SUPPORTS_PLACED)),
+                Math.max(0L, tag.getLong(KEY_WATER_SEALS_PLACED)),
                 normalizeText(tag.getString(KEY_BLOCKED_REASON), 256),
                 tag.getLong(KEY_CREATED), tag.getLong(KEY_UPDATED),
                 entryId, workfaceId);
@@ -908,7 +946,20 @@ public final class MiningWorldModelSavedData extends SavedData {
     }
 
     private static String normalizedArgsJson(JsonObject value) {
-        String serialized = canonicalJson(Objects.requireNonNull(value, "value")).toString();
+        JsonObject migrated = Objects.requireNonNull(value, "value").deepCopy();
+        // Canonicalize newly introduced autonomous-mining defaults so an old
+        // crash checkpoint can be resumed by a newer action factory without
+        // being rejected as an action-ID/argument conflict.
+        if (migrated.has("selector") && migrated.has("target_count")) {
+            if (!migrated.has("placement_policy")) {
+                migrated.addProperty(
+                        "placement_policy", "disabled");
+            }
+            if (!migrated.has("max_placements")) {
+                migrated.addProperty("max_placements", 0);
+            }
+        }
+        String serialized = canonicalJson(migrated).toString();
         if (serialized.length() > 8192) {
             throw new IllegalArgumentException("normalized mining args exceed 8192 characters");
         }
@@ -1158,6 +1209,9 @@ public final class MiningWorldModelSavedData extends SavedData {
             int segmentLength,
             long segmentsDug,
             long clearedBlocks,
+            long placementsUsed,
+            long bridgeSupportsPlaced,
+            long waterSealsPlaced,
             String blockedReason,
             long createdGameTime,
             long updatedGameTime,
@@ -1223,6 +1277,9 @@ public final class MiningWorldModelSavedData extends SavedData {
         private int segmentLength;
         private long segmentsDug;
         private long clearedBlocks;
+        private long placementsUsed;
+        private long bridgeSupportsPlaced;
+        private long waterSealsPlaced;
         private String blockedReason;
         private final long createdGameTime;
         private long updatedGameTime;
@@ -1239,7 +1296,9 @@ public final class MiningWorldModelSavedData extends SavedData {
                 int targetCount, int collectedCount,
                 String phase, BlockPos originPos, BlockPos currentWorkfacePos,
                 String mainDirection, String shape, int segmentLength,
-                long segmentsDug, long clearedBlocks, String blockedReason,
+                long segmentsDug, long clearedBlocks,
+                long placementsUsed, long bridgeSupportsPlaced,
+                long waterSealsPlaced, String blockedReason,
                 long createdGameTime, long updatedGameTime,
                 UUID entryNodeId, UUID activeWorkfaceNodeId) {
             this.operationId = operationId;
@@ -1260,6 +1319,9 @@ public final class MiningWorldModelSavedData extends SavedData {
             this.segmentLength = Math.max(1, Math.min(64, segmentLength));
             this.segmentsDug = Math.max(0L, segmentsDug);
             this.clearedBlocks = Math.max(0L, clearedBlocks);
+            this.placementsUsed = Math.max(0L, placementsUsed);
+            this.bridgeSupportsPlaced = Math.max(0L, bridgeSupportsPlaced);
+            this.waterSealsPlaced = Math.max(0L, waterSealsPlaced);
             this.blockedReason = normalizeText(blockedReason, 256);
             this.createdGameTime = createdGameTime;
             this.updatedGameTime = updatedGameTime;
@@ -1272,7 +1334,9 @@ public final class MiningWorldModelSavedData extends SavedData {
                     operationId, maidId, dimensionId, generation, status,
                     normalizedArgsJson, selectorJson, targetCount, collectedCount, phase,
                     originPos, currentWorkfacePos, mainDirection, shape,
-                    segmentLength, segmentsDug, clearedBlocks, blockedReason,
+                    segmentLength, segmentsDug, clearedBlocks,
+                    placementsUsed, bridgeSupportsPlaced, waterSealsPlaced,
+                    blockedReason,
                     createdGameTime, updatedGameTime,
                     entryNodeId, activeWorkfaceNodeId,
                     new LinkedHashMap<>(nodes),

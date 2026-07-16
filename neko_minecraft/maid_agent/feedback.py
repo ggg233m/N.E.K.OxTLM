@@ -267,6 +267,13 @@ class ActionFeedbackHandler:
                     " 当前探矿方向没有安全下一步；这不是 selector 或 search_radius 问题。"
                     "不要增大 search_radius 或原样重试，应安全重定位，或提出具体清障方案。"
                 )
+        construction_reason = str(
+            (record.result.get("blocked_reason") if isinstance(record.result, dict) else "")
+            or message
+            or record.end_reason
+            or ""
+        ).strip().upper()
+        text += _construction_recovery_text(construction_reason)
         if record.status not in {"SUCCEEDED", "CANCELLED", "SUPERSEDED"}:
             if isinstance(record.result, dict) and record.result:
                 safe_result = {
@@ -291,3 +298,26 @@ class ActionFeedbackHandler:
                 )
         text += "请根据真实终态回应玩家；失败时不要声称动作成功。"
         return text
+
+
+def _construction_recovery_text(reason: str) -> str:
+    if reason == "NO_BUILDING_MATERIAL":
+        return (
+            " 具体恢复方案：让玩家给女仆背包补充普通实心方块，或经确认后改用"
+            " placement_policy=disabled 并选择不需要放置的不同路线；不要原样重试。"
+        )
+    if reason == "PLACEMENT_BUDGET_EXHAUSTED":
+        return (
+            " 具体恢复方案：经玩家确认后把 max_placements 改为0，或选择不需继续放置的不同路线；"
+            "这不是缺矿。"
+        )
+    if reason == "WATER_SEAL_FAILED":
+        return (
+            " 具体恢复方案：更换方向或矿道形状以绕开水体，无法确认安全路线时停止；"
+            "禁止在同一水体原样循环。"
+        )
+    if reason == "PLACEMENT_PROTECTED":
+        return (
+            " 该位置受保护，绝不能绕过保护；只能让玩家将女仆移出保护区、改走不需放置的路线或终止。"
+        )
+    return ""

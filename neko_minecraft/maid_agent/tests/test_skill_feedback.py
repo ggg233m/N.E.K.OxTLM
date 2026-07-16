@@ -110,6 +110,20 @@ class SkillFeedbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("respond", kwargs["ai_behavior"])
         self.assertIn("实际采集数量：9", text)
 
+    async def test_construction_blocked_feedback_forces_specific_safe_choice(self):
+        plugin = FakePlugin()
+        feedback = SkillFeedbackHandler(plugin)
+        await feedback.blocked({
+            "skill_id": "build", "skill_name": "mine_ore", "revision": 8,
+            "blocked_notification_revision": 0, "status": "BLOCKED",
+            "last_failure_reason": "PLACEMENT_PROTECTED",
+            "result": {"decision_required": True},
+        })
+        text, kwargs = plugin.pushes[0]
+        self.assertEqual("respond", kwargs["ai_behavior"])
+        self.assertIn("绝不能绕过保护", text)
+        self.assertIn("改走不需放置的路线", text)
+
 
 if __name__ == "__main__":
     unittest.main()

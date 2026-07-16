@@ -60,7 +60,8 @@ public final class AutonomousMiningAction implements MaidAction {
     private static final double MAX_BREAK_DISTANCE_SQUARED = 4.5D * 4.5D;
     private static final Set<String> ALLOWED_ARGS = Set.of(
             "selector", "target_count", "direction", "shape",
-            "segment_length", "speed", "discovery_mode");
+            "segment_length", "speed", "discovery_mode",
+            "placement_policy", "max_placements");
     private static final Direction[] HORIZONTAL_DIRECTIONS = {
             Direction.NORTH, Direction.EAST, Direction.SOUTH, Direction.WEST
     };
@@ -74,6 +75,8 @@ public final class AutonomousMiningAction implements MaidAction {
     private final int segmentLength;
     private final double speed;
     private final DiscoveryMode discoveryMode;
+    private final PlacementPolicy placementPolicy;
+    private final int maxPlacements;
     private final JsonObject normalizedArgs;
     private AutonomousMiningState state;
     private final Set<BlockPos> harvestedPositions = new HashSet<>();
@@ -101,6 +104,9 @@ public final class AutonomousMiningAction implements MaidAction {
     private BlockState expectedTargetState;
     private MaidProgressiveBlockBreaker breaker;
     private int expandedNodes;
+    private int placementsUsed;
+    private int bridgeSupportsPlaced;
+    private int waterSealsPlaced;
     private boolean persistentSessionActive;
 
     public AutonomousMiningAction(Predicate<BlockState> selector,
@@ -110,7 +116,9 @@ public final class AutonomousMiningAction implements MaidAction {
                                   ShapeMode shapeMode,
                                   int segmentLength,
                                   double speed,
-                                  DiscoveryMode discoveryMode) {
+                                  DiscoveryMode discoveryMode,
+                                  PlacementPolicy placementPolicy,
+                                  int maxPlacements) {
         this.selector = Objects.requireNonNull(selector, "selector");
         this.selectorDescription = Objects.requireNonNull(
                 selectorDescription, "selectorDescription");
@@ -129,9 +137,17 @@ public final class AutonomousMiningAction implements MaidAction {
         this.segmentLength = segmentLength;
         this.speed = speed;
         this.discoveryMode = Objects.requireNonNull(discoveryMode, "discoveryMode");
+        this.placementPolicy = Objects.requireNonNull(
+                placementPolicy, "placementPolicy");
+        if (maxPlacements < 0 || maxPlacements > 4096) {
+            throw new IllegalArgumentException(
+                    "max_placements must be between 0 and 4096");
+        }
+        this.maxPlacements = maxPlacements;
         this.state = new AutonomousMiningState(targetCount);
         this.normalizedArgs = normalizedArgs(selectorDescription, targetCount,
-                directionMode, shapeMode, segmentLength, speed, discoveryMode);
+                directionMode, shapeMode, segmentLength, speed, discoveryMode,
+                placementPolicy, maxPlacements);
     }
 
     public static AutonomousMiningAction fromArgs(JsonObject args) {
@@ -170,6 +186,7 @@ public final class AutonomousMiningAction implements MaidAction {
         int targetCount = optionalInt(args, "target_count", 1);
         int segmentLength = optionalInt(args, "segment_length", 8);
         double speed = optionalDouble(args, "speed", 0.7D);
+        int maxPlacements = optionalInt(args, "max_placements", 0);
         if (targetCount < 1) {
             throw new IllegalArgumentException("target_count must be at least 1");
         }
@@ -179,12 +196,19 @@ public final class AutonomousMiningAction implements MaidAction {
         if (speed < 0.4D || speed > 1.0D) {
             throw new IllegalArgumentException("speed must be between 0.4 and 1.0");
         }
+        if (maxPlacements < 0 || maxPlacements > 4096) {
+            throw new IllegalArgumentException(
+                    "max_placements must be between 0 and 4096");
+        }
         return new AutonomousMiningAction(selector, description, targetCount,
                 DirectionMode.fromWireName(optionalString(args, "direction", "auto")),
                 ShapeMode.fromWireName(optionalString(args, "shape", "auto")),
                 segmentLength, speed,
                 DiscoveryMode.fromWireName(optionalString(
-                        args, "discovery_mode", "loaded_scan")));
+                        args, "discovery_mode", "loaded_scan")),
+                PlacementPolicy.fromWireName(optionalString(args,
+                        "placement_policy", "disabled")),
+                maxPlacements);
     }
 
     @Override
@@ -194,7 +218,10 @@ public final class AutonomousMiningAction implements MaidAction {
 
     @Override
     public Set<MaidActionResource> resources() {
-        return Set.of(MaidActionResource.MOVE, MaidActionResource.HAND,
+        return placementPolicy.enabled()
+                ? Set.of(MaidActionResource.MOVE, MaidActionResource.HAND,
+                MaidActionResource.BREAK, MaidActionResource.PLACE)
+                : Set.of(MaidActionResource.MOVE, MaidActionResource.HAND,
                 MaidActionResource.BREAK);
     }
 
@@ -222,6 +249,12 @@ public final class AutonomousMiningAction implements MaidAction {
         state = AutonomousMiningState.restore(targetCount,
                 snapshot.collectedCount(), snapshot.segmentsDug(),
                 snapshot.clearedBlocks());
+        placementsUsed = Math.toIntExact(Math.min(
+                Integer.MAX_VALUE, snapshot.placementsUsed()));
+        bridgeSupportsPlaced = Math.toIntExact(Math.min(
+                Integer.MAX_VALUE, snapshot.bridgeSupportsPlaced()));
+        waterSealsPlaced = Math.toIntExact(Math.min(
+                Integer.MAX_VALUE, snapshot.waterSealsPlaced()));
         origin = snapshot.originPos() == null
                 ? context.maid().blockPosition().immutable()
                 : snapshot.originPos();
@@ -400,16 +433,6 @@ public final class AutonomousMiningAction implements MaidAction {
                 return alternateOrBlocked(context, ActionEndReason.PATH_NOT_FOUND,
                         "unloaded_excavation_edge");
             }
-            BlockState blockState = context.level().getBlockState(pos);
-            if (HarvestBlocksAction.isAnyOre(blockState)) {
-                if (selector.test(blockState)) {
-                    transition(context, AutonomousMiningState.Phase.SCANNING,
-                            positionDetail("selected_ore_encountered", pos));
-                    return MaidActionTickResult.running();
-                }
-                return alternateOrBlocked(context, ActionEndReason.PATH_NOT_FOUND,
-                        "foreign_ore_obstruction");
-            }
         }
 
         BlockPos supportPos = stepTo.below();
@@ -417,7 +440,14 @@ public final class AutonomousMiningAction implements MaidAction {
         MaidTerrainWorldEvaluator.SupportAssessment supportAssessment =
                 MaidTerrainWorldEvaluator.assessStandSupport(
                         context.level(), supportPos, support);
-        if (supportAssessment != MaidTerrainWorldEvaluator.SupportAssessment.SAFE) {
+        boolean buildableSupport = constructionEnabled()
+                && support.canBeReplaced()
+                && (supportAssessment
+                == MaidTerrainWorldEvaluator.SupportAssessment.UNSAFE_SUPPORT
+                || supportAssessment
+                == MaidTerrainWorldEvaluator.SupportAssessment.WATER_HAZARD);
+        if (supportAssessment != MaidTerrainWorldEvaluator.SupportAssessment.SAFE
+                && !buildableSupport) {
             return alternateOrBlocked(context, supportEndReason(supportAssessment),
                     supportAssessment.name());
         }
@@ -426,8 +456,13 @@ public final class AutonomousMiningAction implements MaidAction {
             MaidTerrainWorldEvaluator.ClearanceAssessment clearance =
                     MaidTerrainWorldEvaluator.assessClearance(
                             context.level(), pos, blockState);
+            boolean sealableWater = constructionEnabled()
+                    && clearance
+                    == MaidTerrainWorldEvaluator.ClearanceAssessment.WATER_HAZARD
+                    && blockState.canBeReplaced();
             if (clearance != MaidTerrainWorldEvaluator.ClearanceAssessment.CLEAR
-                    && clearance != MaidTerrainWorldEvaluator.ClearanceAssessment.BREAKABLE) {
+                    && clearance != MaidTerrainWorldEvaluator.ClearanceAssessment.BREAKABLE
+                    && !sealableWater) {
                 return alternateOrBlocked(context, clearanceEndReason(clearance),
                         clearance.name());
             }
@@ -442,8 +477,7 @@ public final class AutonomousMiningAction implements MaidAction {
 
         MaidTerrainWorldEvaluator evaluator = new MaidTerrainWorldEvaluator(
                 context.level(), context.maid(), stepFrom, 3, 3, true,
-                pos -> !HarvestBlocksAction.isAnyOre(
-                        context.level().getBlockState(pos)));
+                ignored -> true, ignored -> constructionEnabled());
         terrainSearch = new MaidTerrainSearch(stepFrom, Set.of(stepTo), evaluator,
                 MAX_EXCAVATION_EXPANSIONS, EnumSet.of(stepKind));
         terrainGoalTargets = Map.of();
@@ -473,7 +507,9 @@ public final class AutonomousMiningAction implements MaidAction {
                 return blocked(context, ActionEndReason.INTERNAL_ERROR,
                         "planner_returned_non_direct_excavation_step");
             }
-            navigator = new MaidTerrainNavigator(path, handLease, speed, true);
+            navigator = new MaidTerrainNavigator(
+                    path, handLease, speed, true, constructionEnabled(),
+                    remainingPlacementBudget());
             navigator.start(context);
             report(context, AutonomousMiningState.Phase.EXCAVATING,
                     stepDetail("moving"));
@@ -484,11 +520,9 @@ public final class AutonomousMiningAction implements MaidAction {
                     "excavation_runtime_missing");
         }
         MaidTerrainNavigator.TickResult tick = navigator.tick(context);
+        recordPlacements(navigator);
         for (MaidTerrainNavigator.ClearedBlock event : navigator.drainClearedBlocks()) {
-            if (HarvestBlocksAction.isAnyOre(event.state())) {
-                return blocked(context, ActionEndReason.INTERNAL_ERROR,
-                        "route_cleared_ore_invariant_breached");
-            }
+            recordRouteClearedBlock(event.pos(), event.state());
             state.recordRouteClearance(1);
         }
         if (tick.outcome() == MaidTerrainNavigator.Outcome.FAILED) {
@@ -569,8 +603,7 @@ public final class AutonomousMiningAction implements MaidAction {
         MaidTerrainWorldEvaluator evaluator = new MaidTerrainWorldEvaluator(
                 context.level(), context.maid(), start,
                 SCAN_RADIUS + 3, SCAN_RADIUS + 3, true,
-                pos -> !HarvestBlocksAction.isAnyOre(
-                        context.level().getBlockState(pos)));
+                ignored -> true, ignored -> constructionEnabled());
         LinkedHashMap<BlockPos, BlockPos> goals = new LinkedHashMap<>();
         for (BlockPos target : candidates) {
             BlockState candidateState = context.level().getBlockState(target);
@@ -633,7 +666,9 @@ public final class AutonomousMiningAction implements MaidAction {
                 return blocked(context, ActionEndReason.TARGET_CHANGED,
                         "target_changed");
             }
-            navigator = new MaidTerrainNavigator(path, handLease, speed, true);
+            navigator = new MaidTerrainNavigator(
+                    path, handLease, speed, true, constructionEnabled(),
+                    remainingPlacementBudget());
             navigator.start(context);
             report(context, AutonomousMiningState.Phase.HARVESTING,
                     positionDetail("approaching", currentTarget));
@@ -641,12 +676,10 @@ public final class AutonomousMiningAction implements MaidAction {
         }
         if (navigator != null) {
             MaidTerrainNavigator.TickResult tick = navigator.tick(context);
+            recordPlacements(navigator);
             int cleared = 0;
             for (MaidTerrainNavigator.ClearedBlock event : navigator.drainClearedBlocks()) {
-                if (HarvestBlocksAction.isAnyOre(event.state())) {
-                    return blocked(context, ActionEndReason.INTERNAL_ERROR,
-                            "route_cleared_ore_invariant_breached");
-                }
+                recordRouteClearedBlock(event.pos(), event.state());
                 cleared++;
             }
             state.recordRouteClearance(cleared);
@@ -658,6 +691,14 @@ public final class AutonomousMiningAction implements MaidAction {
                 navigator = null;
                 expectedTargetState = context.level().getBlockState(currentTarget);
                 if (!eligibleTarget(currentTarget, expectedTargetState)) {
+                    if (harvestedPositions.contains(currentTarget)) {
+                        currentTarget = null;
+                        expectedTargetState = null;
+                        planningPurpose = null;
+                        transition(context, AutonomousMiningState.Phase.SCANNING,
+                                detail("route_harvested_target"));
+                        return MaidActionTickResult.running();
+                    }
                     return blocked(context, ActionEndReason.TARGET_CHANGED,
                             "target_changed");
                 }
@@ -748,6 +789,48 @@ public final class AutonomousMiningAction implements MaidAction {
 
     private boolean eligibleTarget(BlockPos pos, BlockState candidate) {
         return !harvestedPositions.contains(pos) && selector.test(candidate);
+    }
+
+    /** Records a committed route break without treating non-target ore as a goal. */
+    boolean recordRouteClearedBlock(BlockPos pos, BlockState originalState) {
+        Objects.requireNonNull(pos, "pos");
+        Objects.requireNonNull(originalState, "originalState");
+        if (!selector.test(originalState)) {
+            return false;
+        }
+        BlockPos harvested = pos.immutable();
+        if (!harvestedPositions.add(harvested)) {
+            return false;
+        }
+        veinTracker.rememberHarvested(harvested);
+        state.recordHarvest();
+        return true;
+    }
+
+    private void recordPlacements(MaidTerrainNavigator activeNavigator) {
+        for (MaidTerrainNavigator.PlacedBlock placed
+                : activeNavigator.drainPlacedBlocks()) {
+            placementsUsed++;
+            if (placed.purpose() == MaidTerrainBuilder.Purpose.SEAL_FLUID) {
+                waterSealsPlaced++;
+            } else {
+                bridgeSupportsPlaced++;
+            }
+        }
+    }
+
+    private boolean constructionEnabled() {
+        return placementPolicy.enabled();
+    }
+
+    private int remainingPlacementBudget() {
+        if (!placementPolicy.enabled()) {
+            return 0;
+        }
+        if (maxPlacements == 0) {
+            return Integer.MAX_VALUE;
+        }
+        return Math.max(0, maxPlacements - placementsUsed);
     }
 
     private ExcavateSegmentAction.Shape resolveShape(MaidActionContext context) {
@@ -843,6 +926,9 @@ public final class AutonomousMiningAction implements MaidAction {
         report.addProperty("segment_steps", stepsInCurrentSegment);
         report.addProperty("segment_length", segmentLength);
         report.addProperty("planner_expanded_nodes", expandedNodes);
+        report.addProperty("placements_used", placementsUsed);
+        report.addProperty("bridge_supports_placed", bridgeSupportsPlaced);
+        report.addProperty("water_seals_placed", waterSealsPlaced);
         if (activeDirection != null) {
             report.addProperty("direction", activeDirection.getName());
         }
@@ -866,6 +952,9 @@ public final class AutonomousMiningAction implements MaidAction {
         model.updateCounts(context.execution().actionId(),
                 state.collectedCount(), state.segmentsDug(),
                 state.clearedBlocks(), context.gameTime());
+        model.updateConstructionCounts(context.execution().actionId(),
+                placementsUsed, bridgeSupportsPlaced, waterSealsPlaced,
+                context.gameTime());
         model.updateWorkface(context.execution().actionId(),
                 realEnd == null ? context.maid().blockPosition() : realEnd,
                 context.gameTime());
@@ -985,6 +1074,11 @@ public final class AutonomousMiningAction implements MaidAction {
         result.addProperty("selector", selectorDescription);
         result.addProperty("segment_length", segmentLength);
         result.addProperty("planner_expanded_nodes", expandedNodes);
+        result.addProperty("placement_policy", placementPolicy.wireName);
+        result.addProperty("max_placements", maxPlacements);
+        result.addProperty("placements_used", placementsUsed);
+        result.addProperty("bridge_supports_placed", bridgeSupportsPlaced);
+        result.addProperty("water_seals_placed", waterSealsPlaced);
         if (activeDirection != null) {
             result.addProperty("direction", activeDirection.getName());
         }
@@ -1227,7 +1321,8 @@ public final class AutonomousMiningAction implements MaidAction {
     private static JsonObject normalizedArgs(
             String selectorDescription, int targetCount,
             DirectionMode directionMode, ShapeMode shapeMode,
-            int segmentLength, double speed, DiscoveryMode discoveryMode) {
+            int segmentLength, double speed, DiscoveryMode discoveryMode,
+            PlacementPolicy placementPolicy, int maxPlacements) {
         JsonObject selector = new JsonObject();
         if (selectorDescription.startsWith("block:")) {
             selector.addProperty("type", "block");
@@ -1247,6 +1342,8 @@ public final class AutonomousMiningAction implements MaidAction {
         args.addProperty("segment_length", segmentLength);
         args.addProperty("speed", speed);
         args.addProperty("discovery_mode", discoveryMode.wireName);
+        args.addProperty("placement_policy", placementPolicy.wireName);
+        args.addProperty("max_placements", maxPlacements);
         return args;
     }
 
@@ -1322,6 +1419,34 @@ public final class AutonomousMiningAction implements MaidAction {
             }
             throw new IllegalArgumentException(
                     "discovery_mode must be loaded_scan or exposed_only");
+        }
+    }
+
+    public enum PlacementPolicy {
+        DISABLED("disabled"),
+        SAFE_SUPPORT_AND_WATER_SEAL("safe_support_and_water_seal");
+
+        private final String wireName;
+
+        PlacementPolicy(String wireName) {
+            this.wireName = wireName;
+        }
+
+        boolean enabled() {
+            return this == SAFE_SUPPORT_AND_WATER_SEAL;
+        }
+
+        static PlacementPolicy fromWireName(String value) {
+            String normalized = value == null ? ""
+                    : value.trim().toLowerCase(Locale.ROOT);
+            for (PlacementPolicy policy : values()) {
+                if (policy.wireName.equals(normalized)) {
+                    return policy;
+                }
+            }
+            throw new IllegalArgumentException(
+                    "placement_policy must be disabled or "
+                            + "safe_support_and_water_seal");
         }
     }
 

@@ -38,6 +38,10 @@ class MineOreSkillTests(unittest.TestCase):
         self.assertEqual("auto", autonomous.args["direction"])
         self.assertEqual("auto", autonomous.args["shape"])
         self.assertEqual("loaded_scan", autonomous.args["discovery_mode"])
+        self.assertEqual(
+            "safe_support_and_water_seal", autonomous.args["placement_policy"]
+        )
+        self.assertEqual(0, autonomous.args["max_placements"])
 
         definition, run = run_for()
         self.assertEqual("fishbone", run.args["strategy"])
@@ -65,6 +69,8 @@ class MineOreSkillTests(unittest.TestCase):
             "segment_length": 6,
             "speed": 0.8,
             "discovery_mode": "exposed_only",
+            "placement_policy": "disabled",
+            "max_placements": 12,
         }, execution_mode=None)
         directive = definition.next_directive(run, None)
         self.assertIsInstance(directive, StartAction)
@@ -77,7 +83,52 @@ class MineOreSkillTests(unittest.TestCase):
             "segment_length": 6,
             "speed": 0.8,
             "discovery_mode": "exposed_only",
+            "placement_policy": "disabled",
+            "max_placements": 12,
         }, directive.args)
+
+    def test_old_autonomous_checkpoint_does_not_gain_placement_authority(self):
+        definition = MineOreSkill()
+        run = SkillRun(
+            "00000000-0000-0000-0000-000000000099", "maid", "mine_ore",
+            {
+                "selector": {"type": "tag", "id": "minecraft:iron_ores"},
+                "target_count": 4,
+                "target_metric": "blocks_harvested",
+                "execution_mode": "autonomous",
+                "direction": "auto",
+                "shape": "auto",
+                "segment_length": 8,
+                "speed": 0.7,
+                "discovery_mode": "loaded_scan",
+            },
+        )
+        definition.initialize(run)
+
+        directive = definition.next_directive(run, None)
+
+        self.assertEqual("disabled", directive.args["placement_policy"])
+        self.assertEqual(0, directive.args["max_placements"])
+
+    def test_autonomous_construction_block_returns_concrete_decision(self):
+        definition, run = run_for(execution_mode=None)
+        directive = definition.next_directive(run, terminal(
+            "autonomous_mining", status="FAILED", end_reason="TOOL_NOT_FOUND",
+            result={
+                "phase": "BLOCKED",
+                "blocked_reason": "no_building_material",
+                "decision_required": True,
+            },
+        ))
+        self.assertIsInstance(directive, Blocked)
+        self.assertEqual(
+            "provide_material_or_restart_without_construction",
+            directive.result["decision"]["mode"],
+        )
+        self.assertIn(
+            "placement_policy",
+            directive.result["decision"]["adjustable_fields"],
+        )
 
     def test_autonomous_blocked_terminal_requests_restart_decision(self):
         definition, run = run_for(execution_mode=None)

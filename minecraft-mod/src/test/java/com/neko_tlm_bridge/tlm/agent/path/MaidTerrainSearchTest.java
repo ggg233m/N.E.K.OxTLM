@@ -61,6 +61,30 @@ class MaidTerrainSearchTest {
     }
 
     @Test
+    void bridgeSupportCostIsIncludedAndExistingGroundIsPreferred() {
+        BlockPos start = pos(0, 1, 0);
+        BlockPos goal = pos(2, 1, 0);
+        FakeEvaluator world = flatWorld(0, 2, -1, 1)
+                .removeSupport(pos(1, 0, 0))
+                .supportCost(pos(1, 0, 0), 20.0D);
+
+        MaidTerrainPath path = complete(new MaidTerrainSearch(
+                start, Set.of(goal), world, 128));
+
+        assertTrue(path.steps().stream().anyMatch(step -> step.to().getZ() != 0),
+                "A* should prefer the longer existing floor over costly construction");
+        assertEquals(4.0D, path.totalCost(), EPSILON);
+
+        FakeEvaluator bridgeOnly = new FakeEvaluator(0, 2, 0, 2, 0, 0)
+                .support(pos(0, 0, 0))
+                .support(pos(2, 0, 0))
+                .supportCost(pos(1, 0, 0), 20.0D);
+        MaidTerrainPath bridgePath = complete(new MaidTerrainSearch(
+                start, Set.of(goal), bridgeOnly, 32));
+        assertEquals(22.0D, bridgePath.totalCost(), EPSILON);
+    }
+
+    @Test
     void reservesAndClearsBothFeetAndHeadCellsThroughWall() {
         BlockPos start = pos(0, 1, 0);
         BlockPos feet = pos(1, 1, 0);
@@ -296,6 +320,7 @@ class MaidTerrainSearchTest {
         private final int minZ;
         private final int maxZ;
         private final Map<Long, Double> clearCosts = new HashMap<>();
+        private final Map<Long, Double> supportCosts = new HashMap<>();
         private final Set<Long> supports = new HashSet<>();
         private final Set<Long> unloaded = new HashSet<>();
         private final Set<Long> clearCostQueries = new HashSet<>();
@@ -311,6 +336,16 @@ class MaidTerrainSearchTest {
 
         private FakeEvaluator support(BlockPos pos) {
             supports.add(pos.asLong());
+            return this;
+        }
+
+        private FakeEvaluator removeSupport(BlockPos pos) {
+            supports.remove(pos.asLong());
+            return this;
+        }
+
+        private FakeEvaluator supportCost(BlockPos pos, double cost) {
+            supportCosts.put(pos.asLong(), cost);
             return this;
         }
 
@@ -348,6 +383,18 @@ class MaidTerrainSearchTest {
         @Override
         public boolean canStandOn(BlockPos pos) {
             return isLoaded(pos) && supports.contains(pos.asLong());
+        }
+
+        @Override
+        public double supportCost(BlockPos pos) {
+            if (!isLoaded(pos)) {
+                return Double.POSITIVE_INFINITY;
+            }
+            if (supports.contains(pos.asLong())) {
+                return 0.0D;
+            }
+            return supportCosts.getOrDefault(
+                    pos.asLong(), Double.POSITIVE_INFINITY);
         }
     }
 }

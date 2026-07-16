@@ -19,4 +19,13 @@ public interface MaidTerrainNodeEvaluator {
 
     /** Returns whether the block at {@code pos} safely supports the maid. */
     boolean canStandOn(BlockPos pos);
+
+    /**
+     * Returns the extra cost of preparing the support at {@code pos}. Existing
+     * safe ground costs zero; a finite positive value means construction is
+     * allowed; positive infinity means the destination cannot be supported.
+     */
+    default double supportCost(BlockPos pos) {
+        return canStandOn(pos) ? 0.0D : Double.POSITIVE_INFINITY;
+    }
 }

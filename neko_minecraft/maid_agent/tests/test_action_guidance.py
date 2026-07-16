@@ -95,6 +95,8 @@ class MaidActionGuidanceTests(unittest.TestCase):
             "mine_ore", "target_count", "blocks_harvested",
             "autonomous_mining", "execution_mode", "segment_length",
             "loaded_scan", "decision_required",
+            "placement_policy", "safe_support_and_water_seal",
+            "max_placements",
         ):
             self.assertIn(value, skill_text)
             self.assertIn(value, _TLM_AI_INSTRUCTIONS)
@@ -104,6 +106,19 @@ class MaidActionGuidanceTests(unittest.TestCase):
         self.assertIn("fishbone", skill_text)
         self.assertIn("legacy", skill_text)
         self.assertIn("旧检查点", _TLM_AI_INSTRUCTIONS)
+
+    def test_autonomous_miner_documents_route_ore_and_safe_construction(self):
+        skill_text = MC_START_SKILL["description"] + str(
+            MC_START_SKILL["parameters"]
+        )
+        for value in (
+            "其他矿石", "搭桥", "封水", "普通实心方块",
+            "placement_policy", "max_placements",
+        ):
+            self.assertIn(value, skill_text)
+            self.assertIn(value, _TLM_AI_INSTRUCTIONS)
+        self.assertIn("不绕过领地保护", skill_text)
+        self.assertIn("placement_protected", _TLM_AI_INSTRUCTIONS)
 
     def test_guidance_requires_a_concrete_llm_recovery_plan(self):
         self.assertIn("具体解决方案", _TLM_AI_INSTRUCTIONS)

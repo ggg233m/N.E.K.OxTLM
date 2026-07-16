@@ -4,7 +4,9 @@ import com.google.gson.JsonObject;
 import com.neko_tlm_bridge.tlm.agent.ActionEndReason;
 import com.neko_tlm_bridge.tlm.agent.MaidActionKind;
 import com.neko_tlm_bridge.tlm.agent.MaidActionResource;
+import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.world.level.block.Blocks;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -33,10 +35,24 @@ class AutonomousMiningActionTest {
         assertEquals("tag:#minecraft:diamond_ores", action.selectorDescription());
         assertEquals(1, action.normalizedArgs().get("target_count").getAsInt());
         assertEquals("auto", action.normalizedArgs().get("direction").getAsString());
+        assertEquals("disabled",
+                action.normalizedArgs().get("placement_policy").getAsString());
+        assertEquals(0, action.normalizedArgs().get("max_placements").getAsInt());
         assertTrue(action.resources().containsAll(List.of(
                 MaidActionResource.MOVE,
                 MaidActionResource.HAND,
                 MaidActionResource.BREAK)));
+        assertFalse(action.resources().contains(MaidActionResource.PLACE));
+    }
+
+    @Test
+    void explicitSafeConstructionClaimsPlaceResource() {
+        JsonObject args = args("tag", "minecraft:diamond_ores");
+        args.addProperty("placement_policy", "safe_support_and_water_seal");
+
+        AutonomousMiningAction action = AutonomousMiningAction.fromArgs(args);
+
+        assertTrue(action.resources().contains(MaidActionResource.PLACE));
     }
 
     @Test
@@ -48,6 +64,8 @@ class AutonomousMiningActionTest {
         args.addProperty("segment_length", 3);
         args.addProperty("speed", 0.5D);
         args.addProperty("discovery_mode", "exposed_only");
+        args.addProperty("placement_policy", "disabled");
+        args.addProperty("max_placements", 12);
 
         AutonomousMiningAction action = AutonomousMiningAction.fromArgs(args);
 
@@ -60,6 +78,11 @@ class AutonomousMiningActionTest {
         assertEquals(0.5D, action.speed());
         assertEquals(AutonomousMiningAction.DiscoveryMode.EXPOSED_ONLY,
                 action.discoveryMode());
+        assertEquals("disabled",
+                action.normalizedArgs().get("placement_policy").getAsString());
+        assertEquals(12,
+                action.normalizedArgs().get("max_placements").getAsInt());
+        assertFalse(action.resources().contains(MaidActionResource.PLACE));
     }
 
     @Test
@@ -83,6 +106,16 @@ class AutonomousMiningActionTest {
         speed.addProperty("speed", 1.1D);
         assertThrows(IllegalArgumentException.class,
                 () -> AutonomousMiningAction.fromArgs(speed));
+
+        JsonObject placements = args("block", "minecraft:stone");
+        placements.addProperty("max_placements", 4097);
+        assertThrows(IllegalArgumentException.class,
+                () -> AutonomousMiningAction.fromArgs(placements));
+
+        JsonObject placementPolicy = args("block", "minecraft:stone");
+        placementPolicy.addProperty("placement_policy", "unsafe");
+        assertThrows(IllegalArgumentException.class,
+                () -> AutonomousMiningAction.fromArgs(placementPolicy));
     }
 
     @Test
@@ -111,6 +144,37 @@ class AutonomousMiningActionTest {
                 AutonomousMiningAction.DirectionMode.EAST, Direction.NORTH));
         assertEquals(Direction.NORTH, AutonomousMiningAction.resolveDirection(
                 AutonomousMiningAction.DirectionMode.AUTO, Direction.UP));
+    }
+
+    @Test
+    void routeClearedSelectorBlocksCountAndLockConnectedMiningProgress() {
+        AutonomousMiningAction action = AutonomousMiningAction.fromArgs(
+                args("block", "minecraft:diamond_ore"));
+
+        assertTrue(action.recordRouteClearedBlock(
+                new BlockPos(4, -54, 7), Blocks.DIAMOND_ORE.defaultBlockState()));
+        assertTrue(action.recordRouteClearedBlock(
+                new BlockPos(5, -54, 7), Blocks.DIAMOND_ORE.defaultBlockState()));
+        assertFalse(action.recordRouteClearedBlock(
+                new BlockPos(5, -54, 7), Blocks.DIAMOND_ORE.defaultBlockState()));
+
+        JsonObject result = action.terminationResult(null, ActionEndReason.REQUESTED);
+        assertEquals(2, result.get("collected_count").getAsInt());
+        // target_count is a minimum; route collection does not complete until
+        // the locked connected vein is rescanned and exhausted.
+        assertEquals("VALIDATING", result.get("phase").getAsString());
+    }
+
+    @Test
+    void routeClearedForeignOreDoesNotCountAsSelectorProgress() {
+        AutonomousMiningAction action = AutonomousMiningAction.fromArgs(
+                args("block", "minecraft:diamond_ore"));
+
+        assertFalse(action.recordRouteClearedBlock(
+                new BlockPos(0, 16, 0), Blocks.IRON_ORE.defaultBlockState()));
+
+        JsonObject result = action.terminationResult(null, ActionEndReason.REQUESTED);
+        assertEquals(0, result.get("collected_count").getAsInt());
     }
 
     private static JsonObject args(String type, String id) {

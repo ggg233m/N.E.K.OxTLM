@@ -111,6 +111,8 @@ class ActionRegistryTests(unittest.TestCase):
             "segment_length": 6,
             "speed": 0.8,
             "discovery_mode": "exposed_only",
+            "placement_policy": "disabled",
+            "max_placements": 12,
         })
         self.assertEqual({
             "selector": {"type": "tag", "id": "minecraft:diamond_ores"},
@@ -120,6 +122,8 @@ class ActionRegistryTests(unittest.TestCase):
             "segment_length": 6,
             "speed": 0.8,
             "discovery_mode": "exposed_only",
+            "placement_policy": "disabled",
+            "max_placements": 12,
         }, args)
 
     def test_autonomous_mining_defaults_are_java_owned_auto(self):
@@ -132,6 +136,10 @@ class ActionRegistryTests(unittest.TestCase):
         self.assertEqual(8, args["segment_length"])
         self.assertEqual(0.7, args["speed"])
         self.assertEqual("loaded_scan", args["discovery_mode"])
+        self.assertEqual(
+            "disabled", args["placement_policy"]
+        )
+        self.assertEqual(0, args["max_placements"])
 
     def test_rejects_unknown_or_out_of_range_autonomous_mining_fields(self):
         base = {"selector": {"type": "tag", "id": "minecraft:coal_ores"}}
@@ -141,6 +149,9 @@ class ActionRegistryTests(unittest.TestCase):
             {**base, "segment_length": 9},
             {**base, "speed": 0.1},
             {**base, "discovery_mode": "xray"},
+            {**base, "placement_policy": "unsafe_everything"},
+            {**base, "max_placements": -1},
+            {**base, "max_placements": 4097},
             {**base, "route": [{"x": 0, "y": 0, "z": 0}]},
         )
         for args in invalid:

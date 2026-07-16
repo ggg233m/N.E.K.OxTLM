@@ -214,6 +214,9 @@ def _blocked_text(run: Mapping[str, Any]) -> str:
         text += "结构化决策闸门：" + json.dumps(
             dict(decision), ensure_ascii=False, separators=(",", ":"), default=str
         )[:2000] + "。"
+    construction_instruction = _construction_recovery_instruction(reason)
+    if construction_instruction:
+        text += construction_instruction
     text += (
         "这是 Skill 终态，不会自动继续。你必须基于 decision 或 suggestions 给出一个具体方案；"
         "若 Java 给出 decision，则按 blocked_reason 和 adjustable_fields 选择不同参数。"
@@ -223,6 +226,29 @@ def _blocked_text(run: Mapping[str, Any]) -> str:
         "禁止原样重启、编造坐标或声称仍在执行。"
     )
     return text
+
+
+def _construction_recovery_instruction(reason: str) -> str:
+    code = str(reason or "").strip().upper()
+    if code == "NO_BUILDING_MATERIAL":
+        return (
+            "这是建筑材料不足：具体方案只能是让玩家给女仆背包补充普通实心方块，或经确认后"
+            "改用 placement_policy=disabled 并选择不需要放置的不同路线；不要原样重试。"
+        )
+    if code == "PLACEMENT_BUDGET_EXHAUSTED":
+        return (
+            "这是人工放置上限耗尽：经玩家确认后可将 max_placements 改为0，或选择不同路线；"
+            "不要把它误判成缺矿。"
+        )
+    if code == "WATER_SEAL_FAILED":
+        return (
+            "封水未能安全完成：应提出换方向/换矿道形状或终止的具体方案，不要在同一水体原样循环。"
+        )
+    if code == "PLACEMENT_PROTECTED":
+        return (
+            "目标位置禁止放置：绝不能绕过保护；只能让玩家把女仆移出保护区、改走不需放置的路线或终止。"
+        )
+    return ""
 
 
 def _finished_text(run: Mapping[str, Any]) -> str:
