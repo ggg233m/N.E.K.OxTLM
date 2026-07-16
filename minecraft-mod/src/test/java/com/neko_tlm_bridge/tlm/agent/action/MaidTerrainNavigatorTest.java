@@ -1,6 +1,7 @@
 package com.neko_tlm_bridge.tlm.agent.action;
 
 import com.neko_tlm_bridge.tlm.agent.path.MaidTerrainStep;
+import com.neko_tlm_bridge.tlm.agent.path.MaidTerrainWorldEvaluator;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.world.level.block.Blocks;
@@ -65,6 +66,22 @@ class MaidTerrainNavigatorTest {
                 Blocks.STONE.defaultBlockState()));
         assertFalse(MaidTerrainNavigator.isFallingBlockState(
                 Blocks.DIAMOND_ORE.defaultBlockState()));
+    }
+
+    @Test
+    void dryBreakableObstacleDoesNotEnterWaterSealFlow() {
+        assertFalse(MaidTerrainNavigator.requiresWaterSeal(
+                MaidTerrainWorldEvaluator.ClearanceAssessment.BREAKABLE,
+                false, false));
+        assertTrue(MaidTerrainNavigator.requiresWaterSeal(
+                MaidTerrainWorldEvaluator.ClearanceAssessment.WATER_HAZARD,
+                false, false));
+        assertTrue(MaidTerrainNavigator.requiresWaterSeal(
+                MaidTerrainWorldEvaluator.ClearanceAssessment.WATER_HAZARD,
+                true, true));
+        assertFalse(MaidTerrainNavigator.requiresWaterSeal(
+                MaidTerrainWorldEvaluator.ClearanceAssessment.UNSAFE,
+                true, false));
     }
 
     @Test

@@ -386,12 +386,10 @@ public final class MaidTerrainNavigator {
         MaidTerrainWorldEvaluator.ClearanceAssessment assessment =
                 MaidTerrainWorldEvaluator.assessClearance(
                         context.level(), obstacle, state);
+        boolean directFluid = !state.getFluidState().isEmpty();
         boolean directWater = state.getFluidState()
                 .is(net.minecraft.tags.FluidTags.WATER);
-        if ((!directWater && !updateExpectedObstacle)
-                || (!state.getFluidState().isEmpty() && !directWater)
-                || assessment
-                == MaidTerrainWorldEvaluator.ClearanceAssessment.LAVA_HAZARD) {
+        if (!requiresWaterSeal(assessment, directFluid, directWater)) {
             return null;
         }
 
@@ -444,6 +442,12 @@ public final class MaidTerrainNavigator {
             }
             return placement;
         }
+        if (candidates.isEmpty()) {
+            // The planner may have observed adjacent water which flowed away
+            // before execution. With no live water cell there is nothing to
+            // seal; let the breaker revalidate the now-dry obstacle.
+            return null;
+        }
         TickResult failure = fail(context, ActionEndReason.PATH_NOT_FOUND,
                 occupiedWaterCandidates > 0
                         ? "water_seal_requires_dry_start"
@@ -453,6 +457,16 @@ public final class MaidTerrainNavigator {
         failure.detail().addProperty(
                 "occupied_water_candidates", occupiedWaterCandidates);
         return failure;
+    }
+
+    static boolean requiresWaterSeal(
+            MaidTerrainWorldEvaluator.ClearanceAssessment assessment,
+            boolean directFluid, boolean directWater) {
+        if (directFluid) {
+            return directWater;
+        }
+        return assessment
+                == MaidTerrainWorldEvaluator.ClearanceAssessment.WATER_HAZARD;
     }
 
     private TickResult placeConstructionBlock(
