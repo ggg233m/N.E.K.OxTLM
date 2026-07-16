@@ -244,6 +244,11 @@ def _construction_recovery_instruction(reason: str) -> str:
         return (
             "封水未能安全完成：应提出换方向/换矿道形状或终止的具体方案，不要在同一水体原样循环。"
         )
+    if code == "WATER_SEAL_REQUIRES_DRY_START":
+        return (
+            "女仆当前身体占用了需要封堵的水格：应先移动到附近有支撑的干燥位置，再用不同方向或"
+            "矿道形状新建任务；禁止尝试把方块放进女仆身体。"
+        )
     if code == "PLACEMENT_PROTECTED":
         return (
             "目标位置禁止放置：绝不能绕过保护；只能让玩家把女仆移出保护区、改走不需放置的路线或终止。"

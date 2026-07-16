@@ -410,11 +410,14 @@ public final class MaidTerrainNavigator {
         candidates.sort(Comparator.comparingDouble(
                 pos -> context.maid().getEyePosition()
                         .distanceToSqr(Vec3.atCenterOf(pos))));
+        int occupiedWaterCandidates = 0;
         for (BlockPos target : candidates) {
             BlockState fluid = context.level().getBlockState(target);
-            if (!fluid.getFluidState().is(net.minecraft.tags.FluidTags.WATER)
-                    || target.equals(step.from())
-                    || target.equals(step.from().above())) {
+            if (!fluid.getFluidState().is(net.minecraft.tags.FluidTags.WATER)) {
+                continue;
+            }
+            if (target.equals(step.from()) || target.equals(step.from().above())) {
+                occupiedWaterCandidates++;
                 continue;
             }
             TickResult placement = placeConstructionBlock(
@@ -441,8 +444,15 @@ public final class MaidTerrainNavigator {
             }
             return placement;
         }
-        return fail(context, ActionEndReason.PATH_NOT_FOUND,
-                "water_seal_failed", true);
+        TickResult failure = fail(context, ActionEndReason.PATH_NOT_FOUND,
+                occupiedWaterCandidates > 0
+                        ? "water_seal_requires_dry_start"
+                        : "water_seal_failed",
+                true);
+        failure.detail().addProperty("water_candidates", candidates.size());
+        failure.detail().addProperty(
+                "occupied_water_candidates", occupiedWaterCandidates);
+        return failure;
     }
 
     private TickResult placeConstructionBlock(
@@ -482,7 +492,15 @@ public final class MaidTerrainNavigator {
             case PLACE_REJECTED -> "placement_protected";
             default -> failureMessage;
         };
-        return fail(context, reason, message, true);
+        TickResult failure = fail(context, reason, message, true);
+        failure.detail().addProperty(
+                "placement_status", placement.status().name());
+        failure.detail().addProperty("placement_detail", placement.detail());
+        failure.detail().addProperty("placement_purpose", purpose.name());
+        failure.detail().addProperty("placement_x", target.getX());
+        failure.detail().addProperty("placement_y", target.getY());
+        failure.detail().addProperty("placement_z", target.getZ());
+        return failure;
     }
 
     /**

@@ -21,11 +21,15 @@ import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.tags.TagKey;
+import net.minecraft.tags.FluidTags;
+import net.minecraft.world.entity.ai.behavior.BlockPosTracker;
+import net.minecraft.world.entity.ai.memory.MemoryModuleType;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.pathfinder.Path;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
@@ -58,6 +62,9 @@ public final class AutonomousMiningAction implements MaidAction {
     private static final int MAX_HARVEST_GOALS = 64;
     private static final int MAX_CANDIDATES = 16;
     private static final double MAX_BREAK_DISTANCE_SQUARED = 4.5D * 4.5D;
+    private static final int DRY_RELOCATION_RADIUS = 8;
+    private static final int MAX_DRY_RELOCATION_PATH_ATTEMPTS = 32;
+    private static final long DRY_RELOCATION_STUCK_TICKS = 80L;
     private static final Set<String> ALLOWED_ARGS = Set.of(
             "selector", "target_count", "direction", "shape",
             "segment_length", "speed", "discovery_mode",
@@ -107,6 +114,11 @@ public final class AutonomousMiningAction implements MaidAction {
     private int placementsUsed;
     private int bridgeSupportsPlaced;
     private int waterSealsPlaced;
+    private BlockPos dryRelocationTarget;
+    private long dryRelocationStartedAt = Long.MIN_VALUE;
+    private double dryRelocationWindowDistance;
+    private long dryRelocationWindowStartedAt = Long.MIN_VALUE;
+    private JsonObject lastNavigatorFailure;
     private boolean persistentSessionActive;
 
     public AutonomousMiningAction(Predicate<BlockState> selector,
@@ -301,9 +313,13 @@ public final class AutonomousMiningAction implements MaidAction {
             navigator.stop(context);
             navigator = null;
         }
+        dryRelocationTarget = null;
+        dryRelocationStartedAt = Long.MIN_VALUE;
+        dryRelocationWindowStartedAt = Long.MIN_VALUE;
         terrainSearch = null;
         planningPurpose = null;
         if (context != null && context.maid() != null) {
+            context.maid().getNavigation().stop();
             realEnd = context.maid().blockPosition().immutable();
             persistExternalStop(context, reason);
         }
@@ -410,6 +426,12 @@ public final class AutonomousMiningAction implements MaidAction {
 
     private MaidActionTickResult selectExcavationStep(MaidActionContext context) {
         BlockPos live = context.maid().blockPosition().immutable();
+        if (dryRelocationTarget != null) {
+            return advanceDryRelocation(context);
+        }
+        if (maidBodyTouchesWater(context, live)) {
+            return beginDryRelocation(context, live);
+        }
         if (!context.maid().onGround()) {
             return alternateOrBlocked(context, ActionEndReason.STUCK,
                     "maid_not_grounded_at_segment_origin");
@@ -487,6 +509,124 @@ public final class AutonomousMiningAction implements MaidAction {
         return MaidActionTickResult.running();
     }
 
+    /**
+     * Native navigation can leave shallow water, while construction must never
+     * replace the two cells currently occupied by the maid. Relocate to the
+     * nearest reachable dry stance before choosing a tunnel direction instead
+     * of misreporting those occupied cells as a failed seal placement.
+     */
+    private MaidActionTickResult beginDryRelocation(
+            MaidActionContext context, BlockPos live) {
+        List<BlockPos> candidates = new ArrayList<>();
+        for (BlockPos candidate : BlockPos.withinManhattan(
+                live, DRY_RELOCATION_RADIUS, 3, DRY_RELOCATION_RADIUS)) {
+            BlockPos immutable = candidate.immutable();
+            if (!immutable.equals(live) && isDrySafeStance(context, immutable)) {
+                candidates.add(immutable);
+            }
+        }
+        candidates.sort(Comparator
+                .comparingDouble((BlockPos pos) -> pos.distSqr(live))
+                .thenComparingInt(BlockPos::getY)
+                .thenComparingInt(BlockPos::getX)
+                .thenComparingInt(BlockPos::getZ));
+
+        int attempts = 0;
+        for (BlockPos candidate : candidates) {
+            if (attempts++ >= MAX_DRY_RELOCATION_PATH_ATTEMPTS) {
+                break;
+            }
+            Path path = context.maid().getNavigation().createPath(candidate, 0);
+            if (path == null || path.getNodeCount() == 0 || !path.canReach()) {
+                continue;
+            }
+            if (!context.maid().getNavigation().moveTo(path, speed)) {
+                continue;
+            }
+            dryRelocationTarget = candidate;
+            dryRelocationStartedAt = context.gameTime();
+            dryRelocationWindowStartedAt = context.gameTime();
+            dryRelocationWindowDistance = distanceToBlock(
+                    context.maid(), candidate);
+            context.maid().getBrain().setMemory(MemoryModuleType.LOOK_TARGET,
+                    new BlockPosTracker(candidate));
+            JsonObject detail = positionDetail(
+                    "relocating_from_occupied_water", candidate);
+            detail.addProperty("path_attempts", attempts);
+            report(context, AutonomousMiningState.Phase.SELECTING_SITE, detail);
+            return MaidActionTickResult.running();
+        }
+        return blocked(context, ActionEndReason.PATH_NOT_FOUND,
+                "waterlogged_start_no_reachable_dry_stance");
+    }
+
+    private MaidActionTickResult advanceDryRelocation(MaidActionContext context) {
+        BlockPos live = context.maid().blockPosition().immutable();
+        if (!maidBodyTouchesWater(context, live) && isDrySafeStance(context, live)) {
+            context.maid().getNavigation().stop();
+            realEnd = live;
+            dryRelocationTarget = null;
+            dryRelocationStartedAt = Long.MIN_VALUE;
+            dryRelocationWindowStartedAt = Long.MIN_VALUE;
+            transition(context, AutonomousMiningState.Phase.SELECTING_SITE,
+                    detail("dry_stance_reached"));
+            return MaidActionTickResult.running();
+        }
+        if (context.maid().getNavigation().isDone()) {
+            dryRelocationTarget = null;
+            return blocked(context, ActionEndReason.PATH_NOT_FOUND,
+                    "dry_relocation_path_finished_early");
+        }
+        double distance = distanceToBlock(context.maid(), dryRelocationTarget);
+        if (context.gameTime() - dryRelocationWindowStartedAt
+                >= DRY_RELOCATION_STUCK_TICKS) {
+            if (dryRelocationWindowDistance - distance < 0.5D) {
+                context.maid().getNavigation().stop();
+                dryRelocationTarget = null;
+                return blocked(context, ActionEndReason.STUCK,
+                        "dry_relocation_made_no_progress");
+            }
+            dryRelocationWindowDistance = distance;
+            dryRelocationWindowStartedAt = context.gameTime();
+        }
+        JsonObject detail = positionDetail(
+                "relocating_from_occupied_water", dryRelocationTarget);
+        detail.addProperty("distance", distance);
+        detail.addProperty("elapsed_ticks", Math.max(
+                0L, context.gameTime() - dryRelocationStartedAt));
+        report(context, AutonomousMiningState.Phase.SELECTING_SITE, detail);
+        return MaidActionTickResult.running();
+    }
+
+    private static boolean maidBodyTouchesWater(
+            MaidActionContext context, BlockPos feet) {
+        return context.level().getFluidState(feet).is(FluidTags.WATER)
+                || context.level().getFluidState(feet.above()).is(FluidTags.WATER);
+    }
+
+    private static boolean isDrySafeStance(
+            MaidActionContext context, BlockPos feet) {
+        if (!loadedBuildPosition(context, feet)
+                || !loadedBuildPosition(context, feet.above())
+                || !loadedBuildPosition(context, feet.below())) {
+            return false;
+        }
+        BlockState feetState = context.level().getBlockState(feet);
+        BlockState headState = context.level().getBlockState(feet.above());
+        BlockState support = context.level().getBlockState(feet.below());
+        return feetState.getFluidState().isEmpty()
+                && headState.getFluidState().isEmpty()
+                && feetState.getCollisionShape(context.level(), feet).isEmpty()
+                && headState.getCollisionShape(
+                context.level(), feet.above()).isEmpty()
+                && MaidTerrainWorldEvaluator.isSafeStandSupport(
+                context.level(), feet.below(), support);
+    }
+
+    private static double distanceToBlock(EntityMaid maid, BlockPos pos) {
+        return maid.position().distanceTo(Vec3.atBottomCenterOf(pos));
+    }
+
     private MaidActionTickResult advanceExcavation(MaidActionContext context) {
         if (terrainSearch != null) {
             MaidTerrainSearch.Status status = terrainSearch.advance(
@@ -526,6 +666,7 @@ public final class AutonomousMiningAction implements MaidAction {
             state.recordRouteClearance(1);
         }
         if (tick.outcome() == MaidTerrainNavigator.Outcome.FAILED) {
+            lastNavigatorFailure = tick.detail().deepCopy();
             navigator = null;
             return alternateOrBlocked(context, defaultReason(tick.reason()),
                     tickMessage(tick, "excavation_failed"));
@@ -684,6 +825,7 @@ public final class AutonomousMiningAction implements MaidAction {
             }
             state.recordRouteClearance(cleared);
             if (tick.outcome() == MaidTerrainNavigator.Outcome.FAILED) {
+                lastNavigatorFailure = tick.detail().deepCopy();
                 return blocked(context, defaultReason(tick.reason()),
                         tickMessage(tick, "ore_approach_failed"));
             }
@@ -1079,6 +1221,9 @@ public final class AutonomousMiningAction implements MaidAction {
         result.addProperty("placements_used", placementsUsed);
         result.addProperty("bridge_supports_placed", bridgeSupportsPlaced);
         result.addProperty("water_seals_placed", waterSealsPlaced);
+        if (lastNavigatorFailure != null) {
+            result.add("execution_failure", lastNavigatorFailure.deepCopy());
+        }
         if (activeDirection != null) {
             result.addProperty("direction", activeDirection.getName());
         }

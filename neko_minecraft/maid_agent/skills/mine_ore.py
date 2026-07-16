@@ -769,6 +769,16 @@ def _construction_blocked_decision(
             ],
             "requires_player_confirmation": True,
         }
+    if code == "WATER_SEAL_REQUIRES_DRY_START":
+        return {
+            "mode": "relocate_to_dry_stance_then_restart",
+            "recommended_actions": [
+                "move the maid to nearby dry supported ground",
+                "restart with a different direction or shape",
+                "abort mining",
+            ],
+            "requires_player_confirmation": True,
+        }
     if code == "PLACEMENT_PROTECTED":
         return {
             "mode": "leave_protected_area_or_abort",

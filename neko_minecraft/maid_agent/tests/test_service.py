@@ -104,6 +104,7 @@ class MaidActionServiceTests(unittest.IsolatedAsyncioTestCase):
             ("no_building_material", "补充普通实心方块"),
             ("placement_budget_exhausted", "max_placements 改为0"),
             ("water_seal_failed", "更换方向或矿道形状"),
+            ("water_seal_requires_dry_start", "有支撑的干燥位置"),
             ("placement_protected", "绝不能绕过保护"),
         )
         for sequence, (reason, expected) in enumerate(cases, start=60):
