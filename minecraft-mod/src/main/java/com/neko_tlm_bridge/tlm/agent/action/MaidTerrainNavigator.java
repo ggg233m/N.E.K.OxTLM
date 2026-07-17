@@ -52,6 +52,7 @@ public final class MaidTerrainNavigator {
     private static final int FALLING_ENTITY_SCAN_HEIGHT = 16;
     private static final int MAX_CONTINUOUS_FLAT_STEPS = 6;
     private static final double DIRECT_TURN_CENTER_TOLERANCE = 0.20D;
+    private static final double DIRECT_RIGHT_ANGLE_TURN_TOLERANCE = 0.32D;
     private static final double CONSTRUCTION_CENTER_TOLERANCE = 0.10D;
     private static final long CONSTRUCTION_CENTER_TIMEOUT_TICKS = 40L;
     private static final long PLAYER_WORK_ZONE_WAIT_TIMEOUT_TICKS = 200L;
@@ -1038,18 +1039,70 @@ public final class MaidTerrainNavigator {
         if (!directFlatMovement) {
             return true;
         }
-        boolean centered = directWaypointReached(
+        boolean arrived = directWaypointReached(
                 context.maid().getX(), context.maid().getZ(), current,
                 DIRECT_TURN_CENTER_TOLERANCE);
         if (stepIndex + 1 >= terrainPath.steps().size()) {
-            return centered;
+            return arrived;
         }
         MaidTerrainStep next = terrainPath.steps().get(stepIndex + 1);
         if (isDirectFlatStepGeometry(next)
                 && sameHorizontalDirection(current, next)) {
             return true;
         }
-        return centered;
+        double turnTolerance = DIRECT_TURN_CENTER_TOLERANCE;
+        if (isRightAngleFlatTurn(current, next)
+                && isContinuousFlatStep(context, next)
+                && isRightAngleTurnSweepOpen(context, current, next)) {
+            turnTolerance = DIRECT_RIGHT_ANGLE_TURN_TOLERANCE;
+        }
+        return directTurnWaypointReached(
+                context.maid().getX(), context.maid().getZ(), current,
+                turnTolerance);
+    }
+
+    static boolean isRightAngleFlatTurn(
+            MaidTerrainStep current, MaidTerrainStep next) {
+        if (!isDirectFlatStepGeometry(current)
+                || !isDirectFlatStepGeometry(next)
+                || !current.to().equals(next.from())) {
+            return false;
+        }
+        int currentX = current.to().getX() - current.from().getX();
+        int currentZ = current.to().getZ() - current.from().getZ();
+        int nextX = next.to().getX() - next.from().getX();
+        int nextZ = next.to().getZ() - next.from().getZ();
+        return currentX * nextX + currentZ * nextZ == 0;
+    }
+
+    static BlockPos rightAngleInnerCorner(
+            MaidTerrainStep current, MaidTerrainStep next) {
+        if (!isRightAngleFlatTurn(current, next)) {
+            return null;
+        }
+        int nextX = next.to().getX() - next.from().getX();
+        int nextZ = next.to().getZ() - next.from().getZ();
+        return current.from().offset(nextX, 0, nextZ);
+    }
+
+    private static boolean isRightAngleTurnSweepOpen(
+            MaidActionContext context,
+            MaidTerrainStep current,
+            MaidTerrainStep next) {
+        BlockPos innerCorner = rightAngleInnerCorner(current, next);
+        return innerCorner != null
+                && isTurnSweepCellOpen(context, innerCorner)
+                && isTurnSweepCellOpen(context, innerCorner.above());
+    }
+
+    private static boolean isTurnSweepCellOpen(
+            MaidActionContext context, BlockPos pos) {
+        if (!isLoadedBuildPosition(context, pos)) {
+            return false;
+        }
+        BlockState state = context.level().getBlockState(pos);
+        return state.getFluidState().isEmpty()
+                && state.getCollisionShape(context.level(), pos).isEmpty();
     }
 
     static boolean directWaypointReached(
@@ -1066,6 +1119,26 @@ public final class MaidTerrainNavigator {
         double forwardRemaining = remainingX * dx + remainingZ * dz;
         double lateralError = Math.abs(remainingX * dz - remainingZ * dx);
         return forwardRemaining <= tolerance && lateralError <= tolerance;
+    }
+
+    static boolean directTurnWaypointReached(
+            double maidX, double maidZ, MaidTerrainStep step, double tolerance) {
+        if (!Double.isFinite(maidX) || !Double.isFinite(maidZ)
+                || !Double.isFinite(tolerance) || tolerance < 0.0D
+                || !isDirectFlatStepGeometry(step)) {
+            return false;
+        }
+        int dx = step.to().getX() - step.from().getX();
+        int dz = step.to().getZ() - step.from().getZ();
+        double remainingX = step.to().getX() + 0.5D - maidX;
+        double remainingZ = step.to().getZ() + 0.5D - maidZ;
+        double forwardRemaining = remainingX * dx + remainingZ * dz;
+        double lateralError = Math.abs(remainingX * dz - remainingZ * dx);
+        double overshootTolerance = Math.min(
+                tolerance, DIRECT_TURN_CENTER_TOLERANCE);
+        return forwardRemaining <= tolerance
+                && forwardRemaining >= -overshootTolerance
+                && lateralError <= tolerance;
     }
 
     /**
