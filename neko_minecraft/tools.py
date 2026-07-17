@@ -569,7 +569,20 @@ def _action_execution_confirmation(payload):
     result = (payload or {}).get("result")
     completed = status == "SUCCEEDED" and end_reason == "COMPLETED"
     arrived = isinstance(result, dict) and result.get("arrived") is True
-    succeeded = completed and (kind != "return_to_position" or arrived)
+    partial = isinstance(result, dict) and result.get("partial") is True
+    request_satisfied = (
+        isinstance(result, dict) and result.get("request_satisfied") is True
+    )
+    request_unsatisfied = (
+        isinstance(result, dict) and result.get("request_satisfied") is False
+    )
+    succeeded = (
+        completed
+        and (kind != "return_to_position" or arrived)
+        and (kind != "harvest_blocks" or request_satisfied)
+        and not partial
+        and not request_unsatisfied
+    )
     instruction = (
         "服务端终态已严格确认成功。"
         if succeeded else
@@ -581,8 +594,30 @@ def _action_execution_confirmation(payload):
     return {
         "execution_pending": not terminal,
         "completion_confirmed": succeeded,
+        "action_completion_confirmed": succeeded,
+        "conversation_goal_confirmed": False,
         "terminal_event_required": not terminal,
         "llm_instruction": instruction,
+    }
+
+
+def _skill_execution_confirmation(payload):
+    """Separate Skill acceptance from a verified high-level terminal."""
+    status = str((payload or {}).get("status") or "").strip().upper()
+    terminal = status in {"SUCCEEDED", "FAILED", "CANCELLED", "BLOCKED"}
+    succeeded = status == "SUCCEEDED"
+    return {
+        "execution_pending": not terminal,
+        "completion_confirmed": succeeded,
+        "terminal_event_required": not terminal,
+        "llm_instruction": (
+            "Skill 终态已确认目标成功。只能按结构化实际数量回应。"
+            if succeeded else
+            "Skill 已结束但没有成功完成目标；禁止声称目标完成。"
+            if terminal else
+            "Skill 仅已受理并在异步执行。收到真实 Skill 终态前只能说已经开始，"
+            "禁止声称已经采够、挖完或进入后续任务。"
+        ),
     }
 
 
@@ -860,6 +895,7 @@ async def do_start_skill(
             "skill_id": canonical_skill_id,
             **started,
             "activity_transition": transition,
+            **_skill_execution_confirmation(started),
         })
     try:
         snapshot = _skill_snapshot(await runner.start(
@@ -875,7 +911,11 @@ async def do_start_skill(
         return _action_error("SKILL_START_REJECTED", str(exc))
     if not snapshot:
         return _action_error("SKILL_START_FAILED", "SkillRunner returned no skill snapshot")
-    return Ok({"accepted": True, **snapshot})
+    return Ok({
+        "accepted": True,
+        **snapshot,
+        **_skill_execution_confirmation(snapshot),
+    })
 
 
 async def do_cancel_skill(plugin, *, skill_id="", maid_id=None):
@@ -1077,6 +1117,8 @@ async def do_set_plan(plugin, *, plan=None, title=None, steps=None, completed_st
         return Ok({
             "success": False,
             "noop": True,
+            "game_action_performed": False,
+            "completion_evidence": False,
             "message": "No goal board update was requested. Ignore this result and do not mention it to the player.",
             **_plan.plan_summary(plugin._plan_state),
         })
@@ -1103,4 +1145,13 @@ async def do_set_plan(plugin, *, plan=None, title=None, steps=None, completed_st
     if result_data.get("success") is False:
         return Err(result_data.get("error", "Set plan failed"))
     await plugin._apply_plan_state(plan_state, save=True)
-    return Ok({"success": True, **_plan.plan_summary(plan_state)})
+    return Ok({
+        "success": True,
+        "game_action_performed": False,
+        "completion_evidence": False,
+        "llm_instruction": (
+            "目标板只记录计划，不执行任何游戏动作，也不能证明步骤已经完成。"
+            "只有玩家明确确认或服务端真实终态才能把步骤标为完成。"
+        ),
+        **_plan.plan_summary(plan_state),
+    })

@@ -259,6 +259,42 @@ class MaidActionToolTests(unittest.IsolatedAsyncioTestCase):
             "kind": "harvest_blocks", "status": "SUCCEEDED",
         })
         self.assertFalse(missing_reason["completion_confirmed"])
+        missing_harvest_contract = tools._action_execution_confirmation({
+            "kind": "harvest_blocks",
+            "status": "SUCCEEDED",
+            "end_reason": "COMPLETED",
+            "result": {"harvested": 8, "requested": 8},
+        })
+        self.assertFalse(missing_harvest_contract["completion_confirmed"])
+
+    async def test_partial_harvest_never_confirms_completion(self):
+        partial = tools._action_execution_confirmation({
+            "kind": "harvest_blocks",
+            "status": "SUCCEEDED",
+            "end_reason": "COMPLETED",
+            "result": {
+                "harvested": 5,
+                "requested": 8,
+                "partial": True,
+                "request_satisfied": False,
+            },
+        })
+        self.assertFalse(partial["completion_confirmed"])
+        self.assertFalse(partial["conversation_goal_confirmed"])
+
+        satisfied = tools._action_execution_confirmation({
+            "kind": "harvest_blocks",
+            "status": "SUCCEEDED",
+            "end_reason": "COMPLETED",
+            "result": {
+                "harvested": 8,
+                "requested": 8,
+                "partial": False,
+                "request_satisfied": True,
+            },
+        })
+        self.assertTrue(satisfied["action_completion_confirmed"])
+        self.assertFalse(satisfied["conversation_goal_confirmed"])
 
     async def test_timeout_zero_is_accepted_but_subsecond_positive_is_rejected(self):
         response = {

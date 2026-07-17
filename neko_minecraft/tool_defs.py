@@ -330,7 +330,11 @@ MC_LIST_ACTIVE_MAID_ACTIONS = {
 MC_START_SKILL = {
     "name": "mc_start_skill",
     "description": (
-        "启动由 Python SkillRunner 持久化编排的高级女仆技能。当前支持 mine_ore。"
+        "启动由 Python SkillRunner 持久化编排的高级女仆技能。支持 mine_ore 和 gather_blocks。"
+        "gather_blocks 用于原木、泥土等附近资源的累计采集；例如一组原木传"
+        "selector={type:'tag',id:'minecraft:logs'},target_count=64。它会跨多个真实"
+        "harvest_blocks 子动作累计服务端确认的 harvested 数量，不能把单棵树或单次8块"
+        "冒充总目标完成。附近没有更多目标时会如实 BLOCKED。"
         "mine_ore 默认只启动一个 Java autonomous_mining 子动作；世界感知、选路、开矿道、"
         "重规划和数量累计均由 Java 持续完成，LLM 只提供目标和有限偏好，不编排逐段动作。"
         "Java MiningPlanner 会同时比较天然通道、清障、目标矿层、搭桥/垫脚和封水候选的"
@@ -351,8 +355,8 @@ MC_START_SKILL = {
         "properties": {
             "skill": {
                 "type": "string",
-                "enum": ["mine_ore"],
-                "description": "高级技能名；当前仅支持 mine_ore",
+                "enum": ["mine_ore", "gather_blocks"],
+                "description": "高级技能名；找矿用 mine_ore，累计附近普通资源用 gather_blocks",
             },
             "args": {
                 "type": "object",
@@ -375,7 +379,19 @@ MC_START_SKILL = {
                     },
                     "target_metric": {
                         "type": "string", "enum": ["blocks_harvested"],
-                        "description": "只按服务端确认的实际采集方块计数",
+                        "description": "可省略，固定只按服务端确认的实际采集方块计数",
+                    },
+                    "search_radius": {
+                        "type": "integer", "minimum": 1, "maximum": 12,
+                        "description": "gather_blocks 每次搜索附近方块的半径，默认12",
+                    },
+                    "vein_mining": {
+                        "type": "boolean",
+                        "description": "gather_blocks 是否逐个挖完整连通资源，默认true，砍树应保持true",
+                    },
+                    "tool_policy": {
+                        "type": "string", "enum": ["require_correct", "allow_wrong"],
+                        "description": "gather_blocks 工具策略，默认 require_correct",
                     },
                     "strategy": {
                         "type": "string", "enum": ["fishbone", "auto"],
@@ -419,7 +435,7 @@ MC_START_SKILL = {
                         "description": "最多消耗的路线建筑方块数；默认0表示不设人工上限，仍受背包材料限制",
                     },
                 },
-                "required": ["selector", "target_count", "target_metric"],
+                "required": ["selector", "target_count"],
                 "additionalProperties": False,
             },
             "skill_id": {

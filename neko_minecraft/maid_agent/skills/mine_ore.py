@@ -64,7 +64,9 @@ class MineOreSkill:
         target_count = _positive_integer(raw.get("target_count"), "target_count")
         if target_count > 4096:
             raise ValueError("mine_ore.target_count must be between 1 and 4096")
-        target_metric = str(raw.get("target_metric") or "").strip().lower()
+        target_metric = str(
+            raw.get("target_metric", "blocks_harvested") or ""
+        ).strip().lower()
         if target_metric != "blocks_harvested":
             raise ValueError("mine_ore.target_metric must be blocks_harvested")
 

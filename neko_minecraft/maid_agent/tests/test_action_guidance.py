@@ -129,7 +129,7 @@ class MaidActionGuidanceTests(unittest.TestCase):
         self.assertNotIn("skill_name", parameters["properties"])
         skill_text = MC_START_SKILL["description"] + str(parameters)
         for value in (
-            "mine_ore", "target_count", "blocks_harvested",
+            "mine_ore", "gather_blocks", "minecraft:logs", "target_count", "blocks_harvested",
             "autonomous_mining", "execution_mode", "segment_length",
             "loaded_scan", "decision_required",
             "placement_policy", "safe_support_and_water_seal",
@@ -143,6 +143,11 @@ class MaidActionGuidanceTests(unittest.TestCase):
         self.assertIn("fishbone", skill_text)
         self.assertIn("legacy", skill_text)
         self.assertIn("旧检查点", _TLM_AI_INSTRUCTIONS)
+        self.assertIn("一组/64个原木", _TLM_AI_INSTRUCTIONS)
+        self.assertIn("不能证明更大的会话总目标", _TLM_AI_INSTRUCTIONS)
+        self.assertIn("目标板只记录", _TLM_AI_INSTRUCTIONS)
+        self.assertIn("不能主动替玩家打开女仆背包界面", _TLM_AI_INSTRUCTIONS)
+        self.assertIn("只证明这个精确 ID 不存在", _TLM_AI_INSTRUCTIONS)
 
     def test_autonomous_miner_documents_route_ore_and_safe_construction(self):
         skill_text = MC_START_SKILL["description"] + str(

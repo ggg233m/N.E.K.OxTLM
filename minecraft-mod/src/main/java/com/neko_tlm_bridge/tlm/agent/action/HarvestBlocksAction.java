@@ -1308,6 +1308,9 @@ public final class HarvestBlocksAction implements MaidAction {
         addSearchDiagnostics(result, "none");
         addVeinDiagnostics(result, veinRemaining, veinRejected, veinTruncated,
                 veinComplete, veinLimitReached);
+        if (!requestSatisfied) {
+            return MaidActionTickResult.failed(ActionEndReason.TARGET_CHANGED, result);
+        }
         return MaidActionTickResult.succeeded(result);
     }
 

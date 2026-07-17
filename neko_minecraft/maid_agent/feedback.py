@@ -150,13 +150,36 @@ class ActionFeedbackHandler:
     @staticmethod
     def _finished_text(record: ActionRecord, same_failure_count: int = 0) -> str:
         kind = _KIND_NAMES.get(record.kind, record.kind or "动作")
-        if record.status == "SUCCEEDED":
+        result = record.result if isinstance(record.result, dict) else {}
+        partial = result.get("partial") is True
+        request_satisfied = result.get("request_satisfied") is True
+        request_unsatisfied = result.get("request_satisfied") is False
+        harvest_verified = record.kind != "harvest_blocks" or request_satisfied
+        if (record.status == "SUCCEEDED" and not partial
+                and not request_unsatisfied and harvest_verified):
             outcome = "已经成功完成"
+        elif record.status == "SUCCEEDED":
+            outcome = "只完成了本次部分采集，尚未满足请求"
         else:
             reason = record.end_reason or record.status
             outcome = f"已结束，状态为 {record.status}，原因是 {reason}"
         text = f"女仆 Agent 的{kind}动作（action_id={record.action_id}）{outcome}。"
-        message = record.result.get("message") if isinstance(record.result, dict) else None
+        if record.kind == "harvest_blocks":
+            harvested = max(0, _integer(result.get("harvested")))
+            requested = max(0, _integer(result.get("requested")))
+            text += (
+                f" 服务端确认本动作实际采集 {harvested} 块"
+                + (f"，本动作请求 {requested} 块" if requested else "")
+                + ";request_satisfied="
+                + ("true" if request_satisfied else "false" if request_unsatisfied else "unknown")
+                + "。"
+            )
+            if partial or not request_satisfied:
+                text += (
+                    " 这不能证明玩家的总数量目标完成，禁止把本动作说成已经采够；"
+                    "需要由高级 gather_blocks Skill 的累计终态确认。"
+                )
+        message = result.get("message")
         if message:
             text += f" 服务端信息：{message}。"
         retry_hint = record.result.get("retry_hint") if isinstance(record.result, dict) else None
@@ -310,6 +333,13 @@ class ActionFeedbackHandler:
                 )
         text += "请根据真实终态回应玩家；失败时不要声称动作成功。"
         return text
+
+
+def _integer(value, fallback=0):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return fallback
 
 
 def _construction_recovery_text(reason: str) -> str:

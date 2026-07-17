@@ -61,6 +61,9 @@ class SkillToolTests(unittest.IsolatedAsyncioTestCase):
         }
         result = await tools.do_start_skill(plugin, skill="mine_ore", args=args)
         self.assertFalse(result["is_error"])
+        self.assertTrue(result["output"]["execution_pending"])
+        self.assertFalse(result["output"]["completion_confirmed"])
+        self.assertTrue(result["output"]["terminal_event_required"])
         name, call = plugin._skill_runner.calls[0]
         self.assertEqual("start", name)
         self.assertEqual("mine_ore", call["skill_name"])
@@ -86,10 +89,13 @@ class SkillToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(["skill", "args"], params["required"])
         self.assertNotIn("skill_name", params["properties"])
         mine_args = params["properties"]["args"]
+        self.assertEqual(["selector", "target_count"], mine_args["required"])
         self.assertEqual(
-            ["selector", "target_count", "target_metric"],
-            mine_args["required"],
+            ["mine_ore", "gather_blocks"],
+            params["properties"]["skill"]["enum"],
         )
+        self.assertIn("vein_mining", mine_args["properties"])
+        self.assertIn("search_radius", mine_args["properties"])
         self.assertEqual(
             ["auto", "level", "staircase_down"],
             mine_args["properties"]["shape"]["enum"],

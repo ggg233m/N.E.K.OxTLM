@@ -303,5 +303,7 @@ def _finished_text(run: Mapping[str, Any]) -> str:
     return (
         f"女仆 Skill {run.get('skill_name') or '任务'}（skill_id={run.get('skill_id')}）{outcome}。"
         f"实际采集数量：{max(0, _integer(run.get('collected_count')))}。"
-        f"结构化结果：{diagnostic}。请按真实 Skill 终态回应玩家；失败时不得声称成功。"
+        f"结构化结果：{diagnostic}。请按真实 Skill 终态和实际数量回应玩家；"
+        "只有 SUCCEEDED 才能声称该 Skill 目标完成。若玩家还要求了后续任务，"
+        "现在必须调用对应真实工具启动它，不能只口头声称已经开始；失败时不得声称成功。"
     )

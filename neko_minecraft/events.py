@@ -396,6 +396,7 @@ def format_event(event_data, assigned_maid_id):
         action_text = "打开" if action == "open" else "关闭" if action == "close" else "操作"
         parts_text = f"{player_name_container}{action_text}了{container_type}，像是在整理物品或查看库存。"
         side_effects["evidence_only"] = True
+        side_effects["actor_kind"] = "player"
 
     elif event_type == "fishing_start":
         priority = 2

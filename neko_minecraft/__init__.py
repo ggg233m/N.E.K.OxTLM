@@ -20,6 +20,7 @@ from .awareness import AwarenessManager
 from .maid_agent import MaidActionService
 from .maid_agent.skill_feedback import SkillFeedbackHandler
 from .maid_agent.skills import SkillRunner
+from .maid_agent.skills.gather_blocks import GatherBlocksSkill
 from .maid_agent.skills.mine_ore import MineOreSkill
 from .maid_activity import MaidActivityDirector
 from . import tools as _tools
@@ -326,6 +327,7 @@ class NekoMinecraftPlugin(NekoPluginBase):
             self.data_path("skills"),
             feedback=SkillFeedbackHandler(self),
         )
+        runner.register(GatherBlocksSkill())
         runner.register(MineOreSkill())
         await runner.load()
         self._skill_runner = runner
