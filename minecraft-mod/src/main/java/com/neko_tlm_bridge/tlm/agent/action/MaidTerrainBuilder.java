@@ -24,6 +24,7 @@ import net.minecraft.world.level.block.LiquidBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.Vec3;
+import net.minecraft.world.phys.shapes.CollisionContext;
 import net.neoforged.neoforge.common.Tags;
 import net.neoforged.neoforge.common.CommonHooks;
 import net.neoforged.neoforge.common.util.FakePlayer;
@@ -271,6 +272,45 @@ public final class MaidTerrainBuilder {
                 Vec3.atCenterOf(target), clickedFace, target, false);
         BlockPlaceContext context = new BlockPlaceContext(
                 level, actor, InteractionHand.MAIN_HAND, extracted, hit);
+        if (!blockItem.getBlock().isEnabled(level.enabledFeatures())) {
+            Rollback rollback = restoreExtracted(
+                    inventory, choice.slot(), extracted, maid);
+            return PlacementResult.failed(
+                    rollback == Rollback.COMPLETE
+                            ? Status.FEATURE_DISABLED
+                            : Status.INVENTORY_ROLLBACK_FAILED,
+                    target, "selected block is disabled in this world");
+        }
+        if (!context.canPlace()) {
+            Rollback rollback = restoreExtracted(
+                    inventory, choice.slot(), extracted, maid);
+            return PlacementResult.failed(
+                    rollback == Rollback.COMPLETE
+                            ? Status.CONTEXT_CANNOT_PLACE
+                            : Status.INVENTORY_ROLLBACK_FAILED,
+                    target, "placement context cannot replace the target");
+        }
+        BlockState placementState = blockItem.getBlock().getStateForPlacement(context);
+        if (placementState == null
+                || !placementState.canSurvive(level, context.getClickedPos())) {
+            Rollback rollback = restoreExtracted(
+                    inventory, choice.slot(), extracted, maid);
+            return PlacementResult.failed(
+                    rollback == Rollback.COMPLETE
+                            ? Status.PLACEMENT_STATE_INVALID
+                            : Status.INVENTORY_ROLLBACK_FAILED,
+                    target, "selected block has no valid placement state");
+        }
+        if (!level.isUnobstructed(placementState, context.getClickedPos(),
+                CollisionContext.of(actor))) {
+            Rollback rollback = restoreExtracted(
+                    inventory, choice.slot(), extracted, maid);
+            return PlacementResult.failed(
+                    rollback == Rollback.COMPLETE
+                            ? Status.PLACEMENT_OBSTRUCTED
+                            : Status.INVENTORY_ROLLBACK_FAILED,
+                    target, "placement volume intersects an entity");
+        }
         InteractionResult interaction;
         try {
             interaction = CommonHooks.onPlaceItemIntoWorld(context);
@@ -310,10 +350,15 @@ public final class MaidTerrainBuilder {
     private static ServerPlayer placementActor(
             ServerLevel level, EntityMaid maid, UUID ownerId) {
         ServerPlayer onlineOwner = level.getServer().getPlayerList().getPlayer(ownerId);
-        if (onlineOwner != null && onlineOwner.serverLevel() == level) {
-            return onlineOwner;
-        }
-        GameProfile profile = new GameProfile(ownerId, OFFLINE_ACTOR_NAME);
+        // Never borrow the live player's body as an automation actor. Its real
+        // position, rotation and current activity belong to the player and can
+        // cause remote-place/anti-cheat hooks to reject every maid placement.
+        // A fake player retains the owner's UUID for claims while representing
+        // the maid's actual construction position and still participates in
+        // NeoForge's normal placement events.
+        GameProfile profile = onlineOwner == null
+                ? new GameProfile(ownerId, OFFLINE_ACTOR_NAME)
+                : onlineOwner.getGameProfile();
         FakePlayer actor = FakePlayerFactory.get(level, profile);
         actor.setPos(maid.getX(), maid.getY(), maid.getZ());
         actor.setYRot(maid.getYRot());
@@ -411,6 +456,10 @@ public final class MaidTerrainBuilder {
         OWNER_REQUIRED,
         NO_SAFE_MATERIAL,
         INVENTORY_CHANGED,
+        FEATURE_DISABLED,
+        CONTEXT_CANNOT_PLACE,
+        PLACEMENT_STATE_INVALID,
+        PLACEMENT_OBSTRUCTED,
         PLACE_REJECTED,
         INVENTORY_ROLLBACK_FAILED,
         INTERNAL_ERROR

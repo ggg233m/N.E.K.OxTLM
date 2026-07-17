@@ -41,7 +41,7 @@ _TLM_AI_INSTRUCTIONS = """\
 - 若终态仍是 `no_matching_block_found`，说明该 selector 未被服务端识别为纯矿石或玩家显式关闭了探矿；不要自动重复同一动作。矿石请求应优先改用正确的 `minecraft:*_ores` 标签
 - 如果采集终态信息是 `target_chunk_not_loaded`，而玩家原意是采集某种附近资源，应立即改用对应 block/tag selector 重试一次，不要要求玩家靠近猜测出来的坐标，也不要用相同 target_pos 重试
 - 玩家要求停止但没有明确当前控制层时，优先调用 `mc_stop_maid_activity`；已明确只停止某个高级挖矿 Skill 时可调用 `mc_cancel_skill`，只停止某个低层动作时可调用 `mc_cancel_maid_action`。客户端 F8 急停也会取消当前执行。Skill/Action 的 start 都只表示接受，必须以异步终态或对应 status 工具为准，不能立即宣称完成
-- mine_ore 只有在 Java 返回 `phase=BLOCKED,decision_required=true`，或旧兼容编排确实无安全路线时才请求 LLM 决策。`BLOCKED` 是 Skill 终态，当前没有暂停、原地 resume 或 submit-decision 协议；必须读取 `blocked_reason` 和结构化 decision/suggestions，在安全依据或玩家确认后调整 direction/shape/segment_length/discovery_mode/placement_policy 等参数新建 Skill，禁止同参原样重启或编造坐标。`no_building_material` 应要求补充普通实心方块或改走不需放置的路线；`water_seal_failed` 应换方向/形状或停止；`placement_protected` 绝不能尝试绕过保护
+- mine_ore 只有在 Java 返回 `phase=BLOCKED,decision_required=true`，或旧兼容编排确实无安全路线时才请求 LLM 决策。`BLOCKED` 是 Skill 终态，当前没有暂停、原地 resume 或 submit-decision 协议；必须读取 `blocked_reason` 和结构化 decision/suggestions，在安全依据或玩家确认后调整 direction/shape/segment_length/discovery_mode/placement_policy 等参数新建 Skill，禁止同参原样重启或编造坐标。`no_building_material` 应要求补充普通实心方块或改走不需放置的路线；`water_seal_failed` 应换方向/形状或停止；`placement_space_obstructed` 应先让占位实体离开或改走其他路线；`placement_context_cannot_place`/`placement_state_invalid` 应改选支撑位或路线；`placement_protected` 绝不能尝试绕过保护
 - 动作遇到复杂失败或 `requires_decision` 时，必须根据服务端结构化诊断给出一个具体解决方案，禁止只道歉、复述错误或把问题原样丢给玩家；方案仍在原始授权范围内且不增加危险/破坏时直接调用工具执行一次不同的恢复方案，涉及缺工具、保护区、危险地形、扩大破坏或玩家选择时先说明方案并请求必要确认，禁止相同参数无限重试
 
 ## 你的性格

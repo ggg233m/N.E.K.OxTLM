@@ -52,6 +52,8 @@ public final class MaidTerrainNavigator {
     private static final int FALLING_ENTITY_SCAN_HEIGHT = 16;
     private static final int MAX_CONTINUOUS_FLAT_STEPS = 6;
     private static final double DIRECT_TURN_CENTER_TOLERANCE = 0.20D;
+    private static final double CONSTRUCTION_CENTER_TOLERANCE = 0.10D;
+    private static final long CONSTRUCTION_CENTER_TIMEOUT_TICKS = 40L;
     private static final long PLAYER_WORK_ZONE_WAIT_TIMEOUT_TICKS = 200L;
 
     private final MaidTerrainPath terrainPath;
@@ -95,6 +97,8 @@ public final class MaidTerrainNavigator {
     private BlockPos playerBlockedTarget;
     private MaidTerrainInteractionSafety.Conflict playerConflict;
     private java.util.UUID blockingPlayerId;
+    private BlockPos constructionCenterTarget;
+    private long constructionCenterStartedAt = Long.MIN_VALUE;
     private String phase = "pending";
     private ActionEndReason lastFailure;
 
@@ -525,9 +529,14 @@ public final class MaidTerrainNavigator {
     private TickResult placeConstructionBlock(
             MaidActionContext context, BlockPos target,
             MaidTerrainBuilder.Purpose purpose, String failureMessage) {
-        stopLocomotion(context);
         MaidTerrainStep activeStep = stepIndex < terrainPath.steps().size()
                 ? terrainPath.steps().get(stepIndex) : null;
+        TickResult centering = centerForConstruction(
+                context, activeStep, target);
+        if (centering != null) {
+            return centering;
+        }
+        stopLocomotion(context);
         TickResult playerWait = waitForPlayers(
                 context, activeStep, List.of(target),
                 "player_blocking_construction");
@@ -570,11 +579,16 @@ public final class MaidTerrainNavigator {
         ActionEndReason reason = switch (placement.status()) {
             case NO_SAFE_MATERIAL -> ActionEndReason.TOOL_NOT_FOUND;
             case PLACE_REJECTED -> ActionEndReason.BLOCK_PROTECTED;
+            case PLACEMENT_OBSTRUCTED -> ActionEndReason.STUCK;
             default -> ActionEndReason.PATH_NOT_FOUND;
         };
         String message = switch (placement.status()) {
             case NO_SAFE_MATERIAL -> "no_building_material";
             case PLACE_REJECTED -> "placement_protected";
+            case PLACEMENT_OBSTRUCTED -> "placement_space_obstructed";
+            case FEATURE_DISABLED -> "placement_feature_disabled";
+            case CONTEXT_CANNOT_PLACE -> "placement_context_cannot_place";
+            case PLACEMENT_STATE_INVALID -> "placement_state_invalid";
             default -> failureMessage;
         };
         TickResult failure = fail(context, reason, message, true);
@@ -586,6 +600,86 @@ public final class MaidTerrainNavigator {
         failure.detail().addProperty("placement_y", target.getY());
         failure.detail().addProperty("placement_z", target.getZ());
         return failure;
+    }
+
+    private TickResult centerForConstruction(
+            MaidActionContext context, MaidTerrainStep step, BlockPos target) {
+        if (step == null || !context.maid().blockPosition().equals(step.from())) {
+            constructionCenterTarget = null;
+            constructionCenterStartedAt = Long.MIN_VALUE;
+            return null;
+        }
+        boolean alreadyCentering = target.equals(constructionCenterTarget);
+        boolean maidIntersectsTarget = intersectsConstructionTarget(
+                context.maid().getBoundingBox(), target);
+        if (!alreadyCentering && !maidIntersectsTarget) {
+            return null;
+        }
+        boolean stableAtOrigin = isCenteredAtOrigin(
+                context.maid().getX(), context.maid().getZ(),
+                step.from(), CONSTRUCTION_CENTER_TOLERANCE)
+                && context.maid().onGround()
+                && Math.abs(context.maid().getY() - step.from().getY()) <= 0.05D;
+        if (stableAtOrigin) {
+            stopLocomotion(context);
+            Vec3 velocity = context.maid().getDeltaMovement();
+            context.maid().setDeltaMovement(0.0D, velocity.y, 0.0D);
+            constructionCenterTarget = null;
+            constructionCenterStartedAt = Long.MIN_VALUE;
+            return null;
+        }
+        if (!target.equals(constructionCenterTarget)) {
+            constructionCenterTarget = target.immutable();
+            constructionCenterStartedAt = context.gameTime();
+        } else if (context.gameTime() - constructionCenterStartedAt
+                >= CONSTRUCTION_CENTER_TIMEOUT_TICKS) {
+            constructionCenterTarget = null;
+            constructionCenterStartedAt = Long.MIN_VALUE;
+            return fail(context, ActionEndReason.STUCK,
+                    "maid_could_not_center_before_construction", true);
+        }
+
+        phase = "centering_for_construction";
+        clearNativePathOwnership(context);
+        context.maid().getBrain().setMemory(MemoryModuleType.LOOK_TARGET,
+                new BlockPosTracker(target));
+        context.maid().getMoveControl().setWantedPosition(
+                step.from().getX() + 0.5D, step.from().getY(),
+                step.from().getZ() + 0.5D, Math.min(speed, 0.55D));
+        JsonObject detail = stepDetail(step);
+        detail.addProperty("message", "centering_for_construction");
+        detail.addProperty("construction_x", target.getX());
+        detail.addProperty("construction_y", target.getY());
+        detail.addProperty("construction_z", target.getZ());
+        detail.addProperty("center_distance", Math.sqrt(
+                horizontalDistanceSquared(context.maid().getX(),
+                        context.maid().getZ(), step.from())));
+        return running(detail);
+    }
+
+    static boolean intersectsConstructionTarget(AABB bounds, BlockPos target) {
+        if (bounds == null || target == null) {
+            return false;
+        }
+        return bounds.intersects(new AABB(target));
+    }
+
+    static boolean isCenteredAtOrigin(
+            double x, double z, BlockPos origin, double tolerance) {
+        if (!Double.isFinite(x) || !Double.isFinite(z)
+                || origin == null || !Double.isFinite(tolerance)
+                || tolerance < 0.0D) {
+            return false;
+        }
+        return horizontalDistanceSquared(x, z, origin)
+                <= tolerance * tolerance;
+    }
+
+    private static double horizontalDistanceSquared(
+            double x, double z, BlockPos origin) {
+        double dx = origin.getX() + 0.5D - x;
+        double dz = origin.getZ() + 0.5D - z;
+        return dx * dx + dz * dz;
     }
 
     private TickResult waitForPlayers(

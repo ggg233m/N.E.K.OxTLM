@@ -337,4 +337,14 @@ def _construction_recovery_text(reason: str) -> str:
         return (
             " 该位置受保护，绝不能绕过保护；只能让玩家将女仆移出保护区、改走不需放置的路线或终止。"
         )
+    if reason == "PLACEMENT_SPACE_OBSTRUCTED":
+        return (
+            " 放置空间被实体占用；先让玩家或其他实体离开施工格，"
+            "或改走不需修建该支撑点的路线，禁止原样重试。"
+        )
+    if reason in {"PLACEMENT_CONTEXT_CANNOT_PLACE", "PLACEMENT_STATE_INVALID"}:
+        return (
+            " 当前支撑位不具备合法放置条件；改选支撑位、高度或不同路线，"
+            "不要对同一坐标重复提交。"
+        )
     return ""

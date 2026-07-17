@@ -7,6 +7,7 @@ import net.minecraft.core.Direction;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.pathfinder.Node;
 import net.minecraft.world.level.pathfinder.Path;
+import net.minecraft.world.phys.AABB;
 import org.junit.jupiter.api.Test;
 
 import java.util.EnumSet;
@@ -199,6 +200,34 @@ class MaidTerrainNavigatorTest {
                 1.20D, 0.50D, east, 0.20D));
         assertFalse(MaidTerrainNavigator.directWaypointReached(
                 1.55D, 0.80D, east, 0.20D));
+    }
+
+    @Test
+    void constructionRequiresTheMaidToCenterInsideTheSourceCell() {
+        BlockPos source = new BlockPos(-985, -7, 333);
+
+        assertTrue(MaidTerrainNavigator.isCenteredAtOrigin(
+                -984.50D, 333.50D, source, 0.10D));
+        assertTrue(MaidTerrainNavigator.isCenteredAtOrigin(
+                -984.57D, 333.44D, source, 0.10D));
+        assertFalse(MaidTerrainNavigator.isCenteredAtOrigin(
+                -984.80D, 333.30D, source, 0.10D));
+        assertFalse(MaidTerrainNavigator.isCenteredAtOrigin(
+                Double.NaN, 333.50D, source, 0.10D));
+    }
+
+    @Test
+    void constructionCenteringOnlyRunsWhenTheMaidActuallyOverlapsTheTarget() {
+        BlockPos support = new BlockPos(-985, -7, 334);
+        AABB loggedMaidBounds = new AABB(
+                -985.1007D, -7.0D, 333.0D,
+                -984.5007D, -5.5D, 333.6D);
+        AABB overlappingBounds = loggedMaidBounds.move(0.0D, 0.0D, 0.5D);
+
+        assertFalse(MaidTerrainNavigator.intersectsConstructionTarget(
+                loggedMaidBounds, support));
+        assertTrue(MaidTerrainNavigator.intersectsConstructionTarget(
+                overlappingBounds, support));
     }
 
     private static MaidTerrainStep step(

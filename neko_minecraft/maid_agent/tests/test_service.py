@@ -127,6 +127,9 @@ class MaidActionServiceTests(unittest.IsolatedAsyncioTestCase):
             ("water_seal_failed", "更换方向或矿道形状"),
             ("water_seal_requires_dry_start", "有支撑的干燥位置"),
             ("placement_protected", "绝不能绕过保护"),
+            ("placement_space_obstructed", "被实体占用"),
+            ("placement_context_cannot_place", "改选支撑位"),
+            ("placement_state_invalid", "改选支撑位"),
         )
         for sequence, (reason, expected) in enumerate(cases, start=60):
             with self.subTest(reason=reason):
