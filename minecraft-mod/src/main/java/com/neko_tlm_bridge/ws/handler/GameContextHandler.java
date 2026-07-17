@@ -12,6 +12,7 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.phys.AABB;
@@ -49,7 +50,7 @@ public class GameContextHandler implements MessageHandlerInterface {
 
         switch (category) {
             case "status" -> contextData = collectStatusContext(maid);
-            case "world" -> contextData = collectWorldContext();
+            case "world" -> contextData = collectWorldContext(maid);
             case "equipment" -> contextData = collectEquipmentContext(maid);
             case "user" -> contextData = collectUserContext(maid);
             case "effects" -> contextData = collectEffectsContext(maid);
@@ -91,7 +92,7 @@ public class GameContextHandler implements MessageHandlerInterface {
         return data;
     }
 
-    private JsonObject collectWorldContext() {
+    private JsonObject collectWorldContext(EntityMaid maid) {
         JsonObject data = new JsonObject();
         ServerLevel overworld = server.getLevel(Level.OVERWORLD);
         if (overworld != null) {
@@ -104,7 +105,8 @@ public class GameContextHandler implements MessageHandlerInterface {
             data.addProperty("dimension", Level.OVERWORLD.location().toString());
         }
         JsonArray onlinePlayers = new JsonArray();
-        for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+        LivingEntity owner = maid == null ? null : maid.getOwner();
+        if (owner instanceof ServerPlayer player) {
             JsonObject playerObj = new JsonObject();
             playerObj.addProperty("name", player.getName().getString());
             playerObj.addProperty("health", player.getHealth());
@@ -267,6 +269,11 @@ public class GameContextHandler implements MessageHandlerInterface {
         int count = 0;
         for (LivingEntity entity : nearby) {
             if (entity == maid) continue;
+            if (entity instanceof Player
+                    && (maid.getOwner() == null
+                    || !maid.getOwner().getUUID().equals(entity.getUUID()))) {
+                continue;
+            }
             if (count >= 20) break;
             JsonObject entityObj = new JsonObject();
             entityObj.addProperty("entity_id", entity.getStringUUID());

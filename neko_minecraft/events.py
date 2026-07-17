@@ -24,6 +24,30 @@ _WCHESS_PIECE_NAMES = {
     "R": "车", "N": "马", "B": "象", "Q": "后", "K": "王", "P": "兵",
 }
 
+_PLAYER_SCOPED_EVENT_TYPES = frozenset({
+    "player_login",
+    "player_hurt",
+    "player_kill_entity",
+    "player_death",
+    "advancement",
+    "dimension_change",
+    "inventory_change",
+    "block_activity",
+    "container_interaction",
+    "fishing_start",
+    "item_fished",
+})
+
+
+def event_matches_assigned_maid(event_data, assigned_maid_id):
+    """Reject player evidence that is not scoped to the configured maid."""
+    event_type = str(event_data.get("event_type", ""))
+    maid_id = str(event_data.get("maid_id", "") or "")
+    assigned_maid_id = str(assigned_maid_id or "")
+    if maid_id:
+        return bool(assigned_maid_id) and maid_id == assigned_maid_id
+    return event_type not in _PLAYER_SCOPED_EVENT_TYPES
+
 
 def _describe_board(event_data):
     """根据棋盘数据生成简短的局面描述"""
@@ -189,13 +213,8 @@ def format_event(event_data, assigned_maid_id):
     maid_id = event_data.get("maid_id", "")
     maid_name = event_data.get("maid_name", "")
 
-    # 仅对携带 maid_id 的事件进行过滤
-    if maid_id:
-        if assigned_maid_id and maid_id != assigned_maid_id:
-            return None, None, None
-        if not assigned_maid_id:
-            # 未指定监控女仆时，忽略带 maid_id 的事件，避免角色混乱
-            return None, None, None
+    if not event_matches_assigned_maid(event_data, assigned_maid_id):
+        return None, None, None
 
     priority = 5
     parts_text = ""

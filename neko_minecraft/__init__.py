@@ -496,6 +496,10 @@ class NekoMinecraftPlugin(NekoPluginBase):
         if msg_type == "event":
             event_data = data.get("data", {})
             if event_data.get("event_type") == "player_login":
+                if not _events.event_matches_assigned_maid(
+                    event_data, self._assigned_maid_id
+                ):
+                    return
                 await self._handle_player_login_event(event_data)
                 return
             await self._handle_event(data)

@@ -80,6 +80,7 @@ public class GameEventHandler {
     private static class BehaviorAggregate {
         final String eventType;
         final Map<String, Integer> targets = new HashMap<>();
+        String playerId = "";
         String playerName = "";
         String lastTarget = "";
         String lastAttacker = "";
@@ -96,8 +97,11 @@ public class GameEventHandler {
             this.eventType = eventType;
         }
 
-        void recordHurt(String targetName, boolean maid, float damage, float health, float maxHealth, String attacker, String damageType, long tick) {
+        void recordHurt(String scopedPlayerId, String targetName, boolean maid,
+                        float damage, float health, float maxHealth,
+                        String attacker, String damageType, long tick) {
             beginIfNeeded(tick);
+            playerId = scopedPlayerId == null ? "" : scopedPlayerId;
             targets.put(targetName, targets.getOrDefault(targetName, 0) + 1);
             lastTarget = targetName;
             lastAttacker = attacker;
@@ -110,8 +114,10 @@ public class GameEventHandler {
             includesMaid = includesMaid || maid;
         }
 
-        void recordKill(String player, String targetType, String targetName, long tick) {
+        void recordKill(String scopedPlayerId, String player,
+                        String targetType, String targetName, long tick) {
             beginIfNeeded(tick);
+            playerId = scopedPlayerId == null ? "" : scopedPlayerId;
             playerName = player;
             String target = targetType == null || targetType.isEmpty() ? targetName : targetType;
             targets.put(target, targets.getOrDefault(target, 0) + 1);
@@ -126,9 +132,11 @@ public class GameEventHandler {
 
         void reset() {
             targets.clear();
+            playerId = "";
             playerName = "";
             lastTarget = "";
             lastAttacker = "";
+            lastDamageType = "";
             startTick = 0;
             endTick = 0;
             count = 0;
@@ -147,7 +155,20 @@ public class GameEventHandler {
     }
 
     public static void setMonitoredMaidId(String maidId) {
-        monitoredMaidId = maidId != null ? maidId : "";
+        String nextMaidId = maidId == null ? "" : maidId.trim();
+        if (!monitoredMaidId.equals(nextMaidId)) {
+            openInventorySnapshots.clear();
+            blockActivityAggregates.clear();
+            hurtAggregate.reset();
+            killAggregate.reset();
+            lastReportedBiome = "";
+            candidateBiome = "";
+            candidateBiomeStartTick = 0;
+            lastPlayerDimension = "";
+            currentChessGame = null;
+            endedBoardPos = null;
+        }
+        monitoredMaidId = nextMaidId;
     }
 
     public static String getMonitoredMaidId() {
@@ -206,7 +227,10 @@ public class GameEventHandler {
         if (!ModConfig.EVENT_PUSH_ENABLED.get() || webSocketServer == null || !webSocketServer.hasClients()) return;
         LivingEntity entity = event.getEntity();
         if (entity instanceof Player player) {
+            EntityMaid maid = monitoredOwnerMaid(player);
+            if (maid == null) return;
             hurtAggregate.recordHurt(
+                    player.getStringUUID(),
                     player.getName().getString(),
                     false,
                     event.getAmount(),
@@ -217,7 +241,8 @@ public class GameEventHandler {
                     player.level().getGameTime()
             );
         } else if (entity instanceof EntityMaid maid) {
-            if (!monitoredMaidId.isEmpty() && !monitoredMaidId.equals(maid.getStringUUID())) return;
+            if (monitoredMaidId.isEmpty()
+                    || !monitoredMaidId.equals(maid.getStringUUID())) return;
             String damageType = event.getSource().getMsgId();
             JsonObject eventData = new JsonObject();
             eventData.addProperty("event_type", Protocol.EVENT_MAID_HURT);
@@ -230,6 +255,8 @@ public class GameEventHandler {
             eventData.addProperty("damage_type", damageType);
             webSocketServer.broadcastEvent(eventData);
             hurtAggregate.recordHurt(
+                    maid.getOwnerUUID() == null
+                            ? "" : maid.getOwnerUUID().toString(),
                     maid.getName().getString(),
                     true,
                     event.getAmount(),
@@ -246,7 +273,7 @@ public class GameEventHandler {
     public static void onServerChat(ServerChatEvent event) {
         if (!ModConfig.EVENT_PUSH_ENABLED.get() || webSocketServer == null || !webSocketServer.hasClients()) return;
         net.minecraft.server.level.ServerPlayer player = event.getPlayer();
-        if (trackedOwnerMaid(player) == null) return;
+        if (monitoredOwnerMaid(player) == null) return;
         String message = event.getRawText();
         JsonObject chatData = new JsonObject();
         chatData.addProperty("event_type", "chat");
@@ -263,21 +290,16 @@ public class GameEventHandler {
         if (webSocketServer == null || !webSocketServer.hasClients()) return;
         Player player = event.getEntity();
         if (player.level().isClientSide()) return;
+        EntityMaid maid = monitoredOwnerMaid(player);
+        if (maid == null) return;
         JsonObject eventData = new JsonObject();
         eventData.addProperty("event_type", Protocol.EVENT_PLAYER_LOGIN);
-        eventData.addProperty("player_name", player.getName().getString());
         eventData.addProperty("player_uuid", player.getStringUUID());
         eventData.addProperty("dimension", player.level().dimension().location().toString());
         eventData.addProperty("x", player.getX());
         eventData.addProperty("y", player.getY());
         eventData.addProperty("z", player.getZ());
-        if (!monitoredMaidId.isEmpty()) {
-            EntityMaid maid = findMaidById(monitoredMaidId, player.getServer());
-            if (maid != null && maid.getOwner() != null && maid.getOwner().getUUID().equals(player.getUUID())) {
-                eventData.addProperty("maid_id", maid.getStringUUID());
-                eventData.addProperty("maid_name", maid.getName().getString());
-            }
-        }
+        addPlayerScope(eventData, maid, player);
         webSocketServer.broadcastEvent(eventData);
     }
 
@@ -289,6 +311,8 @@ public class GameEventHandler {
 
         // Maid death
         if (entity instanceof EntityMaid maid) {
+            if (monitoredMaidId.isEmpty()
+                    || !monitoredMaidId.equals(maid.getStringUUID())) return;
             JsonObject eventData = new JsonObject();
             eventData.addProperty("event_type", Protocol.EVENT_MAID_DEATH);
             eventData.addProperty("maid_id", maid.getStringUUID());
@@ -305,9 +329,11 @@ public class GameEventHandler {
 
         // Player death
         if (entity instanceof Player player) {
+            EntityMaid maid = monitoredOwnerMaid(player);
+            if (maid == null) return;
             JsonObject eventData = new JsonObject();
             eventData.addProperty("event_type", Protocol.EVENT_PLAYER_DEATH);
-            eventData.addProperty("player_name", player.getName().getString());
+            addPlayerScope(eventData, maid, player);
             eventData.addProperty("cause", event.getSource().getMsgId());
             eventData.addProperty("death_x", player.blockPosition().getX());
             eventData.addProperty("death_y", player.blockPosition().getY());
@@ -319,7 +345,10 @@ public class GameEventHandler {
         }
 
         if (!(entity instanceof Player) && !(entity instanceof EntityMaid) && event.getSource().getEntity() instanceof Player player) {
+            EntityMaid maid = monitoredOwnerMaid(player);
+            if (maid == null) return;
             killAggregate.recordKill(
+                    player.getStringUUID(),
                     player.getName().getString(),
                     BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType()).toString(),
                     entity.getName().getString(),
@@ -400,7 +429,7 @@ public class GameEventHandler {
             if (!lastPlayerDimension.isEmpty() && !lastPlayerDimension.equals(currentDimension)) {
                 JsonObject eventData = new JsonObject();
                 eventData.addProperty("event_type", Protocol.EVENT_DIMENSION_CHANGE);
-                eventData.addProperty("player_name", player.getName().getString());
+                addPlayerScope(eventData, maid, player);
                 eventData.addProperty("from_dimension", lastPlayerDimension);
                 eventData.addProperty("to_dimension", currentDimension);
                 webSocketServer.broadcastEvent(eventData);
@@ -439,7 +468,7 @@ public class GameEventHandler {
             // Chess game detection (throttled)
             if (currentTick - lastChessCheckTick >= CHESS_CHECK_INTERVAL) {
                 lastChessCheckTick = currentTick;
-                checkChessGame(maid, server);
+                checkChessGame(maid);
             }
         }
 
@@ -481,6 +510,9 @@ public class GameEventHandler {
     @SubscribeEvent
     public static void onAdvancement(net.neoforged.neoforge.event.entity.player.AdvancementEvent.AdvancementEarnEvent event) {
         if (!ModConfig.EVENT_PUSH_ENABLED.get() || webSocketServer == null || !webSocketServer.hasClients()) return;
+        Player player = event.getEntity();
+        EntityMaid maid = monitoredOwnerMaid(player);
+        if (maid == null) return;
         net.minecraft.advancements.AdvancementHolder holder = event.getAdvancement();
         net.minecraft.advancements.Advancement advancement = holder.value();
         // Only report displayable advancements (visible in toast)
@@ -488,7 +520,7 @@ public class GameEventHandler {
 
         JsonObject eventData = new JsonObject();
         eventData.addProperty("event_type", Protocol.EVENT_ADVANCEMENT);
-        eventData.addProperty("player_name", event.getEntity().getName().getString());
+        addPlayerScope(eventData, maid, player);
         net.minecraft.advancements.DisplayInfo display = advancement.display().get();
         eventData.addProperty("title", display.getTitle().getString());
         eventData.addProperty("description", display.getDescription().getString());
@@ -681,12 +713,26 @@ public class GameEventHandler {
     }
 
     private static EntityMaid trackedOwnerMaid(Player player) {
-        if (monitoredMaidId.isEmpty() || player == null || player.getServer() == null) return null;
-        EntityMaid maid = findMaidById(monitoredMaidId, player.getServer());
-        if (maid == null || maid.getOwner() == null) return null;
-        if (!maid.getOwner().getUUID().equals(player.getUUID())) return null;
+        EntityMaid maid = monitoredOwnerMaid(player);
+        if (maid == null) return null;
         if (!maid.level().dimension().equals(player.level().dimension())) return null;
         return maid;
+    }
+
+    private static EntityMaid monitoredOwnerMaid(Player player) {
+        if (monitoredMaidId.isEmpty() || player == null
+                || player.getServer() == null) return null;
+        EntityMaid maid = findMaidById(monitoredMaidId, player.getServer());
+        if (maid == null || maid.getOwner() == null) return null;
+        return maid.getOwner().getUUID().equals(player.getUUID()) ? maid : null;
+    }
+
+    private static void addPlayerScope(
+            JsonObject eventData, EntityMaid maid, Player player) {
+        eventData.addProperty("maid_id", maid.getStringUUID());
+        eventData.addProperty("maid_name", maid.getName().getString());
+        eventData.addProperty("player_id", player.getStringUUID());
+        eventData.addProperty("player_name", player.getName().getString());
     }
 
     private static String attackerName(LivingIncomingDamageEvent event) {
@@ -713,9 +759,17 @@ public class GameEventHandler {
 
     private static void flushBehaviorAggregate(BehaviorAggregate aggregate) {
         if (!aggregate.isActive()) return;
+        if (monitoredMaidId.isEmpty()) {
+            aggregate.reset();
+            return;
+        }
 
         JsonObject eventData = new JsonObject();
         eventData.addProperty("event_type", aggregate.eventType);
+        eventData.addProperty("maid_id", monitoredMaidId);
+        if (!aggregate.playerId.isEmpty()) {
+            eventData.addProperty("player_id", aggregate.playerId);
+        }
         eventData.addProperty("count", aggregate.count);
         eventData.addProperty("start_tick", aggregate.startTick);
         eventData.addProperty("end_tick", aggregate.endTick);
@@ -799,6 +853,7 @@ public class GameEventHandler {
 
         JsonObject eventData = new JsonObject();
         eventData.addProperty("event_type", Protocol.EVENT_BLOCK_ACTIVITY);
+        eventData.addProperty("maid_id", monitoredMaidId);
         eventData.addProperty("action", aggregate.action);
         eventData.addProperty("player_id", aggregate.playerId);
         eventData.addProperty("player_name", aggregate.playerName);
@@ -881,7 +936,7 @@ public class GameEventHandler {
 
     // ── Chess game detection ──
 
-    private static void checkChessGame(EntityMaid maid, net.minecraft.server.MinecraftServer server) {
+    private static void checkChessGame(EntityMaid maid) {
         boolean isPlayingChess = BOARD_GAMES_TASK_UID.equals(maid.getTask().getUid().toString());
 
         if (!isPlayingChess) {
@@ -931,7 +986,7 @@ public class GameEventHandler {
                     getMoveCount(boardEntity), isPlayerTurn(boardEntity));
 
             // Find the opponent (player near the board)
-            String opponent = findNearbyPlayerName(boardEntity, server);
+            String opponent = findNearbyPlayerName(boardEntity, maid);
 
             LOGGER.info("[Chess] Game start: type={}, opponent={}, boardPos={}", gameType, opponent, boardPos);
 
@@ -964,7 +1019,7 @@ public class GameEventHandler {
         if (gameEnded && !currentChessGame.gameEndNotified) {
             currentChessGame.gameEndNotified = true;
             String result = getGameResult(boardEntity, maid);
-            String opponent = findNearbyPlayerName(boardEntity, server);
+            String opponent = findNearbyPlayerName(boardEntity, maid);
 
             LOGGER.info("[Chess] Game end: type={}, result={}, moves={}, opponent={}", currentChessGame.gameType, result, currentMoveCount, opponent);
 
@@ -1087,14 +1142,15 @@ public class GameEventHandler {
         return "unknown";
     }
 
-    private static String findNearbyPlayerName(TileEntityJoy board, net.minecraft.server.MinecraftServer server) {
+    private static String findNearbyPlayerName(
+            TileEntityJoy board, EntityMaid maid) {
         BlockPos boardPos = board.getWorldPosition();
-        for (net.minecraft.server.level.ServerLevel level : server.getAllLevels()) {
-            for (Player player : level.players()) {
-                if (player.blockPosition().distManhattan(boardPos) <= 4) {
-                    return player.getName().getString();
-                }
-            }
+        LivingEntity owner = maid.getOwner();
+        if (owner instanceof Player player
+                && board.getLevel() != null
+                && player.level() == board.getLevel()
+                && player.blockPosition().distManhattan(boardPos) <= 4) {
+            return player.getName().getString();
         }
         return "";
     }
