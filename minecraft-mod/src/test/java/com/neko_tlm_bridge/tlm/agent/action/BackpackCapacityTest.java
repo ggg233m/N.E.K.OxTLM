@@ -18,7 +18,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * - 空 inventory(0 slots):视为满,因为没有 slot 可装
  * - 有空 slot:未满
  * - 所有 slot 满且可堆叠:满
- * - 不兼容的未满 stack 不算通用容量
+ * - 未满 stack 算物理余量,但目标掉落仍做兼容性模拟
  * - 目标掉落模拟遵守 slotLimit 和 isItemValid
  * - 不可堆叠物品占满所有 slot:满
  * - null inventory:视为未满(无法判断,不阻塞)
@@ -52,16 +52,59 @@ class BackpackCapacityTest {
     }
 
     @Test
-    void incompatiblePartialStackIsNotGenericCapacity() {
+    void partialStackIsPhysicalCapacityButExactDropsStillCheckCompatibility() {
         ItemStackHandler inventory = new ItemStackHandler(2);
         inventory.setStackInSlot(0, new ItemStack(Items.DIAMOND, 64));
         inventory.setStackInSlot(1, new ItemStack(Items.IRON_INGOT, 32));
 
-        assertTrue(AutonomousMiningAction.isBackpackFull(inventory));
+        assertFalse(AutonomousMiningAction.isBackpackFull(inventory));
         assertFalse(AutonomousMiningAction.canStoreDrops(
                 inventory, List.of(new ItemStack(Items.DIAMOND))));
         assertTrue(AutonomousMiningAction.canStoreDrops(
                 inventory, List.of(new ItemStack(Items.IRON_INGOT, 32))));
+    }
+
+    @Test
+    void partialDiamondStackHasCapacityForMoreDiamonds() {
+        ItemStackHandler inventory = new ItemStackHandler(1);
+        inventory.setStackInSlot(0, new ItemStack(Items.DIAMOND, 38));
+
+        AutonomousMiningAction.BackpackCapacitySummary summary =
+                AutonomousMiningAction.summarizeBackpackCapacity(inventory);
+
+        assertFalse(summary.full());
+        assertEquals(0, summary.emptySlots());
+        assertEquals(1, summary.partialStackSlots());
+        assertTrue(AutonomousMiningAction.canStoreDrops(
+                inventory, List.of(new ItemStack(Items.DIAMOND, 26))));
+        assertFalse(AutonomousMiningAction.canStoreDrops(
+                inventory, List.of(new ItemStack(Items.DIAMOND, 27))));
+    }
+
+    @Test
+    void partialStackAtCustomSlotLimitIsFull() {
+        ItemStackHandler inventory = new ItemStackHandler(1) {
+            @Override
+            public int getSlotLimit(int slot) {
+                return 16;
+            }
+        };
+        inventory.setStackInSlot(0, new ItemStack(Items.DIAMOND, 16));
+
+        assertTrue(AutonomousMiningAction.isBackpackFull(inventory));
+    }
+
+    @Test
+    void partialStackInNonInsertableSlotIsNotCapacity() {
+        ItemStackHandler inventory = new ItemStackHandler(1) {
+            @Override
+            public boolean isItemValid(int slot, ItemStack stack) {
+                return false;
+            }
+        };
+        inventory.setStackInSlot(0, new ItemStack(Items.DIAMOND, 38));
+
+        assertTrue(AutonomousMiningAction.isBackpackFull(inventory));
     }
 
     @Test

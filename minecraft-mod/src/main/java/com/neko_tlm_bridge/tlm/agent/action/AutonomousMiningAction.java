@@ -139,6 +139,10 @@ public final class AutonomousMiningAction implements MaidAction {
     private final Set<String> failedPlannerCandidates = new LinkedHashSet<>();
     private String lastPlannerFailure = "none";
     private boolean persistentSessionActive;
+    private BackpackCapacitySummary lastBackpackCapacity;
+    private String lastCapacityCheckMode = "none";
+    private int lastCapacityCandidatesChecked;
+    private int lastCapacityCandidatesStorable;
 
     public AutonomousMiningAction(Predicate<BlockState> selector,
                                   String selectorDescription,
@@ -773,15 +777,21 @@ public final class AutonomousMiningAction implements MaidAction {
         // tick 恰好耗尽并解锁，因此必须在开始下一段工作前重新执行容量门禁。
         boolean capacityAvailable = true;
         if (!veinTracker.locked() && !state.goalReached()) {
+            IItemHandler backpack = context.maid().getAvailableBackpackInv();
+            lastBackpackCapacity = summarizeBackpackCapacity(backpack);
             List<BlockPos> capacityTargets = discovered.stream()
                     .limit(MAX_CANDIDATES)
                     .toList();
             if (capacityTargets.isEmpty()) {
-                if (isBackpackFull(context.maid())) {
-                    capacityAvailable = false;
-                }
+                lastCapacityCheckMode = "physical_stack_capacity";
+                lastCapacityCandidatesChecked = 0;
+                lastCapacityCandidatesStorable = 0;
+                capacityAvailable = !lastBackpackCapacity.full();
             } else {
+                lastCapacityCheckMode = "target_drop_simulation";
+                lastCapacityCandidatesChecked = capacityTargets.size();
                 discovered = filterStorableTargets(context, capacityTargets);
+                lastCapacityCandidatesStorable = discovered.size();
                 capacityAvailable = !discovered.isEmpty();
             }
         }
@@ -1565,6 +1575,7 @@ public final class AutonomousMiningAction implements MaidAction {
         report.addProperty("harvest_navigation_replans", harvestNavigationReplans);
         report.addProperty("rejected_harvest_stances",
                 rejectedHarvestStances.size());
+        addBackpackCapacityStatus(report);
         if (lastPlannerDecision != null) {
             report.add("planner_decision", lastPlannerDecision.deepCopy());
         }
@@ -1742,6 +1753,7 @@ public final class AutonomousMiningAction implements MaidAction {
         result.addProperty("harvest_navigation_replans", harvestNavigationReplans);
         result.addProperty("rejected_harvest_stances",
                 rejectedHarvestStances.size());
+        addBackpackCapacityStatus(result);
         if (lastPlannerDecision != null) {
             result.add("last_planner_decision",
                     lastPlannerDecision.deepCopy());
@@ -1778,6 +1790,23 @@ public final class AutonomousMiningAction implements MaidAction {
                 Math.max(0, state.collectedCount() - state.targetCount()));
         json.addProperty("completion_rule",
                 "target_count_is_minimum_finish_committed_vein");
+    }
+
+    private void addBackpackCapacityStatus(JsonObject json) {
+        if (lastBackpackCapacity == null) {
+            return;
+        }
+        json.addProperty("capacity_check_mode", lastCapacityCheckMode);
+        json.addProperty("backpack_slots", lastBackpackCapacity.slots());
+        json.addProperty("backpack_empty_slots", lastBackpackCapacity.emptySlots());
+        json.addProperty("backpack_partial_stack_slots",
+                lastBackpackCapacity.partialStackSlots());
+        json.addProperty("backpack_saturated_slots",
+                lastBackpackCapacity.saturatedSlots());
+        json.addProperty("capacity_candidates_checked",
+                lastCapacityCandidatesChecked);
+        json.addProperty("capacity_candidates_storable",
+                lastCapacityCandidatesStorable);
     }
 
     private JsonObject detail(String substage) {
@@ -1905,8 +1934,9 @@ public final class AutonomousMiningAction implements MaidAction {
     /**
      * 检测女仆背包是否缺少任何通用的、安全可用容量。
      *
-     * 未知下一种掉落物时只把有正容量的空 slot 视为通用空间；已有物品的
-     * 未满 stack 可能与下一种掉落物不兼容，不能据此放行。
+     * 未发现目标矿石时，以物理背包容量作为继续探矿的门禁：完全空槽或仍
+     * 可接收同类物品的部分堆叠都算余量。发现目标后会由 canStoreDrops 对
+     * 真实掉落执行更严格的逐候选模拟，因此部分堆叠不会放行不兼容掉落。
      */
     static boolean isBackpackFull(EntityMaid maid) {
         IItemHandler inventory = maid.getAvailableBackpackInv();
@@ -1918,16 +1948,36 @@ public final class AutonomousMiningAction implements MaidAction {
      * 包内可见以便单元测试,逻辑独立于 EntityMaid。
      */
     static boolean isBackpackFull(IItemHandler inventory) {
+        return summarizeBackpackCapacity(inventory).full();
+    }
+
+    static BackpackCapacitySummary summarizeBackpackCapacity(
+            IItemHandler inventory) {
         if (inventory == null) {
-            return false;
+            return new BackpackCapacitySummary(0, 0, 0, 0, false);
         }
+        int emptySlots = 0;
+        int partialStackSlots = 0;
+        int saturatedSlots = 0;
         for (int slot = 0; slot < inventory.getSlots(); slot++) {
             ItemStack stack = inventory.getStackInSlot(slot);
             if (stack.isEmpty() && inventory.getSlotLimit(slot) > 0) {
-                return false;
+                emptySlots++;
+                continue;
+            }
+            int limit = stack.isEmpty() ? 0 : Math.min(
+                    inventory.getSlotLimit(slot), stack.getMaxStackSize());
+            if (!stack.isEmpty() && stack.getCount() < limit
+                    && inventory.isItemValid(slot, stack)) {
+                partialStackSlots++;
+            } else {
+                saturatedSlots++;
             }
         }
-        return true;
+        boolean full = inventory.getSlots() == 0
+                || (emptySlots == 0 && partialStackSlots == 0);
+        return new BackpackCapacitySummary(inventory.getSlots(), emptySlots,
+                partialStackSlots, saturatedSlots, full);
     }
 
     static RestartProjection restartProjection(
@@ -2315,6 +2365,14 @@ public final class AutonomousMiningAction implements MaidAction {
     record RestartProjection(
             int remainingTargetCount,
             boolean restartSupported) {
+    }
+
+    record BackpackCapacitySummary(
+            int slots,
+            int emptySlots,
+            int partialStackSlots,
+            int saturatedSlots,
+            boolean full) {
     }
 
     private enum PlanningPurpose {
