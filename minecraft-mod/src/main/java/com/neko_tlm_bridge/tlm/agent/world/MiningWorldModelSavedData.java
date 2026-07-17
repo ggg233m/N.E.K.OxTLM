@@ -20,6 +20,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -32,8 +33,9 @@ import java.util.UUID;
  * Compact, per-dimension persistent world model for autonomous mining.
  *
  * <p>The model deliberately stores only semantic tunnel nodes, aggregate
- * tunnel segments and hazards. Path nodes, scanned blocks and other live
- * navigation caches remain runtime-only.</p>
+ * tunnel segments, hazards and one loop-erased return breadcrumb route. Full
+ * planner paths, scanned blocks and other live navigation caches remain
+ * runtime-only.</p>
  *
  * <p>Instances obtained through {@link #get(ServerLevel)} are bound to the
  * Minecraft server thread. Every mutating API checks that ownership before
@@ -72,6 +74,7 @@ public final class MiningWorldModelSavedData extends SavedData {
     private static final String KEY_WATER_SEALS_PLACED = "WaterSealsPlaced";
     private static final String KEY_VEIN_MEMBERS = "VeinMembers";
     private static final String KEY_VEIN_HARVESTED_MEMBERS = "VeinHarvestedMembers";
+    private static final String KEY_ROUTE_BREADCRUMBS = "RouteBreadcrumbs";
     private static final String KEY_CREATED = "CreatedGameTime";
     private static final String KEY_UPDATED = "UpdatedGameTime";
     private static final String KEY_ENTRY_NODE = "EntryNode";
@@ -161,6 +164,15 @@ public final class MiningWorldModelSavedData extends SavedData {
     }
 
     /**
+     * Newest operation, including a terminal one, that owns at least one
+     * recorded route edge for this maid in this dimension.
+     */
+    public static Optional<OperationSnapshot> latestByMaidWithRoute(
+            ServerLevel level, UUID maidId) {
+        return get(level).latestByMaidWithRoute(maidId);
+    }
+
+    /**
      * Instance form used by actions and deterministic unit tests. Existing
      * checkpoints are authoritative and reject action-ID reuse with different
      * maid or normalized planning arguments.
@@ -201,7 +213,7 @@ public final class MiningWorldModelSavedData extends SavedData {
                 arguments.targetCount, 0,
                 "validating", null, null,
                 arguments.mainDirection, arguments.shape, arguments.segmentLength,
-                0L, 0L, 0L, 0L, 0L, List.of(), List.of(), "",
+                0L, 0L, 0L, 0L, 0L, List.of(), List.of(), List.of(), "",
                 gameTime, gameTime, null, null);
         operations.put(actionId, created);
         setDirty();
@@ -214,6 +226,22 @@ public final class MiningWorldModelSavedData extends SavedData {
         return operations.values().stream()
                 .filter(value -> value.maidId.equals(maidId) && value.status.resumable())
                 .max(Comparator.comparingLong((MutableOperation value) -> value.updatedGameTime)
+                        .thenComparing(value -> value.operationId.toString()))
+                .map(MutableOperation::snapshot);
+    }
+
+    /**
+     * Terminal operations remain eligible because their route is still useful
+     * after mining succeeds, fails, or is intentionally stopped.
+     */
+    public Optional<OperationSnapshot> latestByMaidWithRoute(UUID maidId) {
+        Objects.requireNonNull(maidId, "maidId");
+        return operations.values().stream()
+                .filter(value -> value.maidId.equals(maidId)
+                        && value.routeBreadcrumbs.size() >= 2)
+                .max(Comparator.comparingLong(
+                                (MutableOperation value) -> value.updatedGameTime)
+                        .thenComparingLong(value -> value.createdGameTime)
                         .thenComparing(value -> value.operationId.toString()))
                 .map(MutableOperation::snapshot);
     }
@@ -242,7 +270,7 @@ public final class MiningWorldModelSavedData extends SavedData {
                 operationId, maidId, dimensionId, 0L, OperationStatus.ACTIVE,
                 "{}", "{}", 0, 0, "validating", entrance.immutable(), null,
                 "auto", "auto", 8, 0L, 0L, 0L, 0L, 0L,
-                List.of(), List.of(), "",
+                List.of(), List.of(), List.of(entrance.immutable()), "",
                 gameTime, gameTime, entryId, null);
         created.nodes.put(entryId, new TunnelNode(
                 entryId, NodeType.ENTRY, entrance.immutable(), "", 0,
@@ -520,9 +548,70 @@ public final class MiningWorldModelSavedData extends SavedData {
                 || !entryId.equals(operation.entryNodeId);
         operation.originPos = origin.immutable();
         operation.entryNodeId = entryId;
+        if (operation.routeBreadcrumbs.isEmpty()
+                || !operation.routeBreadcrumbs.getFirst().equals(origin)) {
+            operation.routeBreadcrumbs = new ArrayList<>(List.of(origin.immutable()));
+            operation.rebuildRouteBreadcrumbIndices();
+            changed = true;
+        }
         if (changed) {
             touch(operation, gameTime);
         }
+    }
+
+    /**
+     * Records one physically completed, player-walkable landing position.
+     *
+     * <p>The stored list is always the simple path from the operation entrance
+     * to the most recent landing point. Revisiting an earlier breadcrumb erases
+     * the loop suffix. Non-adjacent and vertical-shaft transitions are rejected
+     * without mutating the durable route; callers can then keep mining while
+     * reporting that no trustworthy return breadcrumb was committed.</p>
+     *
+     * @return {@code true} when the position is already current or was safely
+     * appended/loop-erased, {@code false} for a discontinuous transition
+     */
+    public boolean appendRouteBreadcrumb(
+            UUID operationId, BlockPos position, long gameTime) {
+        assertMutationThread();
+        MutableOperation operation = requireOperation(operationId);
+        BlockPos next = Objects.requireNonNull(position, "position").immutable();
+        if (operation.routeBreadcrumbs.isEmpty()) {
+            operation.routeBreadcrumbs = new ArrayList<>(List.of(next));
+            operation.rebuildRouteBreadcrumbIndices();
+            touch(operation, gameTime);
+            return true;
+        }
+
+        List<BlockPos> route = operation.routeBreadcrumbs;
+        BlockPos current = route.getLast();
+        if (current.equals(next)) {
+            return true;
+        }
+        Integer previousIndex = operation.routeBreadcrumbIndices.get(next.asLong());
+        if (previousIndex != null) {
+            operation.routeBreadcrumbs = new ArrayList<>(
+                    route.subList(0, previousIndex + 1));
+            operation.rebuildRouteBreadcrumbIndices();
+            touch(operation, gameTime);
+            return true;
+        }
+        if (!isPlayerWalkableTransition(current, next)) {
+            return false;
+        }
+        route.add(next);
+        operation.routeBreadcrumbIndices.put(next.asLong(), route.size() - 1);
+        touch(operation, gameTime);
+        return true;
+    }
+
+    /** A breadcrumb edge is a cardinal one-block move with at most one Y step. */
+    static boolean isPlayerWalkableTransition(BlockPos from, BlockPos to) {
+        Objects.requireNonNull(from, "from");
+        Objects.requireNonNull(to, "to");
+        int horizontal = Math.abs(to.getX() - from.getX())
+                + Math.abs(to.getZ() - from.getZ());
+        return horizontal == 1 && Math.abs(to.getY() - from.getY()) <= 1;
     }
 
     /**
@@ -743,6 +832,9 @@ public final class MiningWorldModelSavedData extends SavedData {
         tag.putLongArray(KEY_VEIN_HARVESTED_MEMBERS,
                 operation.veinHarvestedMembers.stream()
                         .mapToLong(BlockPos::asLong).toArray());
+        tag.putLongArray(KEY_ROUTE_BREADCRUMBS,
+                operation.routeBreadcrumbs.stream()
+                        .mapToLong(BlockPos::asLong).toArray());
         tag.putLong(KEY_CREATED, operation.createdGameTime);
         tag.putLong(KEY_UPDATED, operation.updatedGameTime);
         if (operation.entryNodeId != null) {
@@ -790,6 +882,39 @@ public final class MiningWorldModelSavedData extends SavedData {
                 .toList());
     }
 
+    /** Restores only the longest valid loop-erased breadcrumb prefix. */
+    private static List<BlockPos> readRouteBreadcrumbs(long[] packedPositions) {
+        List<BlockPos> restored = new ArrayList<>();
+        Map<Long, Integer> indices = new HashMap<>();
+        for (long packed : packedPositions) {
+            BlockPos next = BlockPos.of(packed).immutable();
+            if (restored.isEmpty()) {
+                restored.add(next);
+                indices.put(next.asLong(), 0);
+                continue;
+            }
+            BlockPos current = restored.getLast();
+            if (current.equals(next)) {
+                continue;
+            }
+            Integer previousIndex = indices.get(next.asLong());
+            if (previousIndex != null) {
+                restored.subList(previousIndex + 1, restored.size()).clear();
+                indices.clear();
+                for (int index = 0; index < restored.size(); index++) {
+                    indices.put(restored.get(index).asLong(), index);
+                }
+                continue;
+            }
+            if (!isPlayerWalkableTransition(current, next)) {
+                break;
+            }
+            restored.add(next);
+            indices.put(next.asLong(), restored.size() - 1);
+        }
+        return restored;
+    }
+
     private static MutableOperation readOperation(CompoundTag tag, String rootDimensionId) {
         if (!tag.hasUUID(KEY_OPERATION_ID) || !tag.hasUUID(KEY_MAID_ID)) {
             return null;
@@ -825,9 +950,18 @@ public final class MiningWorldModelSavedData extends SavedData {
                 Math.max(0L, tag.getLong(KEY_WATER_SEALS_PLACED)),
                 readPositions(tag.getLongArray(KEY_VEIN_MEMBERS)),
                 readPositions(tag.getLongArray(KEY_VEIN_HARVESTED_MEMBERS)),
+                readRouteBreadcrumbs(tag.getLongArray(KEY_ROUTE_BREADCRUMBS)),
                 normalizeText(tag.getString(KEY_BLOCKED_REASON), 256),
                 tag.getLong(KEY_CREATED), tag.getLong(KEY_UPDATED),
                 entryId, workfaceId);
+        if (operation.originPos != null
+                && (operation.routeBreadcrumbs.isEmpty()
+                || !operation.routeBreadcrumbs.getFirst()
+                .equals(operation.originPos))) {
+            operation.routeBreadcrumbs = new ArrayList<>(
+                    List.of(operation.originPos));
+            operation.rebuildRouteBreadcrumbIndices();
+        }
 
         ListTag nodes = tag.getList(KEY_NODES, Tag.TAG_COMPOUND);
         for (int index = 0; index < nodes.size(); index++) {
@@ -1265,6 +1399,7 @@ public final class MiningWorldModelSavedData extends SavedData {
             long waterSealsPlaced,
             List<BlockPos> veinMembers,
             List<BlockPos> veinHarvestedMembers,
+            List<BlockPos> routeBreadcrumbs,
             String blockedReason,
             long createdGameTime,
             long updatedGameTime,
@@ -1289,6 +1424,8 @@ public final class MiningWorldModelSavedData extends SavedData {
             shape = defaultPlanText(shape, "auto");
             veinMembers = immutableDistinctPositions(veinMembers);
             veinHarvestedMembers = immutableDistinctPositions(veinHarvestedMembers);
+            routeBreadcrumbs = List.copyOf(
+                    Objects.requireNonNull(routeBreadcrumbs, "routeBreadcrumbs"));
             blockedReason = normalizeText(blockedReason, 256);
             nodes = Map.copyOf(nodes);
             segments = Map.copyOf(segments);
@@ -1337,6 +1474,8 @@ public final class MiningWorldModelSavedData extends SavedData {
         private long waterSealsPlaced;
         private List<BlockPos> veinMembers;
         private List<BlockPos> veinHarvestedMembers;
+        private List<BlockPos> routeBreadcrumbs;
+        private final Map<Long, Integer> routeBreadcrumbIndices = new HashMap<>();
         private String blockedReason;
         private final long createdGameTime;
         private long updatedGameTime;
@@ -1356,7 +1495,8 @@ public final class MiningWorldModelSavedData extends SavedData {
                 long segmentsDug, long clearedBlocks,
                 long placementsUsed, long bridgeSupportsPlaced,
                 long waterSealsPlaced, List<BlockPos> veinMembers,
-                List<BlockPos> veinHarvestedMembers, String blockedReason,
+                List<BlockPos> veinHarvestedMembers,
+                List<BlockPos> routeBreadcrumbs, String blockedReason,
                 long createdGameTime, long updatedGameTime,
                 UUID entryNodeId, UUID activeWorkfaceNodeId) {
             this.operationId = operationId;
@@ -1383,11 +1523,21 @@ public final class MiningWorldModelSavedData extends SavedData {
             this.veinMembers = immutableDistinctPositions(veinMembers);
             this.veinHarvestedMembers = immutableDistinctPositions(
                     veinHarvestedMembers);
+            this.routeBreadcrumbs = new ArrayList<>(
+                    Objects.requireNonNull(routeBreadcrumbs, "routeBreadcrumbs"));
+            rebuildRouteBreadcrumbIndices();
             this.blockedReason = normalizeText(blockedReason, 256);
             this.createdGameTime = createdGameTime;
             this.updatedGameTime = updatedGameTime;
             this.entryNodeId = entryNodeId;
             this.activeWorkfaceNodeId = activeWorkfaceNodeId;
+        }
+
+        private void rebuildRouteBreadcrumbIndices() {
+            routeBreadcrumbIndices.clear();
+            for (int index = 0; index < routeBreadcrumbs.size(); index++) {
+                routeBreadcrumbIndices.put(routeBreadcrumbs.get(index).asLong(), index);
+            }
         }
 
         private OperationSnapshot snapshot() {
@@ -1397,7 +1547,7 @@ public final class MiningWorldModelSavedData extends SavedData {
                     originPos, currentWorkfacePos, mainDirection, shape,
                     segmentLength, segmentsDug, clearedBlocks,
                     placementsUsed, bridgeSupportsPlaced, waterSealsPlaced,
-                    veinMembers, veinHarvestedMembers,
+                    veinMembers, veinHarvestedMembers, routeBreadcrumbs,
                     blockedReason,
                     createdGameTime, updatedGameTime,
                     entryNodeId, activeWorkfaceNodeId,

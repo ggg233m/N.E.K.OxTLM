@@ -23,7 +23,9 @@ class FakePlugin:
 
 class FakeActionService:
     class Registry:
-        SUPPORTED_KINDS = frozenset({"navigate", "harvest_blocks"})
+        SUPPORTED_KINDS = frozenset({
+            "navigate", "harvest_blocks", "return_to_position"
+        })
 
     def __init__(self):
         self.registry = self.Registry()
@@ -517,6 +519,7 @@ class MaidActivityDirectorTests(unittest.IsolatedAsyncioTestCase):
         result = await self.fx.director.get_capabilities()
         self.assertTrue(result["success"])
         self.assertIn("navigate", result["agent_actions"])
+        self.assertIn("return_to_position", result["agent_actions"])
         self.assertIn("mine_ore", result["skills"])
         self.assertEqual(3, len(result["tlm_tasks"]))
 

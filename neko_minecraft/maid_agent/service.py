@@ -156,7 +156,11 @@ class MaidActionService:
         try:
             normalized_args = self.registry.normalize(kind, args or {})
             if timeout_ms is None:
-                timeout_ms = 60000
+                # Returning through a deep/branched mine is intentionally a
+                # long-running server-owned operation.  A generic one-minute
+                # default would terminate a healthy return midway, especially
+                # when the route must repair support or bridge a gap.
+                timeout_ms = 0 if kind == "return_to_position" else 60000
             timeout_ms = int(timeout_ms)
         except (ActionValidationError, TypeError, ValueError) as exc:
             return self._error("INVALID_ACTION_ARGUMENTS", str(exc), action_id=action_id)

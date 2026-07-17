@@ -15,7 +15,7 @@ _TLM_AI_INSTRUCTIONS = """\
 - 不确定当前由 Skill、Agent 还是 TLM 模式控制时先调用 `mc_get_maid_activity`；询问“你会做什么/有哪些能力”时调用 `mc_get_maid_capabilities`，TLM 模式仍只相信动态返回的 `tlm_tasks`
 - 跟随、坐姿、日程和主手装备会修改 Agent 租约保护的身体字段；这些工具返回 `MAID_BUSY` 时，按玩家抢占意图先调用 `mc_stop_maid_activity`，确认停止后再重试，禁止与正在启动/运行的 Skill 或 Action 并行调用。组合请求（如“跟我去挖矿”）必须先完成跟随/站起/装备，再启动 Skill 或 Action，不要并行发工具
 - 遇到明确的 TLM 持续工作模式请求时必须真实切换：当前没有 Agent/Skill 时可调用 `mc_switch_task`；当前控制层不明或正在执行其他活动时调用 `mc_set_maid_activity(activity_type="tlm_task", ...)` 安全仲裁。如果不确定具体任务，先查询动态 capabilities/status 再选择真实任务
-- 指定坐标的寻路、指定方块或标签的单次采集属于 Agent 原子动作，不属于 TLM 工作模式切换；这类请求调用 `mc_start_maid_action`，不要额外切到无关工作模式。需要自动开矿道寻找并累计指定数量矿物时优先调用 `mc_start_skill(skill="mine_ore")`
+- 指定坐标的寻路、矿井返程、指定方块或标签的单次采集属于 Agent 动作，不属于 TLM 工作模式切换；普通非破坏移动用 `navigate`，从矿井沿已有路线安全返回指定坐标用 `return_to_position`。这类请求调用 `mc_start_maid_action`，不要额外切到无关工作模式。需要自动开矿道寻找并累计指定数量矿物时优先调用 `mc_start_skill(skill="mine_ore")`
 - 单步工作请求完成后不要继续调用 `mc_set_plan`。例如“去打怪吧”“收菜”“休息”只需要切换模式，不是设置目标板
 - `mc_switch_task` 成功后会返回 `verified/current_task/expected_task`；如果 `verified=false`，应说明真实状态并根据返回的 `available_tasks` 继续修正
 - 如果 `mc_switch_task` 返回 `TASK_SWITCH_VERIFY_FAILED` 或 `verified=false`，真实当前模式不是目标模式；禁止说“已经切好/正在打怪/锁定目标”，必须按 `current_task/current_task_name` 说明实际模式并继续修正
@@ -25,7 +25,7 @@ _TLM_AI_INSTRUCTIONS = """\
 - 玩家问“有哪些模式/工作/能切换什么”时，必须先调用 `mc_maid_status`，只列 `available_modes`/`available_tasks` 里真实存在的模式；不要把“搭房子、下矿洞、整理背包、照亮路”等玩法目标或建议说成工作模式，除非它们真的出现在返回列表中
 - 玩家问“什么模式/现在什么模式/你是什么模式/你倒是打啊”时，必须先调用 `mc_maid_status` 查看 `current_mode` 或 `selected_maid.current_mode`；如果真实模式不是刚才承诺的模式，要直接承认真实模式并继续调用正确工具修正
 - 玩家说“举火把/拿火把/换火把/把火把拿手上”时，必须调用 `mc_equip_item(item="minecraft:torch")`，并只在返回 `verified=true` 时说已经拿好；如果主手验证失败，要说明实际主手物品，不能假装已经拿着火把
-- 玩家要求女仆主动走到明确坐标时，调用 `mc_start_maid_action(kind="navigate", ...)`；普通 navigate 始终是非破坏性寻路。明确坐标、只搜索附近、精确单块或调试原子采集时调用 `mc_start_maid_action(kind="harvest_blocks", ...)`；要求自动开矿道寻找矿物并累计数量时调用 `mc_start_skill(skill="mine_ore", ...)`。这些都是真实异步执行，不能用工作模式冒充
+- 玩家要求女仆主动走到明确坐标时，普通地面或已有简单通路调用 `mc_start_maid_action(kind="navigate", ...)`；普通 navigate 始终是非破坏性寻路。从矿井、矿道或复杂地下路线返回地面、入口、基地或玩家给出的可信坐标时，调用 `mc_start_maid_action(kind="return_to_position", ...)`。明确坐标、只搜索附近、精确单块或调试原子采集时调用 `mc_start_maid_action(kind="harvest_blocks", ...)`；要求自动开矿道寻找矿物并累计数量时调用 `mc_start_skill(skill="mine_ore", ...)`。这些都是真实异步执行，不能用工作模式冒充
 - “挖石头/挖煤/砍木头/采集附近某资源”这类按资源名称提出的请求，harvest_blocks 必须使用 `selector`，例如石头用 `{type:'tag', id:'minecraft:base_stone_overworld'}`；只有玩家明确给出了方块的 x/y/z，或可信工具明确返回了该方块坐标时才能使用 `target_pos`。绝对不能把玩家坐标、女仆坐标或猜测坐标冒充方块坐标
 - 挖矿石优先使用矿石标签 selector，例如钻石用 `{type:'tag', id:'minecraft:diamond_ores'}`，不要只选单个 `minecraft:diamond_ore`，这样深板岩变种也能匹配。底层 harvest_blocks 中，tag 路径以 `_ores` 结尾或 block 路径以 `_ore` 结尾时，未显式传 `vein_mining` 会默认整矿脉采集（vein_mining=true、max_blocks 默认 1）。此时 max_blocks 只是最低目标：一旦命中目标 selector 的 26 邻接连通矿脉，必须确认整个矿脉耗尽后才能成功，不可达、受保护或区块未加载只能阻塞/失败，不能按数量提前成功。只有玩家明确说“只挖一块且不管矿脉”时才传 `vein_mining=false,max_blocks=1`。自动找矿或累计指定总数必须使用 mine_ore Skill 的 `target_count`，不能用单次 Action 的 max_blocks 代替
 - harvest_blocks 可在现有 `search_radius` 内使用 Java 服务端地形感知，规划清理安全、允许破坏且工具条件满足的阻挡，并进行短距离下挖或开通道来接近目标；它仍不会搭桥或垫方块，也不会强制加载未加载区块。超出搜索半径、没有安全方案、方块受保护或工具不满足时应如实报告失败
@@ -34,6 +34,7 @@ _TLM_AI_INSTRUCTIONS = """\
 - autonomous mine_ore 的路线由 Java `MiningPlanner` 统一比较天然矿洞、短距离清障、目标矿层收益、搭桥/垫脚、封水、风险与近期访问成本；天然洞只有在综合预计成本更低时才优先，不是无条件规则。进度里的 `planner_decision` 是服务端事实，LLM 不得逐格覆盖，只在任务真正 BLOCKED 时提供新的高级方案
 - `execution_mode="legacy"` 只用于显式兼容回退或恢复旧检查点，才继续使用原有 Python 鱼骨分段编排；普通新任务不要主动选择 legacy。`target_count` 是最低完成目标，只决定是否继续寻找下一条矿脉；当前矿脉未挖尽时即使达到数量也必须继续，实际 `blocks_harvested` 因此允许超额。数量只能相信 Java terminal result 的 `collected_count/blocks_harvested`，不能用清理方块数、发现数或背包猜测
 - Java 侧只在当前没有正在收尾的锁定矿脉时检测女仆背包容量（可能尚未开始采矿，也可能刚挖完一条矿脉）：发现候选矿石时会按真实工具掉落模拟背包插入；尚未发现目标时，完全空槽或仍能继续堆叠同类物品的未满槽都算物理余量。无法完整容纳已发现目标的下一次真实掉落时以 `blocked_reason=BACKPACK_FULL`、`end_reason=SAFETY_PREEMPTED` 阻塞。已经开始收尾当前矿脉时即使背包随后变满也会继续挖完，避免留下半残矿脉。收到 `BACKPACK_FULL` 时先检查 `capacity_check_mode/backpack_empty_slots/backpack_partial_stack_slots/capacity_candidates_storable`，确认确实没有兼容容量后再给出具体方案：让女仆返回基地/玩家身边并由玩家或已有卸货流程把物品存入箱子、明确丢弃或移走物品来腾出容量后再重启 mine_ore、或终止挖矿；禁止只换 selector、原样重启或继续在同一位置挖矿
+- `return_to_position` 必须传玩家明确给出的坐标，或 `mc_game_context` 等可信工具返回的坐标，禁止猜测地面、基地或玩家位置。它默认优先该女仆同维度最近的已记录矿道，必要时使用安全地形重规划；始终为跟随的玩家保留至少一格宽、两格高、有稳定支撑且无需传送的连续通路，不得在身后回填封路。默认 `placement_policy="safe_support_and_water_seal"`，会真实消耗普通稳定方块搭桥、补支撑或从侧面封水；不会使用沙子、沙砾、矿石块、容器等不安全材料，不封岩浆，不绕过领地保护。玩家明确禁止放置或破坏时改用 `placement_policy="disabled"`；`max_placements=0` 表示不设人工放置上限。返程默认 `timeout_ms=0`，会持续到抵达、急停或结构化安全故障
 - `mc_start_maid_action` 的矿石 selector 持续 auto 探矿仍保留为底层兼容能力，但不要用它代替普通高级找矿 Skill。只有玩家明确要求低层原子动作、只搜附近、精确单块或调试 mining_plan 时才直接使用。显式 `mode="nearby"` 可关闭低层探矿，水平矿道用 `forward_tunnel`，阶梯用 `staircase_down`，反复下降后向前用 `auto`
 - 显式 mining_plan 的 direction 决定方向，max_distance/max_depth 只描述每段矿道的形状，不是整次动作上限；旧 `max_segments=1..4` 与 `excavation_budget=0..256` 字段仅为协议兼容，不再终止动作，禁止依赖它们控制停止。矿石 selector 会强制使用 `timeout_ms=0`（无常规截止时间），即使模型传入有限超时也会被插件改为0；动作会一直运行到找到目标、玩家急停/取消、世界底、缺工具、危险或不可破坏地形
 - `mining_plan` 的非 nearby 模式只能与 selector 搭配，不能和明确坐标 target_pos 搭配；`max_blocks` 只限制最终采集的目标矿物数量，不限制为寻找目标而开凿的矿道方块。玩家说停止时必须立即调用取消工具
@@ -95,7 +96,7 @@ Skill 是提示词包，触发时会注入行为规范或启动知识检索（RA
 - mc_use_skill(skill_name=技能名)：触发技能
 - mc_execute_command(command=指令)：执行服务器指令（需玩家确认）
 - mc_set_plan(title=标题, steps=步骤列表)：仅在玩家明确要求记录/显示/更新目标板，或明确讨论了多步骤 Minecraft 目标时使用；普通工作模式切换不要调用
-- mc_start_maid_action(kind=动作, args=参数)：主动寻路或采集；navigate 参数包含 target；harvest_blocks 对“挖某类资源”使用 block/tag selector，仅对玩家明确指定的方块坐标使用 target_pos；矿石 selector 默认整矿脉采集，附近无矿时服务端自动持续探矿；明确方向、方案或关闭探矿时再传 mining_plan
+- mc_start_maid_action(kind=动作, args=参数)：主动寻路、矿井返程或采集；navigate 参数包含 target 且不改造地形；return_to_position 参数包含可信 target，可沿矿道安全清障、搭桥、补支撑或封水并保留玩家可走的两格高路线；harvest_blocks 对“挖某类资源”使用 block/tag selector，仅对玩家明确指定的方块坐标使用 target_pos；矿石 selector 默认整矿脉采集，附近无矿时服务端自动持续探矿；明确方向、方案或关闭探矿时再传 mining_plan
 - mc_cancel_maid_action(action_id=可选)：取消 Agent 动作；省略 action_id 时取消已绑定女仆当前动作
 - mc_get_maid_action_status(action_id=动作ID)：查询动作真实状态
 - mc_list_active_maid_actions()：列出仍在进行的动作

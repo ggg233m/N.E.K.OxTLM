@@ -1,5 +1,6 @@
 """Validation and normalization for public maid action arguments."""
 
+import uuid
 from copy import deepcopy
 from typing import Any, Dict
 
@@ -14,6 +15,7 @@ class ActionRegistry:
         "harvest_blocks",
         "excavate_segment",
         "autonomous_mining",
+        "return_to_position",
     })
 
     def normalize(self, kind: str, args: Dict[str, Any]) -> Dict[str, Any]:
@@ -31,7 +33,74 @@ class ActionRegistry:
             return self._excavate_segment(args)
         if kind == "autonomous_mining":
             return self._autonomous_mining(args)
+        if kind == "return_to_position":
+            return self._return_to_position(args)
         return self._harvest(args)
+
+    def _return_to_position(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        allowed = {
+            "target",
+            "speed",
+            "stop_distance",
+            "operation_id",
+            "route_policy",
+            "placement_policy",
+            "max_placements",
+        }
+        unknown = sorted(set(args) - allowed)
+        if unknown:
+            raise ActionValidationError(
+                "return_to_position has unsupported fields: "
+                + ", ".join(unknown)
+            )
+
+        route_policy = str(
+            args.get("route_policy", "recorded_tunnels_first") or ""
+        ).strip().lower()
+        if route_policy not in {"recorded_tunnels_first", "safe_shortest"}:
+            raise ActionValidationError(
+                "return_to_position.route_policy must be "
+                "recorded_tunnels_first or safe_shortest"
+            )
+        placement_policy = str(
+            args.get("placement_policy", "safe_support_and_water_seal") or ""
+        ).strip().lower()
+        if placement_policy not in {
+            "disabled", "safe_support_and_water_seal"
+        }:
+            raise ActionValidationError(
+                "return_to_position.placement_policy must be disabled or "
+                "safe_support_and_water_seal"
+            )
+
+        normalized = {
+            "target": self._position(
+                args.get("target"), "return_to_position.target"
+            ),
+            "speed": self._number(
+                args.get("speed", 0.7),
+                "return_to_position.speed", 0.4, 1.0,
+            ),
+            "stop_distance": self._number(
+                args.get("stop_distance", 1.5),
+                "return_to_position.stop_distance", 1.0, 4.0,
+            ),
+            "route_policy": route_policy,
+            "placement_policy": placement_policy,
+            "max_placements": self._integer(
+                args.get("max_placements", 0),
+                "return_to_position.max_placements", 0, 4096,
+            ),
+        }
+        operation_id = str(args.get("operation_id") or "").strip()
+        if operation_id:
+            try:
+                normalized["operation_id"] = str(uuid.UUID(operation_id))
+            except (ValueError, AttributeError, TypeError):
+                raise ActionValidationError(
+                    "return_to_position.operation_id must be a UUID"
+                ) from None
+        return normalized
 
     def _autonomous_mining(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Normalize the Java-owned mining goal and its bounded preferences.

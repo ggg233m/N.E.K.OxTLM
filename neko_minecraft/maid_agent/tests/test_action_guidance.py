@@ -38,7 +38,7 @@ class MaidActionGuidanceTests(unittest.TestCase):
         self.assertIn("不会搭桥", tool_text)
         self.assertIn("不会强制加载", tool_text)
 
-    def test_capability_upgrade_does_not_change_tool_protocol(self):
+    def test_return_to_position_extends_existing_action_protocol(self):
         parameters = MC_START_MAID_ACTION["parameters"]
         self.assertEqual("object", parameters["type"])
         self.assertEqual(["kind", "args"], parameters["required"])
@@ -47,9 +47,28 @@ class MaidActionGuidanceTests(unittest.TestCase):
             set(parameters["properties"]),
         )
         self.assertEqual(
-            ["navigate", "harvest_blocks"],
+            ["navigate", "harvest_blocks", "return_to_position"],
             parameters["properties"]["kind"]["enum"],
         )
+
+    def test_return_guidance_requires_walkable_route_and_real_materials(self):
+        tool_text = MC_START_MAID_ACTION["description"] + str(
+            MC_START_MAID_ACTION["parameters"]
+        )
+        for value in (
+            "return_to_position",
+            "recorded_tunnels_first",
+            "safe_shortest",
+            "safe_support_and_water_seal",
+            "两格高",
+            "稳定支撑",
+            "真实消耗",
+            "timeout_ms=0",
+        ):
+            self.assertIn(value, tool_text + _TLM_AI_INSTRUCTIONS)
+        self.assertIn("不得在身后回填封路", _TLM_AI_INSTRUCTIONS)
+        self.assertIn("禁止猜测", _TLM_AI_INSTRUCTIONS)
+        self.assertIn("navigate 始终是非破坏性寻路", _TLM_AI_INSTRUCTIONS)
 
     def test_guidance_routes_high_level_mining_and_emergency_stop_to_skill(self):
         tool_text = MC_START_MAID_ACTION["description"] + str(

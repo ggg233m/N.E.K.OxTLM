@@ -30,6 +30,8 @@ class MiningWorldModelSavedDataTest {
         data.getOrCreateOperation(actionId, maidId, args, 100L);
         data.updateGeneration(actionId, 7L, 101L);
         data.setOrigin(actionId, new BlockPos(10, 48, 10), 102L);
+        data.appendRouteBreadcrumb(actionId, new BlockPos(10, 47, 9), 102L);
+        data.appendRouteBreadcrumb(actionId, new BlockPos(10, 46, 8), 102L);
         UUID junction = data.addNode(actionId,
                 MiningWorldModelSavedData.NodeType.JUNCTION,
                 new BlockPos(10, 46, 6), "", 0, 103L);
@@ -73,6 +75,11 @@ class MiningWorldModelSavedDataTest {
         assertEquals("blocked", session.phase());
         assertEquals(new BlockPos(10, 48, 10), session.originPos());
         assertEquals(new BlockPos(10, 44, 2), session.currentWorkfacePos());
+        assertEquals(List.of(
+                        new BlockPos(10, 48, 10),
+                        new BlockPos(10, 47, 9),
+                        new BlockPos(10, 46, 8)),
+                session.routeBreadcrumbs());
         assertEquals("north", session.mainDirection());
         assertEquals("staircase_down", session.shape());
         assertEquals(8, session.segmentLength());
@@ -215,6 +222,56 @@ class MiningWorldModelSavedDataTest {
                 data.operation(firstAction).orElseThrow().status());
         assertEquals(replacementAction,
                 data.findResumableByMaid(maidId).orElseThrow().operationId());
+    }
+
+    @Test
+    void routeBreadcrumbsEraseLoopsAndRejectDiscontinuousOrVerticalMoves() {
+        MiningWorldModelSavedData data = new MiningWorldModelSavedData(DIMENSION);
+        UUID actionId = UUID.randomUUID();
+        BlockPos entry = new BlockPos(0, 32, 0);
+        data.createOperation(actionId, UUID.randomUUID(), entry, 1L);
+
+        BlockPos first = new BlockPos(0, 32, -1);
+        BlockPos second = new BlockPos(1, 31, -1);
+        BlockPos third = new BlockPos(1, 31, 0);
+        assertTrue(data.appendRouteBreadcrumb(actionId, first, 2L));
+        assertTrue(data.appendRouteBreadcrumb(actionId, second, 3L));
+        assertTrue(data.appendRouteBreadcrumb(actionId, third, 4L));
+        assertTrue(data.appendRouteBreadcrumb(actionId, first, 5L));
+        assertEquals(List.of(entry, first),
+                data.operation(actionId).orElseThrow().routeBreadcrumbs());
+
+        assertFalse(data.appendRouteBreadcrumb(
+                actionId, first.below(), 6L),
+                "a vertical shaft must not become a player return route");
+        assertFalse(data.appendRouteBreadcrumb(
+                actionId, first.offset(3, 0, 0), 7L),
+                "a discontinuity must not corrupt the durable route");
+        assertEquals(List.of(entry, first),
+                data.operation(actionId).orElseThrow().routeBreadcrumbs());
+    }
+
+    @Test
+    void latestRouteMayComeFromTerminalOperation() {
+        MiningWorldModelSavedData data = new MiningWorldModelSavedData(DIMENSION);
+        UUID maidId = UUID.randomUUID();
+        UUID completedId = UUID.randomUUID();
+        data.createOperation(completedId, maidId, new BlockPos(0, 48, 0), 1L);
+        assertTrue(data.latestByMaidWithRoute(maidId).isEmpty(),
+                "an entrance without a completed edge is not a return route");
+        data.appendRouteBreadcrumb(completedId, new BlockPos(0, 47, -1), 2L);
+        data.markTerminal(completedId,
+                MiningWorldModelSavedData.OperationStatus.COMPLETED,
+                "completed", 3L);
+
+        UUID newerWithoutRoute = UUID.randomUUID();
+        data.getOrCreateOperation(newerWithoutRoute, maidId,
+                miningArgs(1, "auto", "auto", 8), 4L);
+
+        MiningWorldModelSavedData.OperationSnapshot selected =
+                data.latestByMaidWithRoute(maidId).orElseThrow();
+        assertEquals(completedId, selected.operationId());
+        assertTrue(selected.terminal());
     }
 
     private static JsonObject miningArgs(

@@ -51,6 +51,27 @@ class RejectingSkillConsumer(FakeSkillConsumer):
 
 
 class MaidActionServiceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_return_to_position_service_default_has_no_deadline(self):
+        plugin = FakePlugin([{
+            "type": "maid_action_start_result",
+            "data": {
+                "accepted": True, "action_id": "return", "maid_id": "m",
+                "generation": 1, "sequence": 1,
+                "kind": "return_to_position", "status": "RUNNING",
+            },
+        }])
+        plugin.connected = True
+        service = MaidActionService(plugin)
+        result = await service.start_action(
+            action_id="return",
+            maid_id="m",
+            kind="return_to_position",
+            args={"target": {"x": 0, "y": 70, "z": 0}},
+        )
+        self.assertTrue(result["success"])
+        request, _ = plugin.requests[0]
+        self.assertEqual(0, request["data"]["timeout_ms"])
+
     async def test_skill_owned_child_action_suppresses_regular_llm_feedback(self):
         plugin = FakePlugin()
         service = MaidActionService(plugin)
@@ -199,6 +220,20 @@ class MaidActionServiceTests(unittest.IsolatedAsyncioTestCase):
         await service.handle_message(message)
         self.assertEqual(1, len(plugin.pushes))
         self.assertEqual("respond", plugin.pushes[0][1]["ai_behavior"])
+
+    async def test_return_to_position_feedback_has_companion_facing_name(self):
+        plugin = FakePlugin()
+        service = MaidActionService(plugin)
+        await service.handle_message({
+            "type": "maid_action_finished",
+            "data": {
+                "action_id": "return", "maid_id": "m", "generation": 1,
+                "sequence": 9, "kind": "return_to_position",
+                "status": "SUCCEEDED", "stage": "ARRIVED",
+                "end_reason": "COMPLETED",
+            },
+        })
+        self.assertIn("安全返程", plugin.pushes[0][0])
 
     async def test_unloaded_guessed_target_tells_model_to_retry_with_selector(self):
         plugin = FakePlugin()

@@ -81,6 +81,52 @@ class ActionRegistryTests(unittest.TestCase):
         self.assertEqual(0.7, args["speed"])
         self.assertEqual(1.5, args["stop_distance"])
 
+    def test_normalizes_return_to_position_defaults(self):
+        args = self.registry.normalize(
+            "return_to_position",
+            {"target": {"x": 10, "y": 72, "z": -4}},
+        )
+        self.assertEqual({"x": 10, "y": 72, "z": -4}, args["target"])
+        self.assertEqual(0.7, args["speed"])
+        self.assertEqual(1.5, args["stop_distance"])
+        self.assertEqual("recorded_tunnels_first", args["route_policy"])
+        self.assertEqual(
+            "safe_support_and_water_seal", args["placement_policy"]
+        )
+        self.assertEqual(0, args["max_placements"])
+        self.assertNotIn("operation_id", args)
+
+    def test_normalizes_return_to_position_operation_and_policy(self):
+        args = self.registry.normalize("return_to_position", {
+            "target": {"x": 1, "y": 80, "z": 2},
+            "operation_id": "A5ED1E8B-F31A-4E7A-944D-97806F20B212",
+            "route_policy": "SAFE_SHORTEST",
+            "placement_policy": "disabled",
+            "max_placements": 12,
+            "speed": 0.8,
+            "stop_distance": 2,
+        })
+        self.assertEqual(
+            "a5ed1e8b-f31a-4e7a-944d-97806f20b212",
+            args["operation_id"],
+        )
+        self.assertEqual("safe_shortest", args["route_policy"])
+        self.assertEqual("disabled", args["placement_policy"])
+        self.assertEqual(12, args["max_placements"])
+
+    def test_rejects_invalid_return_to_position_contract(self):
+        invalid = (
+            {},
+            {"target": {"x": 1, "y": 2, "z": 3}, "operation_id": "not-a-uuid"},
+            {"target": {"x": 1, "y": 2, "z": 3}, "route_policy": "teleport"},
+            {"target": {"x": 1, "y": 2, "z": 3}, "placement_policy": "unsafe"},
+            {"target": {"x": 1, "y": 2, "z": 3}, "max_placements": 4097},
+            {"target": {"x": 1, "y": 2, "z": 3}, "player_clearance": False},
+        )
+        for args in invalid:
+            with self.subTest(args=args), self.assertRaises(ActionValidationError):
+                self.registry.normalize("return_to_position", args)
+
     def test_normalizes_excavate_segment_contract(self):
         args = self.registry.normalize(
             "excavate_segment",

@@ -16,6 +16,7 @@ import com.neko_tlm_bridge.tlm.agent.action.HarvestBlocksAction;
 import com.neko_tlm_bridge.tlm.agent.action.ExcavateSegmentAction;
 import com.neko_tlm_bridge.tlm.agent.action.LegacyAttackAction;
 import com.neko_tlm_bridge.tlm.agent.action.NavigateAction;
+import com.neko_tlm_bridge.tlm.agent.action.ReturnToPositionAction;
 import com.neko_tlm_bridge.tlm.agent.runtime.MaidActionStore;
 import com.neko_tlm_bridge.tlm.agent.world.AutonomousMiningRecovery;
 import com.neko_tlm_bridge.ws.NekoCommand;
@@ -187,6 +188,8 @@ public class NekoTlmBridge {
                 (maid, args) -> ExcavateSegmentAction.fromArgs(args));
         store.registerFactory(MaidActionKind.AUTONOMOUS_MINING,
                 (maid, args) -> AutonomousMiningAction.fromArgs(args));
+        store.registerFactory(MaidActionKind.RETURN_TO_POSITION,
+                (maid, args) -> ReturnToPositionAction.fromArgs(args));
         IMaidTask attackTask = TaskManager.findTask(
                         net.minecraft.resources.ResourceLocation.parse("touhou_little_maid:attack"))
                 .orElse(TaskManager.getIdleTask());

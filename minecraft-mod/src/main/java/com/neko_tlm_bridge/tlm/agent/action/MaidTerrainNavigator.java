@@ -52,6 +52,7 @@ public final class MaidTerrainNavigator {
     private static final int FALLING_ENTITY_SCAN_HEIGHT = 16;
     private static final int MAX_CONTINUOUS_FLAT_STEPS = 6;
     private static final double DIRECT_TURN_CENTER_TOLERANCE = 0.20D;
+    private static final long PLAYER_WORK_ZONE_WAIT_TIMEOUT_TICKS = 200L;
 
     private final MaidTerrainPath terrainPath;
     private final HandLease handLease;
@@ -90,6 +91,10 @@ public final class MaidTerrainNavigator {
     private int chainedTraverseSteps;
     private int directWaypointStarts;
     private int activeFlatRunEndExclusive = -1;
+    private long playerWaitStartedAt = Long.MIN_VALUE;
+    private BlockPos playerBlockedTarget;
+    private MaidTerrainInteractionSafety.Conflict playerConflict;
+    private java.util.UUID blockingPlayerId;
     private String phase = "pending";
     private ActionEndReason lastFailure;
 
@@ -177,6 +182,17 @@ public final class MaidTerrainNavigator {
                 && !context.maid().blockPosition().equals(step.to())) {
             return fail(context, ActionEndReason.TARGET_CHANGED,
                     "maid_is_no_longer_at_terrain_step_origin", true);
+        }
+
+        LinkedHashSet<BlockPos> workZone = new LinkedHashSet<>(step.clearance());
+        // The support cell is not part of the maid's body clearance, but
+        // modifying it while it carries a player's feet is just as dangerous.
+        workZone.add(step.to().below().immutable());
+        TickResult playerWait = waitForPlayers(
+                context, step, workZone, "player_blocking_route");
+        if (playerWait != null) {
+            publishDebug(context, false);
+            return playerWait;
         }
 
         TickResult support = ensureDestinationSupport(context, step);
@@ -510,6 +526,14 @@ public final class MaidTerrainNavigator {
             MaidActionContext context, BlockPos target,
             MaidTerrainBuilder.Purpose purpose, String failureMessage) {
         stopLocomotion(context);
+        MaidTerrainStep activeStep = stepIndex < terrainPath.steps().size()
+                ? terrainPath.steps().get(stepIndex) : null;
+        TickResult playerWait = waitForPlayers(
+                context, activeStep, List.of(target),
+                "player_blocking_construction");
+        if (playerWait != null) {
+            return playerWait;
+        }
         if (maxPlacements == 0 || placementsUsed >= maxPlacements) {
             return fail(context, ActionEndReason.PATH_NOT_FOUND,
                     "placement_budget_exhausted", true);
@@ -517,6 +541,7 @@ public final class MaidTerrainNavigator {
         MaidTerrainBuilder.PlacementResult placement = MaidTerrainBuilder.place(
                 context.maid(), target, purpose);
         if (placement.placed()) {
+            clearPlayerWait();
             placementsUsed++;
             placedEvents.addLast(new PlacedBlock(
                     target, placement.blockId(), purpose));
@@ -532,6 +557,15 @@ public final class MaidTerrainNavigator {
             detail.addProperty("placed_block", String.valueOf(placement.blockId()));
             detail.addProperty("placements_used", placementsUsed);
             return running(detail);
+        }
+        if (placement.status() == MaidTerrainBuilder.Status.PLAYER_BODY_CONFLICT
+                || placement.status()
+                == MaidTerrainBuilder.Status.PLAYER_SUPPORT_CONFLICT) {
+            // Builder is the final transaction guard. If it sees a player that
+            // entered after the executor's preflight, wait instead of turning
+            // temporary occupancy into a permanent path failure.
+            return waitForPlayers(context, activeStep, List.of(target),
+                    "player_blocking_construction");
         }
         ActionEndReason reason = switch (placement.status()) {
             case NO_SAFE_MATERIAL -> ActionEndReason.TOOL_NOT_FOUND;
@@ -552,6 +586,81 @@ public final class MaidTerrainNavigator {
         failure.detail().addProperty("placement_y", target.getY());
         failure.detail().addProperty("placement_z", target.getZ());
         return failure;
+    }
+
+    private TickResult waitForPlayers(
+            MaidActionContext context, MaidTerrainStep step,
+            java.util.Collection<BlockPos> positions, String message) {
+        MaidTerrainInteractionSafety.Assessment assessment =
+                MaidTerrainInteractionSafety.assessWorkZone(
+                        context.level(), positions);
+        if (assessment.safe()) {
+            if (playerBlockedTarget != null
+                    && positions.contains(playerBlockedTarget)) {
+                clearPlayerWait();
+            }
+            return null;
+        }
+
+        boolean sameConflict = assessment.target().equals(playerBlockedTarget)
+                && assessment.conflict() == playerConflict
+                && assessment.playerId().equals(blockingPlayerId);
+        if (!sameConflict || playerWaitStartedAt == Long.MIN_VALUE) {
+            playerWaitStartedAt = context.gameTime();
+            playerBlockedTarget = assessment.target().immutable();
+            playerConflict = assessment.conflict();
+            blockingPlayerId = assessment.playerId();
+        }
+
+        if (breaker != null) {
+            breaker.stop(context);
+            breaker = null;
+        }
+        stopLocomotion(context);
+        stopHorizontalMovement(context);
+        // A stopped native/direct move cannot be resumed from its old flag;
+        // restart the same validated terrain edge after the player leaves.
+        movementStarted = false;
+        directFlatMovement = false;
+        activeFlatRunEndExclusive = -1;
+        arrivalSettleStartedAt = Long.MIN_VALUE;
+        controlledDescendRecoveryStartedAt = Long.MIN_VALUE;
+
+        long waited = Math.max(0L, context.gameTime() - playerWaitStartedAt);
+        if (waited >= PLAYER_WORK_ZONE_WAIT_TIMEOUT_TICKS) {
+            TickResult failure = fail(context, ActionEndReason.STUCK,
+                    message, false);
+            addPlayerWaitDetail(failure.detail(), assessment, waited);
+            return failure;
+        }
+
+        phase = "waiting_for_player";
+        JsonObject detail = step == null ? new JsonObject() : stepDetail(step);
+        detail.addProperty("stage", "waiting_for_player");
+        detail.addProperty("message", message);
+        addPlayerWaitDetail(detail, assessment, waited);
+        return running(detail);
+    }
+
+    private static void addPlayerWaitDetail(
+            JsonObject detail,
+            MaidTerrainInteractionSafety.Assessment assessment,
+            long waited) {
+        detail.addProperty("player_conflict",
+                assessment.conflict().wireName());
+        detail.addProperty("blocking_player_id",
+                assessment.playerId().toString());
+        addPosition(detail, "blocked", assessment.target());
+        detail.addProperty("player_wait_ticks", waited);
+        detail.addProperty("player_wait_timeout_ticks",
+                PLAYER_WORK_ZONE_WAIT_TIMEOUT_TICKS);
+    }
+
+    private void clearPlayerWait() {
+        playerWaitStartedAt = Long.MIN_VALUE;
+        playerBlockedTarget = null;
+        playerConflict = null;
+        blockingPlayerId = null;
     }
 
     /**

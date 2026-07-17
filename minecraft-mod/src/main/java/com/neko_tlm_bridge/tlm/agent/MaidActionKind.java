@@ -7,6 +7,7 @@ public enum MaidActionKind {
     HARVEST_BLOCKS("harvest_blocks"),
     EXCAVATE_SEGMENT("excavate_segment"),
     AUTONOMOUS_MINING("autonomous_mining"),
+    RETURN_TO_POSITION("return_to_position"),
     LEGACY_ATTACK("legacy_attack");
 
     private final String wireName;

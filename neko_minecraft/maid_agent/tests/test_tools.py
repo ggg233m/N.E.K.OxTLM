@@ -152,6 +152,32 @@ class MaidActionToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(plugin.requests[0]["data"]["action_id"])
         self.assertEqual(60000, plugin.requests[0]["data"]["timeout_ms"])
 
+    async def test_return_to_position_defaults_to_no_deadline(self):
+        plugin = FakePlugin({
+            "type": "maid_action_start_result",
+            "data": {
+                "accepted": True, "action_id": "return", "generation": 1,
+                "status": "RUNNING", "kind": "return_to_position",
+            },
+        })
+        result = await tools.do_start_maid_action(
+            plugin,
+            kind="return_to_position",
+            action_id="return",
+            args={"target": {"x": 4, "y": 70, "z": 9}},
+        )
+        self.assertFalse(result["is_error"])
+        payload = plugin.requests[0]["data"]
+        self.assertEqual(0, payload["timeout_ms"])
+        self.assertEqual(
+            "recorded_tunnels_first", payload["args"]["route_policy"]
+        )
+        self.assertEqual(
+            "safe_support_and_water_seal",
+            payload["args"]["placement_policy"],
+        )
+        self.assertEqual(0, payload["args"]["max_placements"])
+
     async def test_timeout_zero_is_accepted_but_subsecond_positive_is_rejected(self):
         response = {
             "type": "maid_action_start_result",

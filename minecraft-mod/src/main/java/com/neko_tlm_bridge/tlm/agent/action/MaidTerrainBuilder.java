@@ -228,6 +228,21 @@ public final class MaidTerrainBuilder {
                     "fluid replacement requires SEAL_FLUID purpose");
         }
 
+        // This must remain before material selection/extraction. A temporary
+        // player conflict is not a placement transaction and must never debit
+        // the maid's real backpack.
+        MaidTerrainInteractionSafety.Assessment playerSafety =
+                MaidTerrainInteractionSafety.assessModification(level, target);
+        if (!playerSafety.safe()) {
+            Status status = playerSafety.conflict()
+                    == MaidTerrainInteractionSafety.Conflict.PLAYER_BODY
+                    ? Status.PLAYER_BODY_CONFLICT
+                    : Status.PLAYER_SUPPORT_CONFLICT;
+            return PlacementResult.failed(status, target,
+                    "terrain placement conflicts with "
+                            + playerSafety.conflict().wireName());
+        }
+
         UUID ownerId = maid.getOwnerUUID();
         if (ownerId == null) {
             return PlacementResult.failed(Status.OWNER_REQUIRED, target,
@@ -391,6 +406,8 @@ public final class MaidTerrainBuilder {
         TARGET_NOT_REPLACEABLE,
         FLUID_REQUIRED,
         FLUID_REQUIRES_SEAL_PURPOSE,
+        PLAYER_BODY_CONFLICT,
+        PLAYER_SUPPORT_CONFLICT,
         OWNER_REQUIRED,
         NO_SAFE_MATERIAL,
         INVENTORY_CHANGED,

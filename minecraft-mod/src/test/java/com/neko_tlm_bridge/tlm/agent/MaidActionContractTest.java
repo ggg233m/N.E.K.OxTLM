@@ -37,6 +37,8 @@ class MaidActionContractTest {
                 MaidActionKind.fromWireName("excavate_segment"));
         assertEquals(MaidActionKind.AUTONOMOUS_MINING,
                 MaidActionKind.fromWireName("autonomous_mining"));
+        assertEquals(MaidActionKind.RETURN_TO_POSITION,
+                MaidActionKind.fromWireName("return_to_position"));
         assertEquals(MaidActionKind.LEGACY_ATTACK, MaidActionKind.fromWireName("legacy_attack"));
         assertThrows(IllegalArgumentException.class, () -> MaidActionKind.fromWireName("mine_down"));
     }

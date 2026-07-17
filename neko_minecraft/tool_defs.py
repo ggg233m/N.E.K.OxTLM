@@ -191,6 +191,8 @@ MC_START_MAID_ACTION = {
     "name": "mc_start_maid_action",
     "description": (
         "让已绑定女仆开始一个服务端自主动作。navigate 会以非破坏方式主动寻路到指定坐标；"
+        "return_to_position 会优先利用已记录矿道返回指定坐标，必要时安全清障、搭桥、补足支撑或封水，"
+        "并始终保留玩家可步行的一格宽两格高通路；"
         "harvest_blocks 会前往目标方块或搜索附近指定方块，并可在 search_radius 内通过 Java 地形感知"
         "规划清理安全、允许破坏且工具条件满足的阻挡，进行短距离下挖或开通道后采集；"
         "harvest_blocks 是明确坐标、只搜附近、精确单块或调试 mining_plan 的底层原子动作；"
@@ -203,20 +205,30 @@ MC_START_MAID_ACTION = {
         "矿石优先使用 minecraft:*_ores 标签选择器；矿石 selector 默认 vein_mining=true 并尝试采完整矿脉。"
         "显式 mining_plan.mode=nearby 可将原子采集限制为附近扫描。"
         "矿石持续探矿会强制使用 timeout_ms=0（无常规截止时间），直到完成、急停或安全故障。"
-        "普通 navigate 不会破坏地形；harvest_blocks 仍不会搭桥或垫方块，也不会强制加载未加载区块。"
+        "普通 navigate 不会破坏地形；harvest_blocks 仍不会搭桥或垫方块；"
+        "return_to_position 的搭建会真实消耗女仆背包中的安全方块。所有动作都不会强制加载未加载区块。"
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "kind": {
                 "type": "string",
-                "enum": ["navigate", "harvest_blocks"],
-                "description": "navigate=主动寻路，harvest_blocks=主动采集方块",
+                "enum": ["navigate", "harvest_blocks", "return_to_position"],
+                "description": (
+                    "navigate=非破坏性寻路，harvest_blocks=主动采集方块，"
+                    "return_to_position=沿矿道安全返程并按需修路"
+                ),
             },
             "args": {
                 "type": "object",
                 "description": (
                     "navigate: {target:{x,y,z}, speed?, stop_distance?}；"
+                    "return_to_position: {target:{x,y,z}, speed?, stop_distance?, operation_id?,"
+                    "route_policy?:recorded_tunnels_first|safe_shortest,"
+                    "placement_policy?:disabled|safe_support_and_water_seal,max_placements?:0..4096}。"
+                    "operation_id 省略时服务端选择该女仆同维度最近的挖矿记录；默认优先已有矿道并允许"
+                    "消耗普通稳定方块搭桥、补支撑或封水，max_placements=0 表示不设人工上限。"
+                    "返程路线始终要求玩家也能步行通过，不能关闭两格净空和稳定支撑约束。"
                     "harvest_blocks: target_pos 与 selector 二选一。挖石头等按资源名称的请求必须传"
                     "selector，例如 {type:'tag', id:'minecraft:base_stone_overworld'}；target_pos 只能是玩家明确"
                     "指定或可信工具返回的方块坐标，不得猜测。selector 也可使用 tag；可传 search_radius、"
@@ -235,8 +247,8 @@ MC_START_MAID_ACTION = {
                     "max_depth 必须为 0；staircase_down 要求 max_distance>=max_depth，auto 要求"
                     "max_distance>max_depth。max_distance/max_depth 只定义每段矿道形状，段结束后会从女仆"
                     "实际位置继续；不构成总上限。harvest_blocks 可清理安全可破坏"
-                    "阻挡；navigate 始终非破坏性。两者都"
-                    "不会搭桥或垫方块，也不会强制加载未加载区块"
+                    "阻挡；navigate 始终非破坏性；harvest_blocks 不搭桥或垫方块；"
+                    "return_to_position 可安全修路但不会强制加载未加载区块"
                 ),
                 "additionalProperties": True,
             },
@@ -248,7 +260,10 @@ MC_START_MAID_ACTION = {
                 "type": "integer",
                 "minimum": 0,
                 "maximum": 120000,
-                "description": "0=无常规截止时间；矿石 selector 会强制使用0，其它动作默认60000",
+                "description": (
+                    "0=无常规截止时间；矿石 selector 会强制使用0；"
+                    "return_to_position 默认0；其它动作默认60000"
+                ),
             },
             "replace_existing": {
                 "type": "boolean",
@@ -462,6 +477,8 @@ MC_SET_MAID_ACTIVITY = {
     "description": (
         "统一切换女仆活动。activity_type=tlm_task 时传 task；agent_action 时传 kind/args；"
         "skill 时传 skill/args；idle 表示安全停止后切到待机。"
+        "需要从矿井沿可供玩家通行的安全路线返回坐标时，agent_action 使用"
+        "kind=return_to_position，并在 args.target 提供可信目标坐标。"
         "cancel_then_switch 会先等待当前 Skill/Action 真正终止并释放身体租约后再切换；"
         "after_current 排队等待自然完成；reject_if_busy 在忙碌时拒绝。"
         "职业或玩法切换优先使用本工具，避免直接切 TLM task 导致 Agent 被 USER_OVERRIDE。"

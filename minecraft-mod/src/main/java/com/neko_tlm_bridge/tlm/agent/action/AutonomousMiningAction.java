@@ -706,6 +706,8 @@ public final class AutonomousMiningAction implements MaidAction {
         }
         for (BlockPos crossed : navigator.drainCompletedStepPositions()) {
             recordPassageTransition(crossed);
+            MiningWorldModelSavedData.get(context.level()).appendRouteBreadcrumb(
+                    context.execution().actionId(), crossed, context.gameTime());
             state.recordExcavationStep(0);
             rememberPassagePosition(crossed);
             stepsInCurrentSegment++;
@@ -976,6 +978,12 @@ public final class AutonomousMiningAction implements MaidAction {
             for (MaidTerrainNavigator.ClearedBlock event : navigator.drainClearedBlocks()) {
                 recordRouteClearedBlock(event.pos(), event.state());
                 cleared++;
+            }
+            for (BlockPos crossed : navigator.drainCompletedStepPositions()) {
+                recordPassageTransition(crossed);
+                MiningWorldModelSavedData.get(context.level()).appendRouteBreadcrumb(
+                        context.execution().actionId(), crossed, context.gameTime());
+                rememberPassagePosition(crossed);
             }
             state.recordRouteClearance(cleared);
             if (tick.outcome() == MaidTerrainNavigator.Outcome.FAILED) {

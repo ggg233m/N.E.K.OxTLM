@@ -596,7 +596,10 @@ async def do_start_maid_action(
             # invented finite timeout silently reintroduce a mining cap.
             timeout_ms = 0
         elif timeout_ms is None:
-            timeout_ms = 60000
+            timeout_ms = (
+                0 if str(kind or "").strip().lower() == "return_to_position"
+                else 60000
+            )
         timeout_ms = int(timeout_ms)
     except (ActionValidationError, TypeError, ValueError) as exc:
         return _action_error("INVALID_ACTION_ARGUMENTS", str(exc))
