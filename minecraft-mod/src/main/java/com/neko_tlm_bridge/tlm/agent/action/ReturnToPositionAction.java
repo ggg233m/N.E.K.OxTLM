@@ -25,6 +25,7 @@ import net.neoforged.neoforge.items.IItemHandler;
 
 import java.util.ArrayList;
 import java.util.EnumSet;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
@@ -71,6 +72,10 @@ public final class ReturnToPositionAction implements MaidAction {
     private int bridgeSupportsPlaced;
     private int waterSealsPlaced;
     private int playerWaitTicks;
+    private final Set<BlockPos> rejectedPlacementTargets = new HashSet<>();
+    private ActionEndReason lastReplanReason;
+    private String lastReplanMessage;
+    private JsonObject lastExecutionFailure;
     private HandLease handLease;
     private MaidTerrainSearch terrainSearch;
     private MaidTerrainNavigator navigator;
@@ -415,8 +420,13 @@ public final class ReturnToPositionAction implements MaidAction {
         expandedNodes += terrainSearch.expandedNodes();
         if (status == MaidTerrainSearch.Status.FAILED) {
             terrainSearch = null;
-            return fail(context, ActionEndReason.PATH_NOT_FOUND,
-                    "return_route_not_found");
+            ActionEndReason reason = lastReplanReason == null
+                    ? ActionEndReason.PATH_NOT_FOUND : lastReplanReason;
+            String message = !rejectedPlacementTargets.isEmpty()
+                    ? "no_return_route_around_rejected_placement"
+                    : lastReplanMessage == null
+                    ? "return_route_not_found" : lastReplanMessage;
+            return fail(context, reason, message);
         }
         MaidTerrainPath path = terrainSearch.result().orElse(null);
         terrainSearch = null;
@@ -465,6 +475,9 @@ public final class ReturnToPositionAction implements MaidAction {
             waypointIndex += activeLegWaypointCount;
             activeLegWaypointCount = 1;
             replans = 0;
+            lastReplanReason = null;
+            lastReplanMessage = null;
+            lastExecutionFailure = null;
             stage = Stage.PLANNING;
             report(context, stage, detail("return_leg_complete"));
             return MaidActionTickResult.running();
@@ -475,8 +488,17 @@ public final class ReturnToPositionAction implements MaidAction {
             String message = tick.detail().has("message")
                     ? tick.detail().get("message").getAsString()
                     : "return_navigation_failed";
+            lastReplanReason = reason;
+            lastReplanMessage = message;
+            lastExecutionFailure = tick.detail().deepCopy();
+            Optional<BlockPos> rejectedTarget = rejectedPlacementTarget(
+                    reason, tick.detail());
+            boolean learnedNewExclusion = rejectedTarget
+                    .map(rejectedPlacementTargets::add)
+                    .orElse(true);
             navigator = null;
-            if (tick.replanRecommended() && replans < MAX_REPLANS) {
+            if (tick.replanRecommended() && learnedNewExclusion
+                    && replans < MAX_REPLANS) {
                 replans++;
                 stage = Stage.PLANNING;
                 report(context, stage, detail("repairing_return_route"));
@@ -558,7 +580,8 @@ public final class ReturnToPositionAction implements MaidAction {
         boolean construction = placementPolicy != PlacementPolicy.DISABLED;
         return new MaidTerrainWorldEvaluator(context.level(), context.maid(), origin,
                 horizontal, vertical, true, ignored -> true,
-                ignored -> construction && remainingPlacementBudget() > 0);
+                position -> construction && remainingPlacementBudget() > 0
+                        && !rejectedPlacementTargets.contains(position));
     }
 
     private boolean attachBestAvailableTool(MaidActionContext context) {
@@ -612,6 +635,9 @@ public final class ReturnToPositionAction implements MaidAction {
         JsonObject result = result(context, message);
         result.addProperty("blocked_reason", message);
         result.addProperty("decision_required", true);
+        if (lastExecutionFailure != null) {
+            result.add("execution_failure", lastExecutionFailure.deepCopy());
+        }
         return MaidActionTickResult.failed(reason, result);
     }
 
@@ -656,8 +682,39 @@ public final class ReturnToPositionAction implements MaidAction {
         detail.addProperty("player_wait_ticks", playerWaitTicks);
         detail.addProperty("planner_expanded_nodes", expandedNodes);
         detail.addProperty("terrain_replans", replans);
+        detail.addProperty("rejected_placement_targets",
+                rejectedPlacementTargets.size());
         detail.addProperty("message", message);
         return detail;
+    }
+
+    /**
+     * Extracts a placement coordinate only for a placement transaction that
+     * the server or a protection hook rejected. Other construction failures
+     * (missing material, range, player occupancy, changed terrain) must not
+     * poison future route searches.
+     */
+    static Optional<BlockPos> rejectedPlacementTarget(
+            ActionEndReason reason, JsonObject detail) {
+        if (reason != ActionEndReason.BLOCK_PROTECTED || detail == null) {
+            return Optional.empty();
+        }
+        try {
+            if (!detail.has("placement_status")
+                    || !"PLACE_REJECTED".equals(
+                    detail.get("placement_status").getAsString())
+                    || !detail.has("placement_x")
+                    || !detail.has("placement_y")
+                    || !detail.has("placement_z")) {
+                return Optional.empty();
+            }
+            return Optional.of(new BlockPos(
+                    detail.get("placement_x").getAsInt(),
+                    detail.get("placement_y").getAsInt(),
+                    detail.get("placement_z").getAsInt()));
+        } catch (RuntimeException invalid) {
+            return Optional.empty();
+        }
     }
 
     private void addCommonDetail(MaidActionContext context, JsonObject detail) {

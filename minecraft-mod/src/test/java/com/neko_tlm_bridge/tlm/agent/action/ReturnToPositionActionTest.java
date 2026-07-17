@@ -1,8 +1,10 @@
 package com.neko_tlm_bridge.tlm.agent.action;
 
 import com.google.gson.JsonObject;
+import com.neko_tlm_bridge.tlm.agent.ActionEndReason;
 import com.neko_tlm_bridge.tlm.agent.MaidActionKind;
 import com.neko_tlm_bridge.tlm.agent.MaidActionResource;
+import net.minecraft.core.BlockPos;
 import org.junit.jupiter.api.Test;
 
 import java.util.Set;
@@ -104,6 +106,26 @@ class ReturnToPositionActionTest {
         coordinate.getAsJsonObject("target").addProperty("x", 30_000_001);
         assertThrows(IllegalArgumentException.class,
                 () -> ReturnToPositionAction.fromArgs(coordinate));
+    }
+
+    @Test
+    void remembersOnlyServerRejectedPlacementCoordinates() {
+        JsonObject rejected = new JsonObject();
+        rejected.addProperty("placement_status", "PLACE_REJECTED");
+        rejected.addProperty("placement_x", -987);
+        rejected.addProperty("placement_y", -8);
+        rejected.addProperty("placement_z", 334);
+
+        assertEquals(BlockPos.ZERO.offset(-987, -8, 334),
+                ReturnToPositionAction.rejectedPlacementTarget(
+                        ActionEndReason.BLOCK_PROTECTED, rejected).orElseThrow());
+        assertTrue(ReturnToPositionAction.rejectedPlacementTarget(
+                ActionEndReason.PATH_NOT_FOUND, rejected).isEmpty());
+
+        JsonObject materialFailure = rejected.deepCopy();
+        materialFailure.addProperty("placement_status", "NO_SAFE_MATERIAL");
+        assertTrue(ReturnToPositionAction.rejectedPlacementTarget(
+                ActionEndReason.BLOCK_PROTECTED, materialFailure).isEmpty());
     }
 
     private static JsonObject args() {
