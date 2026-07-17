@@ -26,8 +26,10 @@ import net.minecraft.world.level.levelgen.Heightmap;
 import net.neoforged.neoforge.items.IItemHandler;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.EnumSet;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
@@ -45,6 +47,10 @@ import java.util.UUID;
 public final class ReturnToPositionAction implements MaidAction {
     private static final int SEARCH_BUDGET_PER_TICK = 192;
     private static final int MAX_SEARCH_EXPANSIONS = 16_384;
+    private static final int SURFACE_FRONTIER_SEARCH_EXPANSIONS = 8_192;
+    private static final int SURFACE_FRONTIER_RISE = 8;
+    private static final int SURFACE_FRONTIER_PREFERRED_GOALS = 16;
+    private static final int SURFACE_FRONTIER_ALL_GOALS = 32;
     private static final int MAX_HORIZONTAL_SEARCH_RADIUS = 96;
     private static final int MAX_VERTICAL_SEARCH_RADIUS = 192;
     private static final int MAX_REPLANS = 3;
@@ -76,6 +82,7 @@ public final class ReturnToPositionAction implements MaidAction {
     private String routeSource = "terrain_replan";
     private int waypointIndex;
     private int activeLegWaypointCount = 1;
+    private int pendingSearchWaypointCount = 1;
     private int replans;
     private int expandedNodes;
     private int clearedBlocks;
@@ -83,6 +90,9 @@ public final class ReturnToPositionAction implements MaidAction {
     private int bridgeSupportsPlaced;
     private int waterSealsPlaced;
     private int playerWaitTicks;
+    private int surfaceAscentLegsPlanned;
+    private int surfaceAscentLegsCompleted;
+    private String lastSearchTermination = "none";
     private final Set<BlockPos> rejectedPlacementTargets = new HashSet<>();
     private ActionEndReason lastReplanReason;
     private String lastReplanMessage;
@@ -568,6 +578,40 @@ public final class ReturnToPositionAction implements MaidAction {
             return MaidActionTickResult.running();
         }
 
+        if (shouldPlanSurfaceFrontier(live, waypoint)) {
+            Set<BlockPos> goals = new LinkedHashSet<>();
+            int goalLimit = horizontalDistance(live, waypoint)
+                    <= SURFACE_FRONTIER_RISE
+                    ? SURFACE_FRONTIER_ALL_GOALS
+                    : SURFACE_FRONTIER_PREFERRED_GOALS;
+            for (BlockPos candidate : surfaceAscentFrontierGoals(
+                    live, waypoint, SURFACE_FRONTIER_RISE,
+                    goalLimit)) {
+                if (context.level().hasChunkAt(candidate)) {
+                    goals.add(candidate);
+                }
+            }
+            if (goals.isEmpty()) {
+                return fail(context, ActionEndReason.PATH_NOT_FOUND,
+                        "surface_ascent_frontier_not_loaded");
+            }
+            MaidTerrainWorldEvaluator frontierEvaluator = evaluator(
+                    context, live, SURFACE_FRONTIER_RISE + 4,
+                    SURFACE_FRONTIER_RISE + 4);
+            terrainSearch = new MaidTerrainSearch(live, goals, frontierEvaluator,
+                    SURFACE_FRONTIER_SEARCH_EXPANSIONS,
+                    EnumSet.of(MaidTerrainStep.Kind.TRAVERSE,
+                            MaidTerrainStep.Kind.ASCEND, MaidTerrainStep.Kind.DESCEND));
+            pendingSearchWaypointCount = 0;
+            surfaceAscentLegsPlanned++;
+            routeSource = routeSource.startsWith("recorded")
+                    ? "recorded_tunnel_then_layered_surface_ascent"
+                    : "layered_surface_ascent";
+            stage = Stage.PATHFINDING;
+            report(context, stage, detail("planning_surface_ascent_frontier"));
+            return MaidActionTickResult.running();
+        }
+
         int horizontal = Math.max(8, Math.min(MAX_HORIZONTAL_SEARCH_RADIUS,
                 horizontalDistance(live, waypoint) + 6));
         int vertical = Math.max(8, Math.min(MAX_VERTICAL_SEARCH_RADIUS,
@@ -582,6 +626,7 @@ public final class ReturnToPositionAction implements MaidAction {
                 MAX_SEARCH_EXPANSIONS,
                 EnumSet.of(MaidTerrainStep.Kind.TRAVERSE,
                         MaidTerrainStep.Kind.ASCEND, MaidTerrainStep.Kind.DESCEND));
+        pendingSearchWaypointCount = 1;
         stage = Stage.PATHFINDING;
         report(context, stage, detail("planning_return_leg"));
         return MaidActionTickResult.running();
@@ -594,38 +639,49 @@ public final class ReturnToPositionAction implements MaidAction {
         }
         MaidTerrainSearch.Status status = terrainSearch.advance(SEARCH_BUDGET_PER_TICK);
         if (status == MaidTerrainSearch.Status.SEARCHING) {
-            JsonObject detail = detail("planning_return_leg");
+            JsonObject detail = detail(pendingSearchWaypointCount == 0
+                    ? "planning_surface_ascent_frontier"
+                    : "planning_return_leg");
             detail.addProperty("leg_expanded_nodes", terrainSearch.expandedNodes());
             report(context, stage, detail);
             return MaidActionTickResult.running();
         }
         expandedNodes += terrainSearch.expandedNodes();
         if (status == MaidTerrainSearch.Status.FAILED) {
+            MaidTerrainSearch.FailureReason searchFailure = terrainSearch.failureReason();
+            lastSearchTermination = searchFailure.name().toLowerCase(Locale.ROOT);
             terrainSearch = null;
             ActionEndReason reason = lastReplanReason == null
                     ? ActionEndReason.PATH_NOT_FOUND : lastReplanReason;
-            String message = !rejectedPlacementTargets.isEmpty()
+            String message = searchFailure == MaidTerrainSearch.FailureReason.EXPANSION_LIMIT
+                    ? (pendingSearchWaypointCount == 0
+                    ? "surface_ascent_search_budget_exhausted"
+                    : "return_search_budget_exhausted")
+                    : !rejectedPlacementTargets.isEmpty()
                     ? "no_return_route_around_rejected_placement"
                     : lastReplanMessage == null
                     ? "return_route_not_found" : lastReplanMessage;
             return fail(context, reason, message);
         }
         MaidTerrainPath path = terrainSearch.result().orElse(null);
+        lastSearchTermination = "found";
         terrainSearch = null;
         if (path == null || path.steps().isEmpty()) {
             return fail(context, ActionEndReason.PATH_NOT_FOUND,
                     "return_search_produced_empty_path");
         }
-        if (!routeSource.startsWith("recorded")) {
+        if (!routeSource.startsWith("recorded")
+                && !routeSource.startsWith("layered_surface_ascent")) {
             routeSource = "terrain_replan";
         }
-        beginNavigation(context, path, 1);
+        beginNavigation(context, path, pendingSearchWaypointCount);
+        pendingSearchWaypointCount = 1;
         return MaidActionTickResult.running();
     }
 
     private void beginNavigation(
             MaidActionContext context, MaidTerrainPath path, int completedWaypoints) {
-        activeLegWaypointCount = Math.max(1, completedWaypoints);
+        activeLegWaypointCount = Math.max(0, completedWaypoints);
         navigator = new MaidTerrainNavigator(path, handLease, speed, true,
                 placementPolicy != PlacementPolicy.DISABLED, remainingPlacementBudget());
         navigator.start(context);
@@ -654,6 +710,9 @@ public final class ReturnToPositionAction implements MaidAction {
         }
         if (tick.outcome() == MaidTerrainNavigator.Outcome.ARRIVED) {
             navigator = null;
+            if (activeLegWaypointCount == 0) {
+                surfaceAscentLegsCompleted++;
+            }
             waypointIndex += activeLegWaypointCount;
             activeLegWaypointCount = 1;
             replans = 0;
@@ -692,6 +751,45 @@ public final class ReturnToPositionAction implements MaidAction {
         addCommonDetail(context, detail);
         report(context, stage, detail);
         return MaidActionTickResult.running();
+    }
+
+    private boolean shouldPlanSurfaceFrontier(BlockPos live, BlockPos waypoint) {
+        return destination == Destination.SURFACE
+                && waypointIndex == waypoints.size() - 1
+                && waypoint.equals(target)
+                && target.getY() - live.getY() > SURFACE_FRONTIER_RISE + 4;
+    }
+
+    /**
+     * Produces one eight-block ascent band. Each goal is exactly {@code rise}
+     * horizontal moves and {@code rise} blocks above the maid, so a valid path
+     * can climb monotonically instead of searching a 70-block 3-D switchback
+     * all at once. The goals nearest the final surface target are preferred,
+     * while several alternatives remain available around hazards.
+     */
+    static List<BlockPos> surfaceAscentFrontierGoals(
+            BlockPos from, BlockPos target, int rise, int limit) {
+        if (rise <= 0 || limit <= 0) {
+            throw new IllegalArgumentException("rise and limit must be positive");
+        }
+        int y = from.getY() + rise;
+        List<BlockPos> candidates = new ArrayList<>();
+        for (int dx = -rise; dx <= rise; dx++) {
+            int dzMagnitude = rise - Math.abs(dx);
+            candidates.add(new BlockPos(from.getX() + dx, y,
+                    from.getZ() + dzMagnitude));
+            if (dzMagnitude != 0) {
+                candidates.add(new BlockPos(from.getX() + dx, y,
+                        from.getZ() - dzMagnitude));
+            }
+        }
+        return candidates.stream().distinct().sorted(Comparator
+                        .comparingInt((BlockPos candidate) ->
+                                horizontalDistance(candidate, target))
+                        .thenComparingLong(candidate ->
+                                squaredHorizontalDistance(candidate, target))
+                        .thenComparingLong(BlockPos::asLong))
+                .limit(limit).toList();
     }
 
     private MaidTerrainPath exactWaypointBatch(
@@ -848,6 +946,10 @@ public final class ReturnToPositionAction implements MaidAction {
                 detail.addProperty("surface_sample_count", surfaceSampleCount);
                 detail.addProperty("surface_reference_y", surfaceReferenceY);
             }
+            detail.addProperty("surface_ascent_legs_planned",
+                    surfaceAscentLegsPlanned);
+            detail.addProperty("surface_ascent_legs_completed",
+                    surfaceAscentLegsCompleted);
         }
         if (targetResolved) {
             detail.add("target", position(target));
@@ -870,6 +972,7 @@ public final class ReturnToPositionAction implements MaidAction {
         detail.addProperty("water_seals_placed", waterSealsPlaced);
         detail.addProperty("player_wait_ticks", playerWaitTicks);
         detail.addProperty("planner_expanded_nodes", expandedNodes);
+        detail.addProperty("last_search_termination", lastSearchTermination);
         detail.addProperty("terrain_replans", replans);
         detail.addProperty("rejected_placement_targets",
                 rejectedPlacementTargets.size());
@@ -946,6 +1049,12 @@ public final class ReturnToPositionAction implements MaidAction {
     private static int horizontalDistance(BlockPos first, BlockPos second) {
         return Math.abs(first.getX() - second.getX())
                 + Math.abs(first.getZ() - second.getZ());
+    }
+
+    private static long squaredHorizontalDistance(BlockPos first, BlockPos second) {
+        long dx = (long) first.getX() - second.getX();
+        long dz = (long) first.getZ() - second.getZ();
+        return dx * dx + dz * dz;
     }
 
     private static JsonObject requireObject(JsonObject parent, String name) {

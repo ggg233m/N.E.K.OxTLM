@@ -47,6 +47,7 @@ public final class MaidTerrainSearch {
     private final Set<Long> closed = new HashSet<>();
 
     private Status status = Status.SEARCHING;
+    private FailureReason failureReason = FailureReason.NONE;
     private MaidTerrainPath result;
     private int expandedNodes;
     private long nextSequence;
@@ -107,6 +108,7 @@ public final class MaidTerrainSearch {
         while (expandedThisCall < budget) {
             SearchNode current = pollBestNode();
             if (current == null) {
+                failureReason = FailureReason.OPEN_EXHAUSTED;
                 status = Status.FAILED;
                 return status;
             }
@@ -119,6 +121,7 @@ public final class MaidTerrainSearch {
             // maxExpanded=1 must still find a goal generated while expanding
             // the start node on the following advance call.
             if (expandedNodes >= maxExpanded) {
+                failureReason = FailureReason.EXPANSION_LIMIT;
                 status = Status.FAILED;
                 return status;
             }
@@ -130,6 +133,7 @@ public final class MaidTerrainSearch {
         }
 
         if (open.isEmpty()) {
+            failureReason = FailureReason.OPEN_EXHAUSTED;
             status = Status.FAILED;
         }
         return status;
@@ -141,6 +145,10 @@ public final class MaidTerrainSearch {
 
     public Optional<MaidTerrainPath> result() {
         return Optional.ofNullable(result);
+    }
+
+    public FailureReason failureReason() {
+        return failureReason;
     }
 
     public int expandedNodes() {
@@ -271,6 +279,12 @@ public final class MaidTerrainSearch {
         SEARCHING,
         FOUND,
         FAILED
+    }
+
+    public enum FailureReason {
+        NONE,
+        OPEN_EXHAUSTED,
+        EXPANSION_LIMIT
     }
 
     private record SearchNode(

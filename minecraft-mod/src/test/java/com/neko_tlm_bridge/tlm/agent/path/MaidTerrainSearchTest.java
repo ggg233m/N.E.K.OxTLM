@@ -238,6 +238,26 @@ class MaidTerrainSearchTest {
     }
 
     @Test
+    void distinguishesExpansionLimitFromAProvenEmptySearch() {
+        MaidTerrainSearch limited = new MaidTerrainSearch(
+                pos(0, 1, 0), Set.of(pos(3, 1, 0)),
+                flatWorld(0, 3, 0, 0), 1);
+        assertEquals(MaidTerrainSearch.Status.SEARCHING, limited.advance(1));
+        assertEquals(MaidTerrainSearch.Status.FAILED, limited.advance(1));
+        assertEquals(MaidTerrainSearch.FailureReason.EXPANSION_LIMIT,
+                limited.failureReason());
+
+        MaidTerrainSearch blocked = new MaidTerrainSearch(
+                pos(0, 1, 0), Set.of(pos(2, 1, 0)),
+                flatWorld(0, 2, 0, 0)
+                        .clearCost(pos(1, 1, 0), Double.POSITIVE_INFINITY),
+                32);
+        assertEquals(MaidTerrainSearch.Status.FAILED, finish(blocked));
+        assertEquals(MaidTerrainSearch.FailureReason.OPEN_EXHAUSTED,
+                blocked.failureReason());
+    }
+
+    @Test
     void equalCostTieBreakIsDeterministic() {
         BlockPos start = pos(0, 1, 0);
         BlockPos goal = pos(2, 1, 0);

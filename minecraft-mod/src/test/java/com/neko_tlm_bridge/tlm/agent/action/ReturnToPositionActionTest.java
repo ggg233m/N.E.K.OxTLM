@@ -176,6 +176,43 @@ class ReturnToPositionActionTest {
                         BlockPos.ZERO, List.of(), 64));
     }
 
+    @Test
+    void deepSurfaceReturnUsesBoundedEightBlockFrontierGoals() {
+        BlockPos start = new BlockPos(-987, 6, 334);
+        BlockPos target = new BlockPos(-989, 78, 348);
+        List<BlockPos> goals = ReturnToPositionAction.surfaceAscentFrontierGoals(
+                start, target, 8, 16);
+
+        assertEquals(16, goals.size());
+        for (BlockPos goal : goals) {
+            assertEquals(8, goal.getY() - start.getY());
+            assertEquals(8, Math.abs(goal.getX() - start.getX())
+                    + Math.abs(goal.getZ() - start.getZ()));
+        }
+        assertTrue(horizontalDistance(goals.getFirst(), target)
+                <= horizontalDistance(start, target));
+    }
+
+    @Test
+    void surfaceFrontierKeepsAlternativesAndValidatesArguments() {
+        BlockPos start = new BlockPos(0, 10, 0);
+        List<BlockPos> goals = ReturnToPositionAction.surfaceAscentFrontierGoals(
+                start, new BlockPos(0, 80, 0), 8, 32);
+        assertEquals(32, goals.size());
+        assertTrue(goals.stream().anyMatch(pos -> pos.getX() > 0));
+        assertTrue(goals.stream().anyMatch(pos -> pos.getX() < 0));
+        assertTrue(goals.stream().anyMatch(pos -> pos.getZ() > 0));
+        assertTrue(goals.stream().anyMatch(pos -> pos.getZ() < 0));
+        assertThrows(IllegalArgumentException.class,
+                () -> ReturnToPositionAction.surfaceAscentFrontierGoals(
+                        start, BlockPos.ZERO, 0, 1));
+    }
+
+    private static int horizontalDistance(BlockPos first, BlockPos second) {
+        return Math.abs(first.getX() - second.getX())
+                + Math.abs(first.getZ() - second.getZ());
+    }
+
     private static JsonObject args() {
         JsonObject target = new JsonObject();
         target.addProperty("x", 12);
