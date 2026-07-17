@@ -670,6 +670,11 @@ public class GameEventHandler {
     }
 
     private static boolean shouldTrackPlayerBlockActivity(Player player) {
+        // Maid terrain construction uses an owner-profile FakePlayer so claim
+        // and protection hooks can apply the owner's permissions. It is not a
+        // real player behavior signal and must not become companion evidence
+        // such as "the owner placed nine blocks".
+        if (player.isFakePlayer()) return false;
         EntityMaid maid = trackedOwnerMaid(player);
         if (maid == null) return false;
         return maid.distanceTo(player) <= 64;
