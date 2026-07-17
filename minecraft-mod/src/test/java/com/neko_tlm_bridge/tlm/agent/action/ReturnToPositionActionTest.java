@@ -55,6 +55,24 @@ class ReturnToPositionActionTest {
     }
 
     @Test
+    void acceptsYOnlyButRejectsHalfSpecifiedHorizontalCoordinates() {
+        JsonObject yOnlyTarget = new JsonObject();
+        yOnlyTarget.addProperty("y", 96);
+        JsonObject yOnly = new JsonObject();
+        yOnly.add("target", yOnlyTarget);
+        assertEquals(MaidActionKind.RETURN_TO_POSITION,
+                ReturnToPositionAction.fromArgs(yOnly).kind());
+
+        JsonObject halfTarget = new JsonObject();
+        halfTarget.addProperty("x", 12);
+        halfTarget.addProperty("y", 96);
+        JsonObject half = new JsonObject();
+        half.add("target", halfTarget);
+        assertThrows(IllegalArgumentException.class,
+                () -> ReturnToPositionAction.fromArgs(half));
+    }
+
+    @Test
     void validatesPlacementLimitAndCoordinateBounds() {
         JsonObject placements = args();
         placements.addProperty("max_placements", 4097);

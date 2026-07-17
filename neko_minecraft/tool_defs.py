@@ -223,9 +223,10 @@ MC_START_MAID_ACTION = {
                 "type": "object",
                 "description": (
                     "navigate: {target:{x,y,z}, speed?, stop_distance?}；"
-                    "return_to_position: {target:{x,y,z}, speed?, stop_distance?, operation_id?,"
+                    "return_to_position: {target:{y} 或 {x,y,z}, speed?, stop_distance?, operation_id?,"
                     "route_policy?:recorded_tunnels_first|safe_shortest,"
                     "placement_policy?:disabled|safe_support_and_water_seal,max_placements?:0..4096}。"
+                    "只提供 y 时，服务端优先采用已记录矿道入口的 x/z，无路线时采用女仆当前 x/z；"
                     "operation_id 省略时服务端选择该女仆同维度最近的挖矿记录；默认优先已有矿道并允许"
                     "消耗普通稳定方块搭桥、补支撑或封水，max_placements=0 表示不设人工上限。"
                     "返程路线始终要求玩家也能步行通过，不能关闭两格净空和稳定支撑约束。"

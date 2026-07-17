@@ -164,11 +164,12 @@ class MaidActionToolTests(unittest.IsolatedAsyncioTestCase):
             plugin,
             kind="return_to_position",
             action_id="return",
-            args={"target": {"x": 4, "y": 70, "z": 9}},
+            args={"target": {"y": 70}},
         )
         self.assertFalse(result["is_error"])
         payload = plugin.requests[0]["data"]
         self.assertEqual(0, payload["timeout_ms"])
+        self.assertEqual({"y": 70}, payload["args"]["target"])
         self.assertEqual(
             "recorded_tunnels_first", payload["args"]["route_policy"]
         )

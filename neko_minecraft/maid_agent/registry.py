@@ -74,7 +74,7 @@ class ActionRegistry:
             )
 
         normalized = {
-            "target": self._position(
+            "target": self._return_position(
                 args.get("target"), "return_to_position.target"
             ),
             "speed": self._number(
@@ -101,6 +101,28 @@ class ActionRegistry:
                     "return_to_position.operation_id must be a UUID"
                 ) from None
         return normalized
+
+    @staticmethod
+    def _return_position(value: Any, name: str) -> Dict[str, int]:
+        if not isinstance(value, dict):
+            raise ActionValidationError(
+                f"{name} must be an object with y and optional x/z"
+            )
+        if "y" not in value:
+            raise ActionValidationError(f"{name} is missing y")
+        has_x = "x" in value
+        has_z = "z" in value
+        if has_x != has_z:
+            raise ActionValidationError(
+                f"{name}.x and {name}.z must both be present or both be omitted"
+            )
+        axes = ("x", "y", "z") if has_x else ("y",)
+        return {
+            axis: ActionRegistry._integer(
+                value.get(axis), f"{name}.{axis}", -30_000_000, 30_000_000
+            )
+            for axis in axes
+        }
 
     def _autonomous_mining(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Normalize the Java-owned mining goal and its bounded preferences.

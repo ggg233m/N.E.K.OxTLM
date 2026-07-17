@@ -44,7 +44,8 @@ public final class ReturnToPositionAction implements MaidAction {
     private static final int MAX_VERTICAL_SEARCH_RADIUS = 192;
     private static final int MAX_REPLANS = 3;
 
-    private final BlockPos target;
+    private BlockPos target;
+    private final boolean inferHorizontalTarget;
     private final double speed;
     private final double stopDistance;
     private final UUID requestedOperationId;
@@ -73,7 +74,17 @@ public final class ReturnToPositionAction implements MaidAction {
     public ReturnToPositionAction(BlockPos target, double speed, double stopDistance,
                                   UUID operationId, RoutePolicy routePolicy,
                                   PlacementPolicy placementPolicy, int maxPlacements) {
+        this(target, false, speed, stopDistance, operationId, routePolicy,
+                placementPolicy, maxPlacements);
+    }
+
+    private ReturnToPositionAction(
+            BlockPos target, boolean inferHorizontalTarget,
+            double speed, double stopDistance, UUID operationId,
+            RoutePolicy routePolicy, PlacementPolicy placementPolicy,
+            int maxPlacements) {
         this.target = Objects.requireNonNull(target, "target").immutable();
+        this.inferHorizontalTarget = inferHorizontalTarget;
         this.speed = clamp(speed, 0.4D, 1.0D);
         this.stopDistance = clamp(stopDistance, 1.0D, 4.0D);
         this.requestedOperationId = operationId;
@@ -95,8 +106,17 @@ public final class ReturnToPositionAction implements MaidAction {
             }
         }
         JsonObject target = requireObject(args, "target");
-        BlockPos position = new BlockPos(requireCoordinate(target, "x"),
-                requireCoordinate(target, "y"), requireCoordinate(target, "z"));
+        boolean hasX = target.has("x");
+        boolean hasZ = target.has("z");
+        if (hasX != hasZ) {
+            throw new IllegalArgumentException(
+                    "target.x and target.z must either both be present or both be omitted");
+        }
+        int y = requireCoordinate(target, "y");
+        BlockPos position = new BlockPos(
+                hasX ? requireCoordinate(target, "x") : 0,
+                y,
+                hasZ ? requireCoordinate(target, "z") : 0);
         double speed = optionalDouble(args, "speed", 0.7D);
         double stopDistance = optionalDouble(args, "stop_distance", 1.5D);
         requireRange(speed, "speed", 0.4D, 1.0D);
@@ -114,7 +134,7 @@ public final class ReturnToPositionAction implements MaidAction {
         PlacementPolicy placementPolicy = PlacementPolicy.fromWireName(
                 optionalString(args, "placement_policy", "safe_support_and_water_seal"));
         int maxPlacements = optionalInt(args, "max_placements", 0);
-        return new ReturnToPositionAction(position, speed, stopDistance,
+        return new ReturnToPositionAction(position, !hasX, speed, stopDistance,
                 operationId, routePolicy, placementPolicy, maxPlacements);
     }
 
@@ -135,6 +155,10 @@ public final class ReturnToPositionAction implements MaidAction {
     @Override
     public void start(MaidActionContext context) {
         started = true;
+        if (inferHorizontalTarget) {
+            BlockPos live = context.maid().blockPosition();
+            target = new BlockPos(live.getX(), target.getY(), live.getZ());
+        }
         report(context, Stage.VALIDATING, detail("validating_return_target"));
     }
 
@@ -172,14 +196,6 @@ public final class ReturnToPositionAction implements MaidAction {
     }
 
     private MaidActionTickResult validateAndPrepare(MaidActionContext context) {
-        if (!context.level().hasChunkAt(target)) {
-            return fail(context, ActionEndReason.PATH_NOT_FOUND, "target_chunk_not_loaded");
-        }
-        if (!attachBestAvailableTool(context)) {
-            return fail(context, ActionEndReason.HAND_CONFLICT,
-                    "return_tool_lease_could_not_be_attached");
-        }
-
         if (routePolicy == RoutePolicy.RECORDED_TUNNELS_FIRST) {
             Optional<MiningWorldModelSavedData.OperationSnapshot> snapshot =
                     requestedOperationId == null
@@ -191,6 +207,19 @@ public final class ReturnToPositionAction implements MaidAction {
                             .filter(value -> value.routeBreadcrumbs().size() >= 2);
             snapshot.ifPresent(value -> prepareRecordedRoute(
                     context.maid().blockPosition(), value));
+        }
+
+        // A recorded return may legitimately end in a chunk that is not yet
+        // loaded at action start.  The maid/player can bring successive route
+        // chunks into range while walking; direct replanning still refuses an
+        // unloaded target and never force-loads it.
+        if (!routeSource.startsWith("recorded")
+                && !context.level().hasChunkAt(target)) {
+            return fail(context, ActionEndReason.PATH_NOT_FOUND, "target_chunk_not_loaded");
+        }
+        if (!attachBestAvailableTool(context)) {
+            return fail(context, ActionEndReason.HAND_CONFLICT,
+                    "return_tool_lease_could_not_be_attached");
         }
 
         if (waypoints.isEmpty() || !waypoints.getLast().equals(target)) {
@@ -213,6 +242,10 @@ public final class ReturnToPositionAction implements MaidAction {
             if (waypoints.isEmpty() || !waypoints.getLast().equals(waypoint)) {
                 waypoints.add(waypoint);
             }
+        }
+        if (inferHorizontalTarget) {
+            BlockPos entry = planned.orElseThrow().entry();
+            target = new BlockPos(entry.getX(), target.getY(), entry.getZ());
         }
         operationId = snapshot.operationId();
         routeSource = "recorded_tunnel_breadcrumbs";
@@ -486,6 +519,10 @@ public final class ReturnToPositionAction implements MaidAction {
     private JsonObject detail(String message) {
         JsonObject detail = new JsonObject();
         detail.add("target", position(target));
+        detail.addProperty("target_horizontal_source",
+                inferHorizontalTarget
+                        ? (operationId == null ? "maid_current_position" : "mining_entry")
+                        : "explicit");
         if (operationId != null) {
             detail.addProperty("operation_id", operationId.toString());
         }

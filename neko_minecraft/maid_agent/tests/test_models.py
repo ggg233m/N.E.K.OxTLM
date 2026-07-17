@@ -96,6 +96,20 @@ class ActionRegistryTests(unittest.TestCase):
         self.assertEqual(0, args["max_placements"])
         self.assertNotIn("operation_id", args)
 
+    def test_normalizes_return_to_position_with_y_only(self):
+        args = self.registry.normalize(
+            "return_to_position", {"target": {"y": 96}}
+        )
+        self.assertEqual({"y": 96}, args["target"])
+
+        for target in ({"x": 1, "y": 96}, {"y": 96, "z": 2}):
+            with self.subTest(target=target), self.assertRaises(
+                ActionValidationError
+            ):
+                self.registry.normalize(
+                    "return_to_position", {"target": target}
+                )
+
     def test_normalizes_return_to_position_operation_and_policy(self):
         args = self.registry.normalize("return_to_position", {
             "target": {"x": 1, "y": 80, "z": 2},

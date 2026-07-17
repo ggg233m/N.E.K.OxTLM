@@ -67,6 +67,7 @@ class MaidActionGuidanceTests(unittest.TestCase):
         ):
             self.assertIn(value, tool_text + _TLM_AI_INSTRUCTIONS)
         self.assertIn("不得在身后回填封路", _TLM_AI_INSTRUCTIONS)
+        self.assertIn("不得因为缺少 x/z 拒绝执行", _TLM_AI_INSTRUCTIONS)
         self.assertIn("禁止猜测", _TLM_AI_INSTRUCTIONS)
         self.assertIn("navigate 始终是非破坏性寻路", _TLM_AI_INSTRUCTIONS)
 
