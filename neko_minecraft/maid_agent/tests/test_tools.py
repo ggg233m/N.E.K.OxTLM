@@ -26,6 +26,16 @@ class FakePlugin:
         pass
 
 
+class FakeDirector:
+    def __init__(self, result):
+        self.result = result
+        self.calls = []
+
+    async def set_activity(self, target, **kwargs):
+        self.calls.append((target, kwargs))
+        return self.result
+
+
 class MaidActionToolTests(unittest.IsolatedAsyncioTestCase):
     async def test_start_builds_normalized_protocol_request(self):
         plugin = FakePlugin({
@@ -178,6 +188,77 @@ class MaidActionToolTests(unittest.IsolatedAsyncioTestCase):
             payload["args"]["placement_policy"],
         )
         self.assertEqual(0, payload["args"]["max_placements"])
+        self.assertTrue(result["output"]["execution_pending"])
+        self.assertFalse(result["output"]["completion_confirmed"])
+        self.assertTrue(result["output"]["terminal_event_required"])
+
+    async def test_simple_move_tool_starts_safe_return_to_player(self):
+        plugin = FakePlugin({
+            "type": "maid_action_start_result",
+            "data": {
+                "accepted": True, "action_id": "move", "generation": 1,
+                "status": "RUNNING", "kind": "return_to_position",
+            },
+        })
+        result = await tools.do_move_maid_to(plugin, destination="player")
+        self.assertFalse(result["is_error"])
+        payload = plugin.requests[0]["data"]
+        self.assertEqual("return_to_position", payload["kind"])
+        self.assertEqual({
+            "destination": "player",
+            "speed": 0.7,
+            "stop_distance": 1.5,
+            "route_policy": "recorded_tunnels_first",
+            "placement_policy": "safe_support_and_water_seal",
+            "max_placements": 0,
+        }, payload["args"])
+        self.assertEqual(0, payload["timeout_ms"])
+        self.assertTrue(payload["replace_existing"])
+        self.assertFalse(result["output"]["completion_confirmed"])
+
+    async def test_simple_move_tool_rejects_unknown_destination_without_request(self):
+        plugin = FakePlugin({})
+        result = await tools.do_move_maid_to(plugin, destination="somewhere")
+        self.assertTrue(result["is_error"])
+        self.assertEqual("INVALID_ACTION_ARGUMENTS", result["error"])
+        self.assertEqual([], plugin.requests)
+
+    async def test_simple_move_tool_director_path_is_still_pending(self):
+        plugin = FakePlugin({})
+        plugin._maid_activity_director = FakeDirector({
+            "success": True,
+            "target_result": {
+                "action_id": "director-move", "kind": "return_to_position",
+                "status": "RUNNING",
+            },
+        })
+        result = await tools.do_move_maid_to(plugin, destination="surface")
+        self.assertFalse(result["is_error"])
+        self.assertTrue(result["output"]["execution_pending"])
+        self.assertFalse(result["output"]["completion_confirmed"])
+        self.assertTrue(result["output"]["terminal_event_required"])
+        self.assertEqual([], plugin.requests)
+        self.assertEqual("return_to_position",
+                         plugin._maid_activity_director.calls[0][0]["kind"])
+
+    async def test_completion_confirmation_requires_completed_and_arrived(self):
+        base = {
+            "kind": "return_to_position", "status": "SUCCEEDED",
+            "end_reason": "COMPLETED",
+        }
+        missing_arrival = tools._action_execution_confirmation({
+            **base, "result": {"arrived": False},
+        })
+        self.assertFalse(missing_arrival["execution_pending"])
+        self.assertFalse(missing_arrival["completion_confirmed"])
+        confirmed = tools._action_execution_confirmation({
+            **base, "result": {"arrived": True},
+        })
+        self.assertTrue(confirmed["completion_confirmed"])
+        missing_reason = tools._action_execution_confirmation({
+            "kind": "harvest_blocks", "status": "SUCCEEDED",
+        })
+        self.assertFalse(missing_reason["completion_confirmed"])
 
     async def test_timeout_zero_is_accepted_but_subsecond_positive_is_rejected(self):
         response = {

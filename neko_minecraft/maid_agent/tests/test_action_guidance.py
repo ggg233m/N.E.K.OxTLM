@@ -9,12 +9,29 @@ from neko_minecraft.tool_defs import (
     MC_CANCEL_SKILL,
     MC_GET_SKILL_STATUS,
     MC_LIST_SKILLS,
+    MC_MOVE_MAID_TO,
     MC_START_MAID_ACTION,
     MC_START_SKILL,
 )
 
 
 class MaidActionGuidanceTests(unittest.TestCase):
+    def test_simple_move_tool_routes_companion_destinations(self):
+        self.assertEqual("mc_move_maid_to", MC_MOVE_MAID_TO["name"])
+        parameters = MC_MOVE_MAID_TO["parameters"]
+        self.assertEqual(["destination"], parameters["required"])
+        self.assertEqual(
+            ["player", "surface", "mine_entry"],
+            parameters["properties"]["destination"]["enum"],
+        )
+        self.assertFalse(parameters["additionalProperties"])
+        text = MC_MOVE_MAID_TO["description"] + _TLM_AI_INSTRUCTIONS
+        for expected in (
+            "挖过来", 'destination="player"', "严禁", "harvest_blocks",
+            "completion_confirmed", "maid_action_finished", "SUCCEEDED",
+        ):
+            self.assertIn(expected, text)
+
     def test_stone_example_uses_overworld_base_stone_tag(self):
         expected = "{type:'tag', id:'minecraft:base_stone_overworld'}"
         tool_text = MC_START_MAID_ACTION["description"] + str(

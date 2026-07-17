@@ -29,7 +29,7 @@ from .playmate.debug_log import PlaymateDebugLogger
 from .tool_defs import (
     MC_MAID_STATUS, MC_SWITCH_FOLLOW, MC_SWITCH_SIT,
     MC_SWITCH_TASK, MC_SWITCH_SCHEDULE, MC_EQUIP_ITEM,
-    MC_SEND_CHAT, MC_GAME_CONTEXT, MC_USE_SKILL, MC_EXECUTE_COMMAND,
+    MC_SEND_CHAT, MC_GAME_CONTEXT, MC_MOVE_MAID_TO, MC_USE_SKILL, MC_EXECUTE_COMMAND,
     MC_SET_PLAN, MC_START_MAID_ACTION, MC_CANCEL_MAID_ACTION,
     MC_GET_MAID_ACTION_STATUS, MC_LIST_ACTIVE_MAID_ACTIONS,
     MC_START_SKILL, MC_CANCEL_SKILL, MC_GET_SKILL_STATUS, MC_LIST_SKILLS,
@@ -937,6 +937,10 @@ class NekoMinecraftPlugin(NekoPluginBase):
     @llm_tool(**MC_GAME_CONTEXT)
     async def mc_game_context(self, category=None, **_):
         return await _tools.do_game_context(self, category=category)
+
+    @llm_tool(**MC_MOVE_MAID_TO)
+    async def mc_move_maid_to(self, *, destination="", **_):
+        return await _tools.do_move_maid_to(self, destination=destination)
 
     @llm_tool(**MC_START_MAID_ACTION)
     async def mc_start_maid_action(self, *, kind="", args=None, action_id="",

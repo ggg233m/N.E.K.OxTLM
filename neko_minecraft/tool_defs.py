@@ -187,6 +187,29 @@ MC_GAME_CONTEXT = {
     },
 }
 
+MC_MOVE_MAID_TO = {
+    "name": "mc_move_maid_to",
+    "description": (
+        "让女仆真实前往一个常用目的地。玩家说“过来/到我这/来我身边/挖过来”时传 player；"
+        "说“回到地面/上地面”时传 surface；说“回矿道入口/回入口”时传 mine_entry。"
+        "“挖过来”的目标是抵达玩家，严禁改用 harvest_blocks；本工具会在返程需要时自行安全清障和搭支撑。"
+        "成功返回只代表服务端已接受，绝不代表已经到达；必须等待 maid_action_finished 的"
+        "status=SUCCEEDED 且 result.arrived=true 后才能说已到达。"
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "destination": {
+                "type": "string",
+                "enum": ["player", "surface", "mine_entry"],
+                "description": "player=主人当前位置，surface=附近安全地表，mine_entry=已记录矿井入口",
+            },
+        },
+        "required": ["destination"],
+        "additionalProperties": False,
+    },
+}
+
 MC_START_MAID_ACTION = {
     "name": "mc_start_maid_action",
     "description": (

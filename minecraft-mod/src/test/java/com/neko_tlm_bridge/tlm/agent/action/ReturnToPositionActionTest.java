@@ -128,6 +128,54 @@ class ReturnToPositionActionTest {
                 ActionEndReason.BLOCK_PROTECTED, materialFailure).isEmpty());
     }
 
+    @Test
+    void surfaceReferenceUsesTheSurroundingPlatformInsteadOfADeepAnchorColumn() {
+        assertEquals(65, ReturnToPositionAction.surfaceReferenceHeight(
+                List.of(6, 63, 64, 64, 64, 65, 65, 66)));
+    }
+
+    @Test
+    void surfaceReferenceKeepsARealLowPlainAndIgnoresOneTallSpire() {
+        assertEquals(6, ReturnToPositionAction.surfaceReferenceHeight(
+                List.of(6, 6, 6, 6, 6)));
+        assertEquals(65, ReturnToPositionAction.surfaceReferenceHeight(
+                List.of(63, 64, 64, 64, 64, 65, 65, 66, 100)));
+    }
+
+    @Test
+    void surfaceReferenceRejectsMissingSamples() {
+        assertThrows(IllegalArgumentException.class,
+                () -> ReturnToPositionAction.surfaceReferenceHeight(List.of()));
+    }
+
+    @Test
+    void deepSurfaceDepressionSelectsTheNearbyPlatformAndIgnoresASpire() {
+        BlockPos anchor = new BlockPos(0, 6, 0);
+        BlockPos platform = new BlockPos(8, 64, 0);
+        assertEquals(platform, ReturnToPositionAction.selectSurfaceCandidate(
+                anchor,
+                List.of(anchor, platform, new BlockPos(2, 100, 0)),
+                64));
+    }
+
+    @Test
+    void normalSlopeAndShallowDipKeepTheNearestSurface() {
+        BlockPos slope = new BlockPos(0, 62, 0);
+        assertEquals(slope, ReturnToPositionAction.selectSurfaceCandidate(
+                slope, List.of(slope, new BlockPos(8, 65, 0)), 65));
+
+        BlockPos shallow = new BlockPos(0, 60, 0);
+        assertEquals(shallow, ReturnToPositionAction.selectSurfaceCandidate(
+                shallow, List.of(shallow, new BlockPos(6, 64, 0)), 64));
+    }
+
+    @Test
+    void surfaceCandidateSelectionRejectsAnEmptySet() {
+        assertThrows(IllegalArgumentException.class,
+                () -> ReturnToPositionAction.selectSurfaceCandidate(
+                        BlockPos.ZERO, List.of(), 64));
+    }
+
     private static JsonObject args() {
         JsonObject target = new JsonObject();
         target.addProperty("x", 12);

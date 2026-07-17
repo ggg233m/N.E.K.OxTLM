@@ -558,6 +558,34 @@ def _action_error(code, message, **details):
     }
 
 
+def _action_execution_confirmation(payload):
+    """Make an accepted asynchronous action impossible to mistake for completion."""
+    status = str((payload or {}).get("status") or "").strip().upper()
+    terminal = status in {
+        "SUCCEEDED", "FAILED", "CANCELLED", "SUPERSEDED", "TIMEOUT"
+    }
+    kind = str((payload or {}).get("kind") or "").strip().lower()
+    end_reason = str((payload or {}).get("end_reason") or "").strip().upper()
+    result = (payload or {}).get("result")
+    completed = status == "SUCCEEDED" and end_reason == "COMPLETED"
+    arrived = isinstance(result, dict) and result.get("arrived") is True
+    succeeded = completed and (kind != "return_to_position" or arrived)
+    instruction = (
+        "服务端终态已严格确认成功。"
+        if succeeded else
+        "服务端已返回终态，但终态数据没有严格确认成功或到达；禁止向玩家声称完成。"
+        if terminal else
+        "动作仅已受理，仍在异步执行；现在只能说正在行动。收到 maid_action_finished 前"
+        "禁止声称已经到达、挖完或完成。"
+    )
+    return {
+        "execution_pending": not terminal,
+        "completion_confirmed": succeeded,
+        "terminal_event_required": not terminal,
+        "llm_instruction": instruction,
+    }
+
+
 async def do_start_maid_action(
     plugin,
     *,
@@ -638,12 +666,14 @@ async def do_start_maid_action(
             or transition.get("terminal_activity")
             or {}
         )
-        return Ok({
+        response = {
             "accepted": True,
             "action_id": action_id,
             **started,
             "activity_transition": transition,
-        })
+        }
+        response.update(_action_execution_confirmation(response))
+        return Ok(response)
     request = {
         "type": "start_maid_action",
         "data": {
@@ -670,7 +700,26 @@ async def do_start_maid_action(
             response=result_data,
         )
     record = records[0].as_dict() if records else {}
-    return Ok({"accepted": True, "action_id": action_id, **result_data, **record})
+    response = {"accepted": True, "action_id": action_id, **result_data, **record}
+    response.update(_action_execution_confirmation(response))
+    return Ok(response)
+
+
+async def do_move_maid_to(plugin, *, destination=""):
+    """Start safe semantic movement through a deliberately tiny LLM contract."""
+    normalized = str(destination or "").strip().lower()
+    if normalized not in {"player", "surface", "mine_entry"}:
+        return _action_error(
+            "INVALID_ACTION_ARGUMENTS",
+            "destination must be player, surface or mine_entry",
+        )
+    return await do_start_maid_action(
+        plugin,
+        kind="return_to_position",
+        args={"destination": normalized},
+        timeout_ms=0,
+        replace_existing=True,
+    )
 
 
 async def do_cancel_maid_action(plugin, *, action_id="", maid_id=None):

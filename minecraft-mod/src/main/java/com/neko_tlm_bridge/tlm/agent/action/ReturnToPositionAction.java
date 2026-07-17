@@ -19,7 +19,9 @@ import com.neko_tlm_bridge.tlm.agent.world.MiningWorldModelSavedData;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.levelgen.Heightmap;
 import net.neoforged.neoforge.items.IItemHandler;
 
@@ -46,12 +48,21 @@ public final class ReturnToPositionAction implements MaidAction {
     private static final int MAX_HORIZONTAL_SEARCH_RADIUS = 96;
     private static final int MAX_VERTICAL_SEARCH_RADIUS = 192;
     private static final int MAX_REPLANS = 3;
+    private static final int SURFACE_INITIAL_SAMPLE_RADIUS = 16;
+    private static final int SURFACE_MAX_SAMPLE_RADIUS = 32;
+    private static final int SURFACE_SAMPLE_STEP = 2;
+    private static final int SURFACE_DEPRESSION_DEPTH = 6;
+    private static final int SURFACE_OUTLIER_HEIGHT = 12;
 
     private BlockPos target;
     private final boolean inferHorizontalTarget;
     private final Destination destination;
     private boolean targetResolved;
     private boolean surfaceHeightPending;
+    private String surfaceStrategy = "pending";
+    private int surfaceSampleCount;
+    private int surfaceReferenceY;
+    private String surfaceFailureReason = "surface_platform_not_found";
     private final double speed;
     private final double stopDistance;
     private final UUID requestedOperationId;
@@ -301,7 +312,13 @@ public final class ReturnToPositionAction implements MaidAction {
             BlockPos origin = operation.originPos().immutable();
             if (destination == Destination.SURFACE
                     && context.level().hasChunkAt(origin)) {
-                target = surfaceTarget(context, origin);
+                Optional<SurfaceResolution> resolution = surfaceTarget(context, origin);
+                if (resolution.isEmpty()) {
+                    markSurfaceResolutionFailed();
+                    return fail(context, ActionEndReason.PATH_NOT_FOUND,
+                            surfaceFailureReason);
+                }
+                applySurfaceResolution(resolution.orElseThrow());
             } else {
                 target = origin;
                 surfaceHeightPending = destination == Destination.SURFACE;
@@ -320,18 +337,177 @@ public final class ReturnToPositionAction implements MaidAction {
             return fail(context, ActionEndReason.PATH_NOT_FOUND,
                     "surface_column_not_loaded");
         }
-        target = surfaceTarget(context, live);
+        Optional<SurfaceResolution> resolution = surfaceTarget(context, live);
+        if (resolution.isEmpty()) {
+            markSurfaceResolutionFailed();
+            return fail(context, ActionEndReason.PATH_NOT_FOUND,
+                    surfaceFailureReason);
+        }
+        applySurfaceResolution(resolution.orElseThrow());
         targetResolved = true;
         return null;
     }
 
-    private static BlockPos surfaceTarget(
+    private Optional<SurfaceResolution> surfaceTarget(
             MaidActionContext context, BlockPos horizontalAnchor) {
-        int surfaceY = context.level().getHeight(
-                Heightmap.Types.MOTION_BLOCKING_NO_LEAVES,
-                horizontalAnchor.getX(), horizontalAnchor.getZ());
-        return new BlockPos(horizontalAnchor.getX(), surfaceY,
-                horizontalAnchor.getZ());
+        if (!context.level().dimension().equals(Level.OVERWORLD)) {
+            surfaceFailureReason = "surface_destination_not_supported_in_dimension";
+            return Optional.empty();
+        }
+        surfaceFailureReason = "surface_platform_not_found";
+        List<BlockPos> candidates = new ArrayList<>();
+        List<Integer> heights = new ArrayList<>();
+        Set<Long> sampledColumns = new HashSet<>();
+        collectSurfaceCandidates(context, horizontalAnchor,
+                SURFACE_INITIAL_SAMPLE_RADIUS, sampledColumns, candidates, heights);
+        if (candidates.isEmpty()) {
+            collectSurfaceCandidates(context, horizontalAnchor,
+                    SURFACE_MAX_SAMPLE_RADIUS, sampledColumns, candidates, heights);
+        } else {
+            int initialReference = surfaceReferenceHeight(heights);
+            BlockPos initialNearest = nearestSurfaceCandidate(
+                    horizontalAnchor, candidates);
+            if (initialNearest.getY() < initialReference - SURFACE_DEPRESSION_DEPTH
+                    || initialNearest.getY() < context.level().getSeaLevel() - 8) {
+                collectSurfaceCandidates(context, horizontalAnchor,
+                        SURFACE_MAX_SAMPLE_RADIUS, sampledColumns, candidates, heights);
+            }
+        }
+        if (candidates.isEmpty()) {
+            return Optional.empty();
+        }
+
+        int referenceY = surfaceReferenceHeight(heights);
+        BlockPos nearest = nearestSurfaceCandidate(horizontalAnchor, candidates);
+        LivingEntity owner = context.maid().getOwner();
+        if (owner != null && owner.level() == context.level() && owner.onGround()) {
+            BlockPos ownerPos = owner.blockPosition().immutable();
+            int ownerSurfaceY = context.level().getHeight(
+                    Heightmap.Types.MOTION_BLOCKING_NO_LEAVES,
+                    ownerPos.getX(), ownerPos.getZ());
+            if (horizontalDistance(horizontalAnchor, ownerPos)
+                    <= SURFACE_MAX_SAMPLE_RADIUS
+                    && isStandableSurface(context, ownerPos)
+                    && Math.abs(ownerPos.getY() - ownerSurfaceY) <= 3
+                    && ownerPos.getY() >= referenceY - 2) {
+                return Optional.of(new SurfaceResolution(ownerPos,
+                        "nearby_grounded_owner", candidates.size(), referenceY));
+            }
+        }
+
+        BlockPos selected = selectSurfaceCandidate(
+                horizontalAnchor, candidates, referenceY);
+        boolean escapedDepression = nearest.getY()
+                < referenceY - SURFACE_DEPRESSION_DEPTH;
+        return Optional.of(new SurfaceResolution(selected,
+                escapedDepression ? "local_safe_platform" : "nearest_safe_surface",
+                candidates.size(), referenceY));
+    }
+
+    private void collectSurfaceCandidates(
+            MaidActionContext context, BlockPos horizontalAnchor, int radius,
+            Set<Long> sampledColumns, List<BlockPos> candidates,
+            List<Integer> heights) {
+        for (int dx = -radius; dx <= radius; dx += SURFACE_SAMPLE_STEP) {
+            for (int dz = -radius; dz <= radius; dz += SURFACE_SAMPLE_STEP) {
+                int x = horizontalAnchor.getX() + dx;
+                int z = horizontalAnchor.getZ() + dz;
+                BlockPos columnProbe = new BlockPos(x, horizontalAnchor.getY(), z);
+                if (!sampledColumns.add(columnProbe.asLong())) {
+                    continue;
+                }
+                if (!context.level().hasChunkAt(columnProbe)) {
+                    continue;
+                }
+                int y = context.level().getHeight(
+                        Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x, z);
+                BlockPos standing = new BlockPos(x, y, z);
+                if (!isStandableSurface(context, standing)) {
+                    continue;
+                }
+                candidates.add(standing);
+                heights.add(y);
+            }
+        }
+    }
+
+    private static boolean isStandableSurface(
+            MaidActionContext context, BlockPos standing) {
+        if (standing.getY() <= context.level().getMinBuildHeight()
+                || standing.getY() >= context.level().getMaxBuildHeight() - 1
+                || !context.level().hasChunkAt(standing)) {
+            return false;
+        }
+        BlockState feet = context.level().getBlockState(standing);
+        BlockState head = context.level().getBlockState(standing.above());
+        BlockPos supportPos = standing.below();
+        BlockState support = context.level().getBlockState(supportPos);
+        return feet.getFluidState().isEmpty()
+                && head.getFluidState().isEmpty()
+                && feet.getCollisionShape(context.level(), standing).isEmpty()
+                && head.getCollisionShape(context.level(), standing.above()).isEmpty()
+                && MaidTerrainWorldEvaluator.isSafeStandSupport(
+                context.level(), supportPos, support);
+    }
+
+    static int surfaceReferenceHeight(List<Integer> heights) {
+        if (heights == null || heights.isEmpty()) {
+            throw new IllegalArgumentException("surface heights must not be empty");
+        }
+        List<Integer> sorted = new ArrayList<>(heights);
+        sorted.sort(Integer::compareTo);
+        int index = (int) Math.floor(0.75D * (sorted.size() - 1));
+        return sorted.get(index);
+    }
+
+    static BlockPos selectSurfaceCandidate(
+            BlockPos anchor, List<BlockPos> candidates, int referenceY) {
+        if (candidates == null || candidates.isEmpty()) {
+            throw new IllegalArgumentException("surface candidates must not be empty");
+        }
+        BlockPos nearest = nearestSurfaceCandidate(anchor, candidates);
+        if (nearest.getY() >= referenceY - SURFACE_DEPRESSION_DEPTH) {
+            return nearest;
+        }
+        BlockPos best = null;
+        double bestScore = Double.POSITIVE_INFINITY;
+        for (BlockPos candidate : candidates) {
+            if (candidate.getY() < referenceY - 2
+                    || candidate.getY() > referenceY + SURFACE_OUTLIER_HEIGHT) {
+                continue;
+            }
+            double score = horizontalDistance(anchor, candidate)
+                    + 4.0D * Math.abs(candidate.getY() - referenceY);
+            if (score < bestScore) {
+                best = candidate;
+                bestScore = score;
+            }
+        }
+        return best == null ? nearest : best;
+    }
+
+    private static BlockPos nearestSurfaceCandidate(
+            BlockPos anchor, List<BlockPos> candidates) {
+        return candidates.stream().min(java.util.Comparator
+                .comparingInt((BlockPos position) -> horizontalDistance(anchor, position))
+                .thenComparingInt(position -> Math.abs(position.getY() - anchor.getY()))
+                .thenComparingLong(BlockPos::asLong)).orElseThrow();
+    }
+
+    private void applySurfaceResolution(SurfaceResolution resolution) {
+        target = resolution.target();
+        surfaceStrategy = resolution.strategy();
+        surfaceSampleCount = resolution.sampleCount();
+        surfaceReferenceY = resolution.referenceY();
+    }
+
+    private void markSurfaceResolutionFailed() {
+        targetResolved = false;
+        surfaceStrategy = surfaceFailureReason.equals(
+                "surface_destination_not_supported_in_dimension")
+                ? "unsupported_dimension" : "no_safe_platform";
+        surfaceSampleCount = 0;
+        surfaceReferenceY = 0;
     }
 
     private void prepareRecordedRoute(
@@ -365,8 +541,14 @@ public final class ReturnToPositionAction implements MaidAction {
         if (waypointIndex >= waypoints.size()) {
             if (surfaceHeightPending) {
                 surfaceHeightPending = false;
-                BlockPos resolvedSurface = surfaceTarget(context, target);
-                target = resolvedSurface;
+                Optional<SurfaceResolution> resolution = surfaceTarget(context, target);
+                if (resolution.isEmpty()) {
+                    markSurfaceResolutionFailed();
+                    return fail(context, ActionEndReason.PATH_NOT_FOUND,
+                            surfaceFailureReason);
+                }
+                applySurfaceResolution(resolution.orElseThrow());
+                BlockPos resolvedSurface = target;
                 if (distance(live, resolvedSurface) > stopDistance) {
                     waypoints.add(resolvedSurface);
                     report(context, Stage.PLANNING,
@@ -660,6 +842,13 @@ public final class ReturnToPositionAction implements MaidAction {
         JsonObject detail = new JsonObject();
         detail.addProperty("destination", destination.wireName);
         detail.addProperty("surface_height_pending", surfaceHeightPending);
+        if (destination == Destination.SURFACE) {
+            detail.addProperty("surface_strategy", surfaceStrategy);
+            if (surfaceSampleCount > 0) {
+                detail.addProperty("surface_sample_count", surfaceSampleCount);
+                detail.addProperty("surface_reference_y", surfaceReferenceY);
+            }
+        }
         if (targetResolved) {
             detail.add("target", position(target));
         }
@@ -909,5 +1098,9 @@ public final class ReturnToPositionAction implements MaidAction {
         Stage(String wireName) {
             this.wireName = wireName;
         }
+    }
+
+    private record SurfaceResolution(
+            BlockPos target, String strategy, int sampleCount, int referenceY) {
     }
 }
