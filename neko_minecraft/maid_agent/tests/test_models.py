@@ -110,6 +110,27 @@ class ActionRegistryTests(unittest.TestCase):
                     "return_to_position", {"target": target}
                 )
 
+    def test_normalizes_simple_return_destinations(self):
+        for destination in ("surface", "mine_entry", "player"):
+            with self.subTest(destination=destination):
+                args = self.registry.normalize(
+                    "return_to_position", {"destination": destination}
+                )
+                self.assertEqual(destination, args["destination"])
+                self.assertNotIn("target", args)
+
+        for args in (
+            {"destination": "somewhere"},
+            {
+                "destination": "surface",
+                "target": {"x": 1, "y": 2, "z": 3},
+            },
+        ):
+            with self.subTest(args=args), self.assertRaises(
+                ActionValidationError
+            ):
+                self.registry.normalize("return_to_position", args)
+
     def test_normalizes_return_to_position_operation_and_policy(self):
         args = self.registry.normalize("return_to_position", {
             "target": {"x": 1, "y": 80, "z": 2},

@@ -57,17 +57,17 @@ class MaidActionGuidanceTests(unittest.TestCase):
         )
         for value in (
             "return_to_position",
-            "recorded_tunnels_first",
-            "safe_shortest",
-            "safe_support_and_water_seal",
+            "destination:'surface'|'mine_entry'|'player'",
             "两格高",
-            "稳定支撑",
             "真实消耗",
             "timeout_ms=0",
         ):
             self.assertIn(value, tool_text + _TLM_AI_INSTRUCTIONS)
+        for hidden_engineering_field in (
+            "route_policy", "operation_id", "max_placements"
+        ):
+            self.assertNotIn(hidden_engineering_field, tool_text)
         self.assertIn("不得在身后回填封路", _TLM_AI_INSTRUCTIONS)
-        self.assertIn("不得因为缺少 x/z 拒绝执行", _TLM_AI_INSTRUCTIONS)
         self.assertIn("禁止猜测", _TLM_AI_INSTRUCTIONS)
         self.assertIn("navigate 始终是非破坏性寻路", _TLM_AI_INSTRUCTIONS)
 

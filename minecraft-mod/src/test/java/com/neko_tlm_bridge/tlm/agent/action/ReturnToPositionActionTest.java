@@ -6,6 +6,7 @@ import com.neko_tlm_bridge.tlm.agent.MaidActionResource;
 import org.junit.jupiter.api.Test;
 
 import java.util.Set;
+import java.util.List;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -70,6 +71,26 @@ class ReturnToPositionActionTest {
         half.add("target", halfTarget);
         assertThrows(IllegalArgumentException.class,
                 () -> ReturnToPositionAction.fromArgs(half));
+    }
+
+    @Test
+    void acceptsSimpleSemanticDestinationsAndRejectsAmbiguity() {
+        for (String destination : List.of("surface", "mine_entry", "player")) {
+            JsonObject semantic = new JsonObject();
+            semantic.addProperty("destination", destination);
+            assertEquals(MaidActionKind.RETURN_TO_POSITION,
+                    ReturnToPositionAction.fromArgs(semantic).kind());
+        }
+
+        JsonObject ambiguous = args();
+        ambiguous.addProperty("destination", "surface");
+        assertThrows(IllegalArgumentException.class,
+                () -> ReturnToPositionAction.fromArgs(ambiguous));
+
+        JsonObject unknown = new JsonObject();
+        unknown.addProperty("destination", "somewhere");
+        assertThrows(IllegalArgumentException.class,
+                () -> ReturnToPositionAction.fromArgs(unknown));
     }
 
     @Test

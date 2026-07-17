@@ -39,6 +39,7 @@ class ActionRegistry:
 
     def _return_to_position(self, args: Dict[str, Any]) -> Dict[str, Any]:
         allowed = {
+            "destination",
             "target",
             "speed",
             "stop_distance",
@@ -52,6 +53,21 @@ class ActionRegistry:
             raise ActionValidationError(
                 "return_to_position has unsupported fields: "
                 + ", ".join(unknown)
+            )
+
+        has_destination = args.get("destination") is not None
+        has_target = args.get("target") is not None
+        if has_destination == has_target:
+            raise ActionValidationError(
+                "return_to_position requires exactly one of destination or target"
+            )
+        destination = str(args.get("destination") or "").strip().lower()
+        if has_destination and destination not in {
+            "surface", "mine_entry", "player"
+        }:
+            raise ActionValidationError(
+                "return_to_position.destination must be surface, "
+                "mine_entry or player"
             )
 
         route_policy = str(
@@ -74,9 +90,6 @@ class ActionRegistry:
             )
 
         normalized = {
-            "target": self._return_position(
-                args.get("target"), "return_to_position.target"
-            ),
             "speed": self._number(
                 args.get("speed", 0.7),
                 "return_to_position.speed", 0.4, 1.0,
@@ -92,6 +105,12 @@ class ActionRegistry:
                 "return_to_position.max_placements", 0, 4096,
             ),
         }
+        if has_destination:
+            normalized["destination"] = destination
+        else:
+            normalized["target"] = self._return_position(
+                args.get("target"), "return_to_position.target"
+            )
         operation_id = str(args.get("operation_id") or "").strip()
         if operation_id:
             try:

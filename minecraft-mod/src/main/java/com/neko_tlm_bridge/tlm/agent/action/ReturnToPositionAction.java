@@ -17,8 +17,10 @@ import com.neko_tlm_bridge.tlm.agent.runtime.MaidActionStore;
 import com.neko_tlm_bridge.tlm.agent.world.MiningReturnRoutePlanner;
 import com.neko_tlm_bridge.tlm.agent.world.MiningWorldModelSavedData;
 import net.minecraft.core.BlockPos;
+import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.levelgen.Heightmap;
 import net.neoforged.neoforge.items.IItemHandler;
 
 import java.util.ArrayList;
@@ -46,6 +48,9 @@ public final class ReturnToPositionAction implements MaidAction {
 
     private BlockPos target;
     private final boolean inferHorizontalTarget;
+    private final Destination destination;
+    private boolean targetResolved;
+    private boolean surfaceHeightPending;
     private final double speed;
     private final double stopDistance;
     private final UUID requestedOperationId;
@@ -75,16 +80,18 @@ public final class ReturnToPositionAction implements MaidAction {
                                   UUID operationId, RoutePolicy routePolicy,
                                   PlacementPolicy placementPolicy, int maxPlacements) {
         this(target, false, speed, stopDistance, operationId, routePolicy,
-                placementPolicy, maxPlacements);
+                placementPolicy, maxPlacements, Destination.EXPLICIT);
     }
 
     private ReturnToPositionAction(
             BlockPos target, boolean inferHorizontalTarget,
             double speed, double stopDistance, UUID operationId,
             RoutePolicy routePolicy, PlacementPolicy placementPolicy,
-            int maxPlacements) {
+            int maxPlacements, Destination destination) {
         this.target = Objects.requireNonNull(target, "target").immutable();
         this.inferHorizontalTarget = inferHorizontalTarget;
+        this.destination = Objects.requireNonNull(destination, "destination");
+        this.targetResolved = destination == Destination.EXPLICIT;
         this.speed = clamp(speed, 0.4D, 1.0D);
         this.stopDistance = clamp(stopDistance, 1.0D, 4.0D);
         this.requestedOperationId = operationId;
@@ -98,25 +105,34 @@ public final class ReturnToPositionAction implements MaidAction {
 
     public static ReturnToPositionAction fromArgs(JsonObject args) {
         Objects.requireNonNull(args, "args");
-        Set<String> allowed = Set.of("target", "speed", "stop_distance", "operation_id",
+        Set<String> allowed = Set.of("destination", "target", "speed", "stop_distance", "operation_id",
                 "route_policy", "placement_policy", "max_placements");
         for (String name : args.keySet()) {
             if (!allowed.contains(name)) {
                 throw new IllegalArgumentException("Unsupported return_to_position field: " + name);
             }
         }
-        JsonObject target = requireObject(args, "target");
-        boolean hasX = target.has("x");
-        boolean hasZ = target.has("z");
-        if (hasX != hasZ) {
+        boolean hasDestination = args.has("destination");
+        boolean hasTarget = args.has("target");
+        if (hasDestination == hasTarget) {
+            throw new IllegalArgumentException(
+                    "return_to_position requires exactly one of destination or target");
+        }
+        Destination destination = hasDestination
+                ? Destination.fromWireName(requireString(args, "destination"))
+                : Destination.EXPLICIT;
+        JsonObject target = hasTarget ? requireObject(args, "target") : null;
+        boolean hasX = target != null && target.has("x");
+        boolean hasZ = target != null && target.has("z");
+        if (hasTarget && hasX != hasZ) {
             throw new IllegalArgumentException(
                     "target.x and target.z must either both be present or both be omitted");
         }
-        int y = requireCoordinate(target, "y");
-        BlockPos position = new BlockPos(
-                hasX ? requireCoordinate(target, "x") : 0,
-                y,
-                hasZ ? requireCoordinate(target, "z") : 0);
+        int y = hasTarget ? requireCoordinate(target, "y") : 0;
+        BlockPos position = hasTarget
+                ? new BlockPos(hasX ? requireCoordinate(target, "x") : 0,
+                y, hasZ ? requireCoordinate(target, "z") : 0)
+                : BlockPos.ZERO;
         double speed = optionalDouble(args, "speed", 0.7D);
         double stopDistance = optionalDouble(args, "stop_distance", 1.5D);
         requireRange(speed, "speed", 0.4D, 1.0D);
@@ -134,8 +150,9 @@ public final class ReturnToPositionAction implements MaidAction {
         PlacementPolicy placementPolicy = PlacementPolicy.fromWireName(
                 optionalString(args, "placement_policy", "safe_support_and_water_seal"));
         int maxPlacements = optionalInt(args, "max_placements", 0);
-        return new ReturnToPositionAction(position, !hasX, speed, stopDistance,
-                operationId, routePolicy, placementPolicy, maxPlacements);
+        return new ReturnToPositionAction(position, hasTarget && !hasX,
+                speed, stopDistance, operationId, routePolicy,
+                placementPolicy, maxPlacements, destination);
     }
 
     @Override
@@ -155,7 +172,7 @@ public final class ReturnToPositionAction implements MaidAction {
     @Override
     public void start(MaidActionContext context) {
         started = true;
-        if (inferHorizontalTarget) {
+        if (destination == Destination.EXPLICIT && inferHorizontalTarget) {
             BlockPos live = context.maid().blockPosition();
             target = new BlockPos(live.getX(), target.getY(), live.getZ());
         }
@@ -196,17 +213,16 @@ public final class ReturnToPositionAction implements MaidAction {
     }
 
     private MaidActionTickResult validateAndPrepare(MaidActionContext context) {
-        if (routePolicy == RoutePolicy.RECORDED_TUNNELS_FIRST) {
-            Optional<MiningWorldModelSavedData.OperationSnapshot> snapshot =
-                    requestedOperationId == null
-                            ? MiningWorldModelSavedData.latestByMaidWithRoute(
-                            context.level(), context.maid().getUUID())
-                            : MiningWorldModelSavedData.get(context.level())
-                            .operation(requestedOperationId)
-                            .filter(value -> value.maidId().equals(context.maid().getUUID()))
-                            .filter(value -> value.routeBreadcrumbs().size() >= 2);
-            snapshot.ifPresent(value -> prepareRecordedRoute(
-                    context.maid().blockPosition(), value));
+        Optional<MiningWorldModelSavedData.OperationSnapshot> snapshot =
+                findMiningOperation(context);
+        if (shouldReplayRecordedRoute(context)) {
+            snapshot.filter(value -> value.routeBreadcrumbs().size() >= 2)
+                    .ifPresent(value -> prepareRecordedRoute(
+                            context.maid().blockPosition(), value));
+        }
+        MaidActionTickResult targetFailure = resolveSemanticTarget(context, snapshot);
+        if (targetFailure != null) {
+            return targetFailure;
         }
 
         // A recorded return may legitimately end in a chunk that is not yet
@@ -228,6 +244,89 @@ public final class ReturnToPositionAction implements MaidAction {
         stage = Stage.PLANNING;
         report(context, stage, detail(routeSource));
         return MaidActionTickResult.running();
+    }
+
+    private boolean shouldReplayRecordedRoute(MaidActionContext context) {
+        if (routePolicy != RoutePolicy.RECORDED_TUNNELS_FIRST) {
+            return false;
+        }
+        if (destination != Destination.PLAYER) {
+            return true;
+        }
+        LivingEntity owner = context.maid().getOwner();
+        return owner == null || owner.level() != context.level()
+                || context.maid().distanceTo(owner) > 12.0F;
+    }
+
+    private Optional<MiningWorldModelSavedData.OperationSnapshot> findMiningOperation(
+            MaidActionContext context) {
+        MiningWorldModelSavedData model = MiningWorldModelSavedData.get(context.level());
+        if (requestedOperationId != null) {
+            return model.operation(requestedOperationId)
+                    .filter(value -> value.maidId().equals(context.maid().getUUID()))
+                    .filter(value -> value.originPos() != null);
+        }
+        return model.operations().stream()
+                .filter(value -> value.maidId().equals(context.maid().getUUID()))
+                .filter(value -> value.originPos() != null)
+                .max(java.util.Comparator
+                        .comparingLong(MiningWorldModelSavedData.OperationSnapshot::updatedGameTime)
+                        .thenComparing(value -> value.operationId().toString()));
+    }
+
+    private MaidActionTickResult resolveSemanticTarget(
+            MaidActionContext context,
+            Optional<MiningWorldModelSavedData.OperationSnapshot> snapshot) {
+        if (destination == Destination.EXPLICIT) {
+            targetResolved = true;
+            return null;
+        }
+        if (destination == Destination.PLAYER) {
+            LivingEntity owner = context.maid().getOwner();
+            if (owner == null || owner.level() != context.level()) {
+                return fail(context, ActionEndReason.VALIDATION_FAILED,
+                        "owner_not_available_in_maid_dimension");
+            }
+            target = owner.blockPosition().immutable();
+            targetResolved = true;
+            return null;
+        }
+        if (snapshot.isPresent()) {
+            MiningWorldModelSavedData.OperationSnapshot operation = snapshot.orElseThrow();
+            BlockPos origin = operation.originPos().immutable();
+            if (destination == Destination.SURFACE
+                    && context.level().hasChunkAt(origin)) {
+                target = surfaceTarget(context, origin);
+            } else {
+                target = origin;
+                surfaceHeightPending = destination == Destination.SURFACE;
+            }
+            operationId = operation.operationId();
+            targetResolved = true;
+            return null;
+        }
+        if (destination == Destination.MINE_ENTRY) {
+            return fail(context, ActionEndReason.VALIDATION_FAILED,
+                    "mining_entry_not_recorded");
+        }
+
+        BlockPos live = context.maid().blockPosition();
+        if (!context.level().hasChunkAt(live)) {
+            return fail(context, ActionEndReason.PATH_NOT_FOUND,
+                    "surface_column_not_loaded");
+        }
+        target = surfaceTarget(context, live);
+        targetResolved = true;
+        return null;
+    }
+
+    private static BlockPos surfaceTarget(
+            MaidActionContext context, BlockPos horizontalAnchor) {
+        int surfaceY = context.level().getHeight(
+                Heightmap.Types.MOTION_BLOCKING_NO_LEAVES,
+                horizontalAnchor.getX(), horizontalAnchor.getZ());
+        return new BlockPos(horizontalAnchor.getX(), surfaceY,
+                horizontalAnchor.getZ());
     }
 
     private void prepareRecordedRoute(
@@ -259,6 +358,17 @@ public final class ReturnToPositionAction implements MaidAction {
             waypointIndex++;
         }
         if (waypointIndex >= waypoints.size()) {
+            if (surfaceHeightPending) {
+                surfaceHeightPending = false;
+                BlockPos resolvedSurface = surfaceTarget(context, target);
+                target = resolvedSurface;
+                if (distance(live, resolvedSurface) > stopDistance) {
+                    waypoints.add(resolvedSurface);
+                    report(context, Stage.PLANNING,
+                            detail("surface_height_resolved"));
+                    return MaidActionTickResult.running();
+                }
+            }
             stage = Stage.ARRIVED;
             report(context, stage, detail("return_complete"));
             return MaidActionTickResult.succeeded(result(context, "completed"));
@@ -510,17 +620,27 @@ public final class ReturnToPositionAction implements MaidAction {
         BlockPos live = context == null || context.maid() == null
                 ? BlockPos.ZERO : context.maid().blockPosition();
         result.add("real_end", position(live));
-        result.addProperty("distance_remaining", distance(live, target));
-        result.addProperty("arrived", distance(live, target) <= stopDistance);
+        if (targetResolved) {
+            result.addProperty("distance_remaining", distance(live, target));
+            result.addProperty("arrived", distance(live, target) <= stopDistance);
+        } else {
+            result.addProperty("arrived", false);
+        }
         result.addProperty("player_route_preserved", true);
         return result;
     }
 
     private JsonObject detail(String message) {
         JsonObject detail = new JsonObject();
-        detail.add("target", position(target));
+        detail.addProperty("destination", destination.wireName);
+        detail.addProperty("surface_height_pending", surfaceHeightPending);
+        if (targetResolved) {
+            detail.add("target", position(target));
+        }
         detail.addProperty("target_horizontal_source",
-                inferHorizontalTarget
+                destination != Destination.EXPLICIT
+                        ? destination.wireName
+                        : inferHorizontalTarget
                         ? (operationId == null ? "maid_current_position" : "mining_entry")
                         : "explicit");
         if (operationId != null) {
@@ -692,6 +812,31 @@ public final class ReturnToPositionAction implements MaidAction {
             }
             throw new IllegalArgumentException(
                     "placement_policy must be disabled or safe_support_and_water_seal");
+        }
+    }
+
+    enum Destination {
+        EXPLICIT("explicit"),
+        SURFACE("surface"),
+        MINE_ENTRY("mine_entry"),
+        PLAYER("player");
+
+        private final String wireName;
+
+        Destination(String wireName) {
+            this.wireName = wireName;
+        }
+
+        static Destination fromWireName(String value) {
+            for (Destination destination : values()) {
+                if (destination != EXPLICIT
+                        && destination.wireName.equals(
+                        value.toLowerCase(Locale.ROOT))) {
+                    return destination;
+                }
+            }
+            throw new IllegalArgumentException(
+                    "destination must be surface, mine_entry or player");
         }
     }
 
