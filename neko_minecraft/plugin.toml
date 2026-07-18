@@ -12,7 +12,7 @@ keywords = [
     "follow", "sit", "attack", "equip", "skill", "command", "task", "schedule",
     "maid", "farm", "idle", "feed", "shear", "torch", "creeper", "zombie", "skeleton"
 ]
-version = "1.0.5"
+version = "1.0.6"
 entry = "plugins.neko_minecraft:NekoMinecraftPlugin"
 
 [plugin.author]

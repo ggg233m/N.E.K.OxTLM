@@ -1,5 +1,67 @@
 # 更新日志
 
+## v1.0.6 (2026-07-18)
+
+### 新功能
+
+- **女仆自主行动系统**：新增完整的 Agent 运行时，让女仆可在 Java 侧自主执行多步骤行动，并由 LLM 通过工具调度。
+  - 新增 `MaidAction` 契约与 `MaidActionKind` 枚举，定义 navigate / harvest_blocks / excavate_segment / autonomous_mining / return_to_position / attack_target 等行动类型。
+  - 新增 `MaidActionStore` 持久化运行时，统一管理行动生命周期、状态快照与决策投递。
+  - 新增冲突安全的 `HandLease` / `MaidBodyLease` 租约 API，避免多个行动抢占女仆控制权。
+  - 新增 `NekoAgentBehavior` 与 `MaidActionFactory`，将行动接入 TLM 模组主循环。
+  - 新增 Python 侧 `maid_agent/service.py`，对接 WebSocket 启动、取消、查询、列举行动。
+  - 新增 LLM 工具：`mc_start_maid_action`、`mc_cancel_maid_action`、`mc_get_maid_action_status`、`mc_list_active_maid_actions`。
+  - 新增客户端紧急停止按键与 `EmergencyStopMaidActionsPayload`，玩家可一键中断所有行动。
+  - 新增行动确认优先于事件上报的顺序约定，避免 LLM 误判行动未启动。
+- **自主挖矿系统**：新增持久化自主挖矿行动 `AutonomousMiningAction`，支持矿脉追踪、安全开采与受阻反馈。
+  - 新增 `AutonomousMiningState` 状态机：SCAN_NEARBY → HARVEST_VEIN → VERIFY_COUNT → EXCAVATE_SEGMENT → NEXT_BRANCH → COMPLETED / BLOCKED / CANCELLED，并新增 WAITING_FOR_DECISION 用于等待 LLM 决策。
+  - 新增 `MaidVeinTracker` 矿脉追踪器，使用 26 连通 BFS 识别连通矿脉，锁定当前矿脉直至完成。
+  - 新增 `MiningWorldModelSavedData` 持久化挖矿世界模型，支持跨会话恢复。
+  - 新增 `AutonomousMiningRecovery` 受阻重启对账逻辑，避免重复启动与通知循环。
+  - 新增 `MiningPlan` 与 `MiningPlanner` 成本规划器，按距离与风险生成开采计划。
+  - 新增 `MaidProgressiveBlockBreaker` 渐进式破块器，支持护甲校验与水/岩浆防护。
+  - 新增 `ExcavateSegmentAction` 与 `HarvestBlocksAction`，分别处理无矿挖掘与按 selector 采集。
+  - 新增 Python 侧 `mine_ore` 与 `gather_blocks` 技能，含检查点（checkpoint）原子写入与重启对账。
+  - 新增挖矿 HUD 叠加层（`MiningHudOverlay` / `MiningHudClient`），仅在挖矿相关行动时显示，0.5s 刷新。
+  - 新增真实累计资源统计，向 LLM 汇报实际开采量而非估算值。
+- **地形感知导航与寻路**：新增 `MaidTerrainNavigator` 与配套寻路组件，支持复杂地形下的女仆移动。
+  - 新增 `MaidTerrainSearch`、`MaidTerrainPath`、`MaidTerrainStep`、`MaidTerrainNodeEvaluator` 地形寻路核心。
+  - 新增 `MaidTerrainSearch.FailureReason` 枚举区分 `OPEN_EXHAUSTED` 与 `EXPANSION_LIMIT`。
+  - 新增 `NavigateAction` 与 `ReturnToPositionAction`，后者实现分层上升搜索以应对深层地下返回。
+  - 新增 `MiningReturnRoutePlanner` 挖矿返回路径规划，生成 8 格高目标环并按距离排序。
+  - 新增 `MaidTerrainBuilder` 与 `MaidTerrainInteractionSafety`，支持安全搭桥、填坑与水/岩浆封堵。
+  - 新增安全隧道返回行动（safe tunnel return action），在地表返回失败时改用隧道方案。
+- **女仆活动编排**：新增 `maid_activity.py` 统一管理女仆当前活动状态，避免行动冲突。
+  - 新增 4 个 LLM 工具：`mc_get_maid_activity`、`mc_get_maid_capabilities`、`mc_set_maid_activity`、`mc_stop_maid_activity`。
+  - 支持三种切换策略：`cancel_then_switch`、`after_current`、`reject_if_busy`。
+  - 异步等待控制器进入终态（`_wait_for_controllers_terminal`），并支持 `after_current` 监视器。
+- **路径调试同步**：新增 `MaidPathDebugService` 与 `MaidPathDebugClient`，在客户端可视化女仆寻路节点，便于调试。
+- **配置项扩展**：新增女仆 Agent 与路径调试相关配置开关。
+
+### 优化
+
+- **行动执行平稳性**：优化直角转弯与平地寻路的平滑度，避免女仆抖动；行动确认消息先于事件上报。
+- **返回路径搜索**：简化语义化返回目标，允许仅含高度差的目标，分层处理深层地下的地表返回搜索，避免超出搜索预算。
+- **挖矿策略**：优先利用自然矿道，仅在必要时搭桥；部分背包格位计入容量评估，避免提前判定背包已满。
+- **地形交互安全**：使用本地 owner proxy 进行地形方块放置；遇到拒绝放置时自动绕行重路由。
+- **事件上报范围**：将陪伴上报限定到玩家本人，忽略女仆自身的建造代理事件，减少噪音。
+- **文档**：在 AI 指令中明确区分 agent action 与 maid task，避免 LLM 混淆两类概念。
+
+### 修复
+
+- **背包溢出**：修复背包即将满时仍继续挖矿导致溢出的问题，新增 `BACKPACK_FULL` 受阻原因并触发 LLM 决策。
+- **矿脉追踪**：修复矿脉追踪初始 BFS 开放条件，确保已采集成员与桥接成员均被正确处理；修复两节点挖矿抖动与无效挖矿姿态恢复。
+- **挖矿进度**：修复挖矿进度与矿脉追踪的健壮性问题，确保已承诺矿脉被完整采完再切换。
+- **寻路稳定性**：修复平滑路径同步、平地寻路抖动、多步探查导航抖动、全高度地形步进与跟随已校验路径节点的问题。
+- **水/岩浆防护**：修复误报水封失败与占用方格封水的问题，封水前先重定位至安全位置。
+- **下落方块**：修复下落方块挖掘稳定性问题，新增受控下降恢复与受阻反馈。
+- **探查方向**：修复探查方向扫描问题，新增备选方向扫描；修复缺失矿石时的有界探查重试。
+- **返回路径**：修复高度差目标校验、地表返回方向指引、被拒放置后的绕行重路由与深层返回搜索分层。
+- **行动对账**：修复女仆行动对账健壮性、行动确认先于事件上报的顺序、组合背包物品栏支持与命名采集请求的 selector 匹配。
+- **调试同步**：修复女仆调试路径的网络同步安全问题，避免同步过程影响主线程。
+
+***
+
 ## v1.0.5 (2026-07-10)
 
 ### 新功能
