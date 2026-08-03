@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-from collections import defaultdict
 import time
 import uuid
+from collections import defaultdict
 from typing import Any, Dict, Mapping, Optional
 
 from .base import (
@@ -15,11 +15,9 @@ from .base import (
     SkillDefinition,
     SkillRun,
     StartAction,
-    TERMINAL_SKILL_STATUSES,
     action_fingerprint,
 )
 from .checkpoint import SkillCheckpointStore
-
 
 ACTION_TERMINAL_STATUSES = frozenset({
     "SUCCEEDED",

@@ -1,11 +1,14 @@
+import importlib
 import unittest
 
-from _bootstrap import bootstrap
+from ._bootstrap import bootstrap
 
 bootstrap()
 
-from neko_minecraft.maid_agent.feedback import ActionFeedbackHandler
-from neko_minecraft.maid_agent.models import ActionRecord
+ActionFeedbackHandler = importlib.import_module(
+    "neko_tlm.maid_agent.feedback"
+).ActionFeedbackHandler
+ActionRecord = importlib.import_module("neko_tlm.maid_agent.models").ActionRecord
 
 
 class ActionFeedbackTruthTests(unittest.TestCase):

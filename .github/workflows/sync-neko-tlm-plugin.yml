@@ -1,0 +1,42 @@
+name: Sync N.E.K.O plugin repository
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - "neko_tlm/**"
+      - ".github/workflows/sync-neko-tlm-plugin.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-neko-tlm-plugin
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.NEKO_TLM_REPO_TOKEN }}
+      TARGET_REPOSITORY: ${{ github.repository_owner }}/n.e.k.o_plugin_neko_tlm
+    steps:
+      - name: Check out the monorepo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Push the plugin subtree
+        shell: bash
+        run: |
+          if [[ -z "${GH_TOKEN}" ]]; then
+            echo "Repository secret NEKO_TLM_REPO_TOKEN is required." >&2
+            exit 1
+          fi
+
+          gh auth setup-git
+          git remote add plugin-target "https://github.com/${TARGET_REPOSITORY}.git"
+          split_commit="$(git subtree split --prefix=neko_tlm)"
+          git push plugin-target "${split_commit}:refs/heads/main" --force

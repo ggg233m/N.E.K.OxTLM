@@ -5,9 +5,9 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from pathlib import Path
 import time
 import uuid
+from pathlib import Path
 from typing import Iterable
 
 from .base import SkillRun
@@ -102,7 +102,16 @@ class SkillCheckpointStore:
                 handle.write("\n")
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.replace(temporary, destination)
+            for attempt in range(5):
+                try:
+                    os.replace(temporary, destination)
+                    break
+                except PermissionError:
+                    if attempt == 4:
+                        raise
+                    # Windows may briefly retain a sharing lock after a reader
+                    # closes the previous checkpoint. Retry the atomic replace.
+                    time.sleep(0.01 * (attempt + 1))
         finally:
             temporary.unlink(missing_ok=True)
 

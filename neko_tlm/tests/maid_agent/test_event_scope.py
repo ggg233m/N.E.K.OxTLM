@@ -1,10 +1,13 @@
+import importlib
 import unittest
 
-from _bootstrap import bootstrap
+from ._bootstrap import bootstrap
 
 bootstrap()
 
-from neko_minecraft.events import event_matches_assigned_maid, format_event
+_events = importlib.import_module("neko_tlm.events")
+event_matches_assigned_maid = _events.event_matches_assigned_maid
+format_event = _events.format_event
 
 
 class EventScopeTests(unittest.TestCase):

@@ -4,9 +4,8 @@ import uuid
 from typing import Any, Dict, Iterable, Optional
 
 from .feedback import ActionFeedbackHandler
-from .models import ActionRecord, ActionTracker, TERMINAL_STATUSES
+from .models import TERMINAL_STATUSES, ActionRecord, ActionTracker
 from .registry import ActionRegistry, ActionValidationError
-
 
 ACTION_EVENT_TYPES = frozenset({"maid_action_progress", "maid_action_finished"})
 

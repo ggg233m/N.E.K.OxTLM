@@ -2,12 +2,12 @@ import asyncio
 import importlib
 import unittest
 
-from _bootstrap import bootstrap
+from ._bootstrap import bootstrap
 
 bootstrap()
 
 MaidActivityDirector = importlib.import_module(
-    "neko_minecraft.maid_activity"
+    "neko_tlm.maid_activity"
 ).MaidActivityDirector
 
 

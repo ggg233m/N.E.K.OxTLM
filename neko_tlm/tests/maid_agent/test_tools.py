@@ -1,10 +1,11 @@
+import importlib
 import unittest
 
-from _bootstrap import bootstrap_sdk
+from ._bootstrap import bootstrap_sdk
 
 bootstrap_sdk()
 
-from neko_minecraft import tools
+tools = importlib.import_module("neko_tlm.tools")
 
 
 class FakePlugin:

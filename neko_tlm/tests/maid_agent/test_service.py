@@ -1,10 +1,13 @@
+import importlib
 import unittest
 
-from _bootstrap import bootstrap
+from ._bootstrap import bootstrap
 
 bootstrap()
 
-from neko_minecraft.maid_agent.service import MaidActionService
+MaidActionService = importlib.import_module(
+    "neko_tlm.maid_agent.service"
+).MaidActionService
 
 
 class FakePlugin:

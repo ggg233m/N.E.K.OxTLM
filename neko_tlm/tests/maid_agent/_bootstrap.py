@@ -1,18 +1,17 @@
 """Load plugin modules without executing the N.E.K.O runtime entrypoint."""
 
-from pathlib import Path
 import sys
 import types
+from pathlib import Path
 
-
-ROOT = Path(__file__).resolve().parents[3]
+PLUGIN_ROOT = Path(__file__).resolve().parents[2]
 
 
 def bootstrap():
-    if "neko_minecraft" not in sys.modules:
-        package = types.ModuleType("neko_minecraft")
-        package.__path__ = [str(ROOT / "neko_minecraft")]
-        sys.modules["neko_minecraft"] = package
+    if "neko_tlm" not in sys.modules:
+        package = types.ModuleType("neko_tlm")
+        package.__path__ = [str(PLUGIN_ROOT)]
+        sys.modules["neko_tlm"] = package
 
 
 def bootstrap_sdk():

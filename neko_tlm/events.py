@@ -83,7 +83,6 @@ def _describe_board(event_data):
 def _gomoku_threats(board):
     """检测五子棋中是否有连四/活三等威胁"""
     # 简化检测：检查是否有3个或4个同色连续棋子
-    lines = []
     grid = []
     for x in range(15):
         row = []
@@ -210,7 +209,6 @@ def format_event(event_data, assigned_maid_id):
     棋局事件使用 {"chess_event": True, ...} 标记，由调用方特殊处理。
     """
     event_type = event_data.get("event_type", "")
-    maid_id = event_data.get("maid_id", "")
     maid_name = event_data.get("maid_name", "")
 
     if not event_matches_assigned_maid(event_data, assigned_maid_id):

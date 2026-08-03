@@ -1,18 +1,19 @@
+import importlib
 import unittest
 
-from _bootstrap import bootstrap
+from ._bootstrap import bootstrap
 
 bootstrap()
 
-from neko_minecraft.instructions import _TLM_AI_INSTRUCTIONS
-from neko_minecraft.tool_defs import (
-    MC_CANCEL_SKILL,
-    MC_GET_SKILL_STATUS,
-    MC_LIST_SKILLS,
-    MC_MOVE_MAID_TO,
-    MC_START_MAID_ACTION,
-    MC_START_SKILL,
-)
+_instructions = importlib.import_module("neko_tlm.instructions")
+_tool_defs = importlib.import_module("neko_tlm.tool_defs")
+_TLM_AI_INSTRUCTIONS = _instructions._TLM_AI_INSTRUCTIONS
+MC_CANCEL_SKILL = _tool_defs.MC_CANCEL_SKILL
+MC_GET_SKILL_STATUS = _tool_defs.MC_GET_SKILL_STATUS
+MC_LIST_SKILLS = _tool_defs.MC_LIST_SKILLS
+MC_MOVE_MAID_TO = _tool_defs.MC_MOVE_MAID_TO
+MC_START_MAID_ACTION = _tool_defs.MC_START_MAID_ACTION
+MC_START_SKILL = _tool_defs.MC_START_SKILL
 
 
 class MaidActionGuidanceTests(unittest.TestCase):

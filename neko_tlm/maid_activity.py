@@ -8,18 +8,17 @@ remains authoritative for checkpointed skills.
 from __future__ import annotations
 
 import asyncio
-from collections import OrderedDict, defaultdict
 import hashlib
 import inspect
 import json
 import time
 import uuid
+from collections import OrderedDict, defaultdict
 from typing import Any, Awaitable, Callable, Dict, Mapping, Optional
 
 from . import task_resolver
 from .maid_agent.models import TERMINAL_STATUSES as ACTION_TERMINAL_STATUSES
 from .maid_agent.skills.base import TERMINAL_SKILL_STATUSES
-
 
 SWITCH_POLICIES = frozenset({
     "cancel_then_switch",

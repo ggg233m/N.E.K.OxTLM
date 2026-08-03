@@ -5,12 +5,15 @@
 !使用教程.md
 !minecraft-mod/
 !minecraft-mod/**
-!neko_minecraft/
-!neko_minecraft/**
+!neko_tlm/
+!neko_tlm/**
+!.github/
+!.github/workflows/
+!.github/workflows/sync-neko-tlm-plugin.yml
 
 # Python runtime/test bytecode is local build output.
-neko_minecraft/**/__pycache__/
-neko_minecraft/**/*.py[cod]
+neko_tlm/**/__pycache__/
+neko_tlm/**/*.py[cod]
 
 minecraft-mod/.gradle/
 minecraft-mod/build/

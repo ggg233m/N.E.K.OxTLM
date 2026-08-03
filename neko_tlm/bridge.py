@@ -9,7 +9,6 @@ import time
 import websockets
 from websockets.exceptions import ConnectionClosed, InvalidMessage
 
-
 _DEFAULT_RECV_LOG_LIMIT = 300
 _MAID_ACTION_FINISHED_LOG_LIMIT = 4096
 

@@ -1,11 +1,16 @@
+import importlib
 import unittest
 
-from _bootstrap import bootstrap
+from ._bootstrap import bootstrap
 
 bootstrap()
 
-from neko_minecraft.maid_agent.models import ActionTracker
-from neko_minecraft.maid_agent.registry import ActionRegistry, ActionValidationError
+ActionTracker = importlib.import_module(
+    "neko_tlm.maid_agent.models"
+).ActionTracker
+_registry = importlib.import_module("neko_tlm.maid_agent.registry")
+ActionRegistry = _registry.ActionRegistry
+ActionValidationError = _registry.ActionValidationError
 
 
 class ActionTrackerTests(unittest.TestCase):

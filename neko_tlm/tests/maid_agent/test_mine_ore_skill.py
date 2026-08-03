@@ -1,11 +1,18 @@
+import importlib
 import unittest
 
-from _bootstrap import bootstrap
+from ._bootstrap import bootstrap
 
 bootstrap()
 
-from neko_minecraft.maid_agent.skills.base import Blocked, Complete, SkillRun, StartAction
-from neko_minecraft.maid_agent.skills.mine_ore import MineOreSkill
+_base = importlib.import_module("neko_tlm.maid_agent.skills.base")
+Blocked = _base.Blocked
+Complete = _base.Complete
+SkillRun = _base.SkillRun
+StartAction = _base.StartAction
+MineOreSkill = importlib.import_module(
+    "neko_tlm.maid_agent.skills.mine_ore"
+).MineOreSkill
 
 
 def run_for(args=None, *, execution_mode="legacy"):

@@ -1,16 +1,16 @@
+import importlib
 import unittest
 
-from _bootstrap import bootstrap_sdk
+from ._bootstrap import bootstrap_sdk
 
 bootstrap_sdk()
 
-from neko_minecraft import tools
-from neko_minecraft.tool_defs import (
-    MC_CANCEL_SKILL,
-    MC_GET_SKILL_STATUS,
-    MC_LIST_SKILLS,
-    MC_START_SKILL,
-)
+tools = importlib.import_module("neko_tlm.tools")
+_tool_defs = importlib.import_module("neko_tlm.tool_defs")
+MC_CANCEL_SKILL = _tool_defs.MC_CANCEL_SKILL
+MC_GET_SKILL_STATUS = _tool_defs.MC_GET_SKILL_STATUS
+MC_LIST_SKILLS = _tool_defs.MC_LIST_SKILLS
+MC_START_SKILL = _tool_defs.MC_START_SKILL
 
 
 class FakeRunner:

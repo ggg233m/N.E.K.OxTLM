@@ -1,41 +1,63 @@
 """N.E.K.O Minecraft 插件主模块 — 插件生命周期、消息分发、LLM 工具声明与 UI 入口"""
 
-from plugin.sdk.plugin import (
-    NekoPluginBase, neko_plugin, lifecycle, llm_tool,
-    plugin_entry, ui, tr,
-    Ok, Err, SdkError,
-)
 import asyncio
 import sys
 import uuid
 from urllib.parse import urlsplit, urlunsplit
 
-from .instructions import _TLM_AI_INSTRUCTIONS
-from .bridge import WSBridge
+from plugin.sdk.plugin import (
+    Err,
+    NekoPluginBase,
+    Ok,
+    lifecycle,
+    llm_tool,
+    neko_plugin,
+    plugin_entry,
+    tr,
+    ui,
+)
+
 from . import config as _config
+from . import diagnostics as _diagnostics
 from . import events as _events
 from . import plan as _plan
-from . import diagnostics as _diagnostics
+from . import tools as _tools
 from .awareness import AwarenessManager
+from .bridge import WSBridge
+from .instructions import _TLM_AI_INSTRUCTIONS
+from .maid_activity import MaidActivityDirector
 from .maid_agent import MaidActionService
 from .maid_agent.skill_feedback import SkillFeedbackHandler
 from .maid_agent.skills import SkillRunner
 from .maid_agent.skills.gather_blocks import GatherBlocksSkill
 from .maid_agent.skills.mine_ore import MineOreSkill
-from .maid_activity import MaidActivityDirector
-from . import tools as _tools
-from .playmate import PlaymateContextManager, MinecraftPushRouter
+from .playmate import MinecraftPushRouter, PlaymateContextManager
 from .playmate.debug_log import PlaymateDebugLogger
-
 from .tool_defs import (
-    MC_MAID_STATUS, MC_SWITCH_FOLLOW, MC_SWITCH_SIT,
-    MC_SWITCH_TASK, MC_SWITCH_SCHEDULE, MC_EQUIP_ITEM,
-    MC_SEND_CHAT, MC_GAME_CONTEXT, MC_MOVE_MAID_TO, MC_USE_SKILL, MC_EXECUTE_COMMAND,
-    MC_SET_PLAN, MC_START_MAID_ACTION, MC_CANCEL_MAID_ACTION,
-    MC_GET_MAID_ACTION_STATUS, MC_LIST_ACTIVE_MAID_ACTIONS,
-    MC_START_SKILL, MC_CANCEL_SKILL, MC_GET_SKILL_STATUS, MC_LIST_SKILLS,
-    MC_GET_MAID_ACTIVITY, MC_GET_MAID_CAPABILITIES,
-    MC_SET_MAID_ACTIVITY, MC_STOP_MAID_ACTIVITY,
+    MC_CANCEL_MAID_ACTION,
+    MC_CANCEL_SKILL,
+    MC_EQUIP_ITEM,
+    MC_EXECUTE_COMMAND,
+    MC_GAME_CONTEXT,
+    MC_GET_MAID_ACTION_STATUS,
+    MC_GET_MAID_ACTIVITY,
+    MC_GET_MAID_CAPABILITIES,
+    MC_GET_SKILL_STATUS,
+    MC_LIST_ACTIVE_MAID_ACTIONS,
+    MC_LIST_SKILLS,
+    MC_MAID_STATUS,
+    MC_MOVE_MAID_TO,
+    MC_SEND_CHAT,
+    MC_SET_MAID_ACTIVITY,
+    MC_SET_PLAN,
+    MC_START_MAID_ACTION,
+    MC_START_SKILL,
+    MC_STOP_MAID_ACTIVITY,
+    MC_SWITCH_FOLLOW,
+    MC_SWITCH_SCHEDULE,
+    MC_SWITCH_SIT,
+    MC_SWITCH_TASK,
+    MC_USE_SKILL,
 )
 
 # respond 事件的 coalesce_key 映射：相同 key 的新推送覆盖旧的未消费推送

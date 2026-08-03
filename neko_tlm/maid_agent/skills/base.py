@@ -6,12 +6,11 @@ definitions can therefore be unit-tested without importing the plugin entrypoint
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import hashlib
 import json
 import time
+from dataclasses import dataclass, field
 from typing import Any, Dict, Mapping, Optional, Protocol, Sequence, Union
-
 
 SCHEMA_VERSION = 1
 

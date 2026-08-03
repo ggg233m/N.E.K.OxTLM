@@ -2,7 +2,6 @@
 
 from . import plan as _plan
 
-
 COMPANION_MODE_PRESETS = {
     "quiet": {
         "playmate_quiet_stable_seconds": 240,

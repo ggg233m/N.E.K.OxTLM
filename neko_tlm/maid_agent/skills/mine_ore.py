@@ -6,7 +6,6 @@ from typing import Any, Mapping, Optional
 
 from .base import Blocked, Complete, Fail, SkillRun, StartAction
 
-
 _DIRECTIONS = ("north", "east", "south", "west")
 _LEFT = {"north": "west", "west": "south", "south": "east", "east": "north"}
 _RIGHT = {value: key for key, value in _LEFT.items()}

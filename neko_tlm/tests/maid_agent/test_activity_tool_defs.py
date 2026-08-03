@@ -1,15 +1,15 @@
+import importlib
 import unittest
 
-from _bootstrap import bootstrap_sdk
+from ._bootstrap import bootstrap_sdk
 
 bootstrap_sdk()
 
-from neko_minecraft.tool_defs import (
-    MC_GET_MAID_ACTIVITY,
-    MC_GET_MAID_CAPABILITIES,
-    MC_SET_MAID_ACTIVITY,
-    MC_STOP_MAID_ACTIVITY,
-)
+_tool_defs = importlib.import_module("neko_tlm.tool_defs")
+MC_GET_MAID_ACTIVITY = _tool_defs.MC_GET_MAID_ACTIVITY
+MC_GET_MAID_CAPABILITIES = _tool_defs.MC_GET_MAID_CAPABILITIES
+MC_SET_MAID_ACTIVITY = _tool_defs.MC_SET_MAID_ACTIVITY
+MC_STOP_MAID_ACTIVITY = _tool_defs.MC_STOP_MAID_ACTIVITY
 
 
 class ActivityToolDefinitionTests(unittest.TestCase):

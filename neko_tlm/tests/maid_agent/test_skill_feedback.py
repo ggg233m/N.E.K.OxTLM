@@ -1,10 +1,13 @@
+import importlib
 import unittest
 
-from _bootstrap import bootstrap
+from ._bootstrap import bootstrap
 
 bootstrap()
 
-from neko_minecraft.maid_agent.skill_feedback import SkillFeedbackHandler
+SkillFeedbackHandler = importlib.import_module(
+    "neko_tlm.maid_agent.skill_feedback"
+).SkillFeedbackHandler
 
 
 class FakePlugin:

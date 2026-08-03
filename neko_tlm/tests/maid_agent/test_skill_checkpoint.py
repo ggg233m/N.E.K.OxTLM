@@ -1,19 +1,21 @@
+import importlib
 import json
-from pathlib import Path
 import tempfile
 import time
 import unittest
 import uuid
+from pathlib import Path
 
-from _bootstrap import bootstrap
+from ._bootstrap import bootstrap
 
 bootstrap()
 
-from neko_minecraft.maid_agent.skills.base import SkillRun
-from neko_minecraft.maid_agent.skills.checkpoint import (
-    SkillCheckpointStore,
-    StaleCheckpointError,
-)
+SkillRun = importlib.import_module(
+    "neko_tlm.maid_agent.skills.base"
+).SkillRun
+_checkpoint = importlib.import_module("neko_tlm.maid_agent.skills.checkpoint")
+SkillCheckpointStore = _checkpoint.SkillCheckpointStore
+StaleCheckpointError = _checkpoint.StaleCheckpointError
 
 
 class SkillCheckpointTests(unittest.IsolatedAsyncioTestCase):

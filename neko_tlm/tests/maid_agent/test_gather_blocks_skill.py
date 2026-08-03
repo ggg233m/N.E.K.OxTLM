@@ -1,11 +1,18 @@
+import importlib
 import unittest
 
-from _bootstrap import bootstrap
+from ._bootstrap import bootstrap
 
 bootstrap()
 
-from neko_minecraft.maid_agent.skills.base import Blocked, Complete, SkillRun, StartAction
-from neko_minecraft.maid_agent.skills.gather_blocks import GatherBlocksSkill
+_base = importlib.import_module("neko_tlm.maid_agent.skills.base")
+Blocked = _base.Blocked
+Complete = _base.Complete
+SkillRun = _base.SkillRun
+StartAction = _base.StartAction
+GatherBlocksSkill = importlib.import_module(
+    "neko_tlm.maid_agent.skills.gather_blocks"
+).GatherBlocksSkill
 
 
 def make_run(target_count=64):

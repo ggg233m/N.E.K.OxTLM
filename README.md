@@ -281,7 +281,7 @@ Python 侧插件按配置的 `awareness_interval` 轮询游戏状态（通过 `a
 
 ### N.E.K.O 插件侧配置
 
-以下配置位于 `neko_minecraft/plugin.toml` 的 `[minecraft_bridge]` 段：
+以下配置位于 `neko_tlm/plugin.toml` 的 `[minecraft_bridge]` 段：
 
 #### 连接配置
 
@@ -377,7 +377,7 @@ minecraft-mod/src/main/java/com/neko_tlm_bridge/
 ### N.E.K.O 插件端（Python）
 
 ```
-neko_minecraft/
+neko_tlm/               # 酒狐插件（plugin_id: neko_tlm）
 ├── __init__.py          # 插件主类：生命周期、消息分发、@llm_tool 声明、UI
 ├── instructions.py      # AI 指令模板（注入到 LLM 上下文的系统提示词）
 ├── task_resolver.py     # 任务名解析与模糊匹配（中文同义词 → TLM 任务 ID）
@@ -414,6 +414,16 @@ neko_minecraft/
 ```
 
 构建产物位于 `build/libs/` 目录下。
+
+## 插件仓库同步
+
+`master` 分支中 `neko_tlm/` 的变更会由
+`.github/workflows/sync-neko-tlm-plugin.yml` 单向同步到独立仓库
+`n.e.k.o_plugin_neko_tlm` 的 `main` 分支。主仓需要配置具有目标仓库
+`Contents: Read and write` 权限的 Repository Secret：`NEKO_TLM_REPO_TOKEN`。
+
+发布 tag 不会自动同步。市场审核通过后，请在独立插件仓库的对应提交上创建
+与 `plugin.toml` 版本一致的 `v*` tag。
 
 ## 许可证
 

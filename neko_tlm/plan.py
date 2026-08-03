@@ -7,7 +7,6 @@
 import re
 import time
 
-
 MAX_TITLE_LENGTH = 80
 MAX_STEP_LENGTH = 120
 MAX_STEPS = 12

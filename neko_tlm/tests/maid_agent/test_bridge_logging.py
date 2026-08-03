@@ -1,8 +1,9 @@
-import unittest
+import importlib
 import sys
 import types
+import unittest
 
-from _bootstrap import bootstrap
+from ._bootstrap import bootstrap
 
 bootstrap()
 
@@ -18,11 +19,10 @@ if "websockets" not in sys.modules:
     sys.modules["websockets"] = websockets
     sys.modules["websockets.exceptions"] = exceptions
 
-from neko_minecraft.bridge import (
-    _DEFAULT_RECV_LOG_LIMIT,
-    _MAID_ACTION_FINISHED_LOG_LIMIT,
-    _received_log_preview,
-)
+_bridge = importlib.import_module("neko_tlm.bridge")
+_DEFAULT_RECV_LOG_LIMIT = _bridge._DEFAULT_RECV_LOG_LIMIT
+_MAID_ACTION_FINISHED_LOG_LIMIT = _bridge._MAID_ACTION_FINISHED_LOG_LIMIT
+_received_log_preview = _bridge._received_log_preview
 
 
 class BridgeLoggingTests(unittest.TestCase):

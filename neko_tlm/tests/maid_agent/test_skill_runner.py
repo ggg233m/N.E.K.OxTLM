@@ -1,26 +1,36 @@
 import asyncio
+import importlib
 import json
-from pathlib import Path
 import tempfile
 import unittest
 import uuid
+from pathlib import Path
 
-from _bootstrap import bootstrap
+from ._bootstrap import bootstrap
 
 bootstrap()
 
-from neko_minecraft.maid_agent.skills.base import (
-    action_fingerprint,
-    Blocked,
-    Complete,
-    SkillRun,
-    StartAction,
-)
-from neko_minecraft.maid_agent.skills.checkpoint import SkillCheckpointStore
-from neko_minecraft.maid_agent.skills.mine_ore import MineOreSkill
-from neko_minecraft.maid_agent.skills.runner import SkillRunner
-from neko_minecraft.maid_agent.skill_feedback import SkillFeedbackHandler
-from neko_minecraft.maid_agent.service import MaidActionService
+MaidActionService = importlib.import_module(
+    "neko_tlm.maid_agent.service"
+).MaidActionService
+SkillFeedbackHandler = importlib.import_module(
+    "neko_tlm.maid_agent.skill_feedback"
+).SkillFeedbackHandler
+_base = importlib.import_module("neko_tlm.maid_agent.skills.base")
+Blocked = _base.Blocked
+Complete = _base.Complete
+SkillRun = _base.SkillRun
+StartAction = _base.StartAction
+action_fingerprint = _base.action_fingerprint
+SkillCheckpointStore = importlib.import_module(
+    "neko_tlm.maid_agent.skills.checkpoint"
+).SkillCheckpointStore
+MineOreSkill = importlib.import_module(
+    "neko_tlm.maid_agent.skills.mine_ore"
+).MineOreSkill
+SkillRunner = importlib.import_module(
+    "neko_tlm.maid_agent.skills.runner"
+).SkillRunner
 
 
 class FakePlugin:

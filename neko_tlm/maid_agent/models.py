@@ -1,9 +1,8 @@
 """In-memory action records with generation and sequence ordering guards."""
 
-from dataclasses import dataclass, field
 import time
+from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, Optional, Tuple
-
 
 ACTIVE_STATUSES = frozenset({
     "PENDING",

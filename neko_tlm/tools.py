@@ -2,12 +2,11 @@
 
 import uuid
 
-from plugin.sdk.plugin import Ok, Err
+from plugin.sdk.plugin import Err, Ok
 
-from . import task_resolver
 from . import plan as _plan
+from . import task_resolver
 from .maid_agent import ActionValidationError, MaidActionService
-
 
 _ITEM_ALIASES = {
     "火把": "minecraft:torch",

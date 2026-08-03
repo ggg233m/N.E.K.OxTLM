@@ -1,6 +1,6 @@
 [plugin]
-id = "neko_minecraft"
-name = "N.E.K.OxTLM"
+id = "neko_tlm"
+name = "酒狐插件"
 description = "一个联动插件，为《车万女仆》(Touhou Little Maid) 模组与《N.E.K.O》建立兼容与交互桥梁，可以用N.E.K.O用自然语言控制游戏内女仆行为"
 short_description = "控制车万女仆：跟随、坐下、切换工作模式、攻击目标、装备物品、执行指令、触发技能"
 keywords = [
@@ -13,7 +13,7 @@ keywords = [
     "maid", "farm", "idle", "feed", "shear", "torch", "creeper", "zombie", "skeleton"
 ]
 version = "1.0.6"
-entry = "plugins.neko_minecraft:NekoMinecraftPlugin"
+entry = "plugin.plugins.neko_tlm:NekoMinecraftPlugin"
 
 [plugin.author]
 name = "N.E.K.O Community"
@@ -42,42 +42,6 @@ title = "Minecraft Bridge"
 entry = "ui/panel.tsx"
 context = "dashboard"
 permissions = ["state:read", "action:call", "config:read"]
-
-[[plugin.entries]]
-id = "refresh_maid_status"
-name = "Refresh Maid Status"
-description = "Fetch current maid status and true current work mode from Minecraft"
-kind = "action"
-
-[[plugin.entries]]
-id = "assign_maid"
-name = "Assign Maid"
-description = "Assign a specific maid by ID for the AI to control"
-kind = "action"
-
-[[plugin.entries]]
-id = "diagnose_bridge"
-name = "Diagnose Minecraft Bridge"
-description = "Diagnose Minecraft bridge connection, mod config, and assigned maid state"
-kind = "action"
-
-[[plugin.entries]]
-id = "set_connection_port"
-name = "Save Bridge Port"
-description = "Save the plugin UI connection port for the Minecraft WebSocket bridge. Only use when explicitly changing the bridge port; this is not a gameplay or maid-control action."
-kind = "action"
-
-[[plugin.entries]]
-id = "apply_speech_frequency_preset"
-name = "Apply Speech Frequency Preset"
-description = "Apply a companion mode preset or custom companion speech frequency settings from the plugin UI panel."
-kind = "action"
-
-[[plugin.entries]]
-id = "set_plan_board"
-name = "Update Goal Board"
-description = "Update the Minecraft goal board from the plugin UI panel."
-kind = "action"
 
 [minecraft_bridge]
 ws_url = "ws://127.0.0.1:48920"

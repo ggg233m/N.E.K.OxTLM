@@ -3,10 +3,9 @@
 import asyncio
 import json
 import time
-from typing import Dict, Optional
+from typing import Dict
 
 from .models import ActionRecord
-
 
 _KIND_NAMES = {
     "navigate": "寻路",
