@@ -136,6 +136,24 @@ class ActionRegistryTests(unittest.TestCase):
             ):
                 self.registry.normalize("return_to_position", args)
 
+    def test_remote_player_recall_handoff_is_explicit_and_player_only(self):
+        args = self.registry.normalize("return_to_position", {
+            "destination": "player",
+            "handoff_to_follow": True,
+        })
+        self.assertTrue(args["handoff_to_follow"])
+
+        with self.assertRaises(ActionValidationError):
+            self.registry.normalize("return_to_position", {
+                "destination": "surface",
+                "handoff_to_follow": True,
+            })
+        with self.assertRaises(ActionValidationError):
+            self.registry.normalize("return_to_position", {
+                "destination": "player",
+                "handoff_to_follow": "true",
+            })
+
     def test_normalizes_return_to_position_operation_and_policy(self):
         args = self.registry.normalize("return_to_position", {
             "target": {"x": 1, "y": 80, "z": 2},

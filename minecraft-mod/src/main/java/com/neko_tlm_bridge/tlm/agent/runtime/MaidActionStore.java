@@ -1,6 +1,7 @@
 package com.neko_tlm_bridge.tlm.agent.runtime;
 
 import com.github.tartaricacid.touhoulittlemaid.entity.passive.EntityMaid;
+import com.github.tartaricacid.touhoulittlemaid.config.subconfig.MaidConfig;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.neko_tlm_bridge.tlm.NekoWebSocketServerHolder;
@@ -16,6 +17,7 @@ import com.github.tartaricacid.touhoulittlemaid.api.task.IMaidTask;
 import com.github.tartaricacid.touhoulittlemaid.entity.task.TaskManager;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.core.BlockPos;
 import net.minecraft.world.entity.ai.memory.MemoryModuleType;
 import net.minecraft.world.entity.schedule.Activity;
 import org.slf4j.Logger;
@@ -436,9 +438,11 @@ public final class MaidActionStore {
             LOGGER.error("Navigation cleanup failed for {}", active.actionId, cleanupFailure);
             active.warnings.add("NAVIGATION_CLEANUP_FAILED");
         }
+        boolean leaseReleased = !releaseLease;
         if (releaseLease) {
             try {
                 MaidBodyLease.ReleaseReport release = active.lease.release(active.maid);
+                leaseReleased = true;
                 if (release.handConflict()) {
                     active.warnings.add("HAND_CONFLICT");
                 }
@@ -448,6 +452,10 @@ public final class MaidActionStore {
                 LOGGER.error("Body lease release failed for {}", active.actionId, releaseFailure);
                 active.warnings.add("LEASE_RELEASE_FAILED");
             }
+        }
+        if (leaseReleased && terminalStatus == ActionStatus.SUCCEEDED
+                && reason == ActionEndReason.COMPLETED) {
+            applyCompletionDisposition(active, mergedResult);
         }
 
         try {
@@ -486,6 +494,27 @@ public final class MaidActionStore {
             if (!target.has(entry.getKey())) {
                 target.add(entry.getKey(), entry.getValue().deepCopy());
             }
+        }
+    }
+
+    private static void applyCompletionDisposition(
+            ActiveAction active, JsonObject result) {
+        if (active.action.completionDisposition()
+                != MaidAction.CompletionDisposition.FOLLOW_OWNER) {
+            return;
+        }
+        try {
+            // 仅在寻路真实抵达后模拟 TLM 的常规跟随切换流程。租约释放后再执行，
+            // 可避免恢复后的 Home 调度在下一次 40-tick 检查时将女仆传送回旧锚点。
+            active.maid.restrictTo(BlockPos.ZERO,
+                    MaidConfig.MAID_NON_HOME_RANGE.get());
+            active.maid.setHomeModeEnable(false);
+            result.addProperty("post_arrival_state", "following");
+            result.addProperty("is_following", true);
+        } catch (RuntimeException transitionFailure) {
+            LOGGER.error("Failed to apply completion disposition for {}",
+                    active.actionId, transitionFailure);
+            active.warnings.add("COMPLETION_DISPOSITION_FAILED");
         }
     }
 

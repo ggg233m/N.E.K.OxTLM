@@ -1,6 +1,7 @@
 package com.neko_tlm_bridge.ws.handler;
 
 import com.github.tartaricacid.touhoulittlemaid.api.task.IMaidTask;
+import com.github.tartaricacid.touhoulittlemaid.api.task.IAttackTask;
 import com.github.tartaricacid.touhoulittlemaid.entity.passive.EntityMaid;
 import com.github.tartaricacid.touhoulittlemaid.entity.task.TaskManager;
 import com.google.gson.JsonArray;
@@ -54,7 +55,7 @@ public class GameContextHandler implements MessageHandlerInterface {
             case "equipment" -> contextData = collectEquipmentContext(maid);
             case "user" -> contextData = collectUserContext(maid);
             case "effects" -> contextData = collectEffectsContext(maid);
-            case "position" -> contextData = collectPositionContext(maid);
+            case "position" -> contextData = collectPositionContext(maid, maidId);
             case "nearby_entities" -> contextData = collectNearbyEntitiesContext(maid);
             case "awareness" -> contextData = collectAwarenessContext(maid);
             default -> {
@@ -127,10 +128,14 @@ public class GameContextHandler implements MessageHandlerInterface {
             return data;
         }
         data.addProperty("maid_id", maid.getStringUUID());
-        data.addProperty("main_hand", maid.getMainHandItem().isEmpty() ? ""
-                : BuiltInRegistries.ITEM.getKey(maid.getMainHandItem().getItem()).toString());
+        ItemStack mainHand = maid.getMainHandItem();
+        data.addProperty("main_hand", mainHand.isEmpty() ? ""
+                : BuiltInRegistries.ITEM.getKey(mainHand.getItem()).toString());
         data.addProperty("off_hand", maid.getOffhandItem().isEmpty() ? ""
                 : BuiltInRegistries.ITEM.getKey(maid.getOffhandItem().getItem()).toString());
+        data.add("combat_task_compatibility",
+                collectCombatTaskCompatibility(
+                        maid, mainHand, TaskManager.getNotHiddenTaskList(maid)));
 
         JsonArray armorArray = new JsonArray();
         var armorInv = maid.getArmorInvWrapper();
@@ -159,6 +164,18 @@ public class GameContextHandler implements MessageHandlerInterface {
         }
         data.add("inventory", inventoryArray);
         return data;
+    }
+
+    static JsonObject collectCombatTaskCompatibility(
+            EntityMaid maid, ItemStack mainHand, Iterable<IMaidTask> tasks) {
+        JsonObject compatibility = new JsonObject();
+        for (IMaidTask task : tasks) {
+            if (task instanceof IAttackTask attackTask) {
+                compatibility.addProperty(
+                        task.getUid().toString(), attackTask.isWeapon(maid, mainHand));
+            }
+        }
+        return compatibility;
     }
 
     private JsonObject collectUserContext(EntityMaid maid) {
@@ -220,12 +237,32 @@ public class GameContextHandler implements MessageHandlerInterface {
         return data;
     }
 
-    private JsonObject collectPositionContext(EntityMaid maid) {
+    private JsonObject collectPositionContext(EntityMaid maid, String maidId) {
         JsonObject data = new JsonObject();
         if (maid == null) {
-            data.addProperty("error", "No maid found");
+            MaidHelper.UnloadedMaid unloaded = MaidHelper.findUnloadedMaid(server, maidId);
+            if (unloaded == null) {
+                data.addProperty("error", "No maid found");
+                return data;
+            }
+            data.addProperty("maid_loaded", false);
+            data.addProperty("maid_id", unloaded.info().getEntityId().toString());
+            JsonObject maidPos = new JsonObject();
+            maidPos.addProperty("x", unloaded.info().getChunkPos().getX());
+            maidPos.addProperty("y", unloaded.info().getChunkPos().getY());
+            maidPos.addProperty("z", unloaded.info().getChunkPos().getZ());
+            data.add("maid_position", maidPos);
+            data.addProperty("maid_dimension", unloaded.info().getDimension());
+            data.addProperty("maid_last_seen_ms", unloaded.info().getTimestamp());
+            addOwnerRange(data, unloaded.info().getChunkPos(),
+                    unloaded.info().getDimension(), unloaded.owner());
+            // 实体不存在于所有 ServerLevel 时无法运行 TLM 跟随任务，
+            // 不论最后记录的数值距离是多少。
+            data.addProperty("within_owner_simulation_distance", false);
             return data;
         }
+        data.addProperty("maid_loaded", true);
+        data.addProperty("maid_id", maid.getStringUUID());
         JsonObject maidPos = new JsonObject();
         maidPos.addProperty("x", maid.getX());
         maidPos.addProperty("y", maid.getY());
@@ -238,19 +275,44 @@ public class GameContextHandler implements MessageHandlerInterface {
 
         LivingEntity owner = maid.getOwner();
         if (owner != null) {
-            JsonObject ownerPos = new JsonObject();
-            ownerPos.addProperty("x", owner.getX());
-            ownerPos.addProperty("y", owner.getY());
-            ownerPos.addProperty("z", owner.getZ());
-            data.add("owner_position", ownerPos);
-            data.addProperty("owner_dimension", owner.level().dimension().location().toString());
+            addOwnerRange(data, maid.blockPosition(),
+                    maid.level().dimension().location().toString(), owner);
             if (maid.level().dimension().equals(owner.level().dimension())) {
                 data.addProperty("distance", maid.distanceTo(owner));
-            } else {
-                data.addProperty("distance", -1);
             }
         }
         return data;
+    }
+
+    private void addOwnerRange(
+            JsonObject data, net.minecraft.core.BlockPos maidPosition,
+            String maidDimension, LivingEntity owner) {
+        JsonObject ownerPos = new JsonObject();
+        ownerPos.addProperty("x", owner.getX());
+        ownerPos.addProperty("y", owner.getY());
+        ownerPos.addProperty("z", owner.getZ());
+        data.add("owner_position", ownerPos);
+        String ownerDimension = owner.level().dimension().location().toString();
+        data.addProperty("owner_dimension", ownerDimension);
+        if (!maidDimension.equals(ownerDimension)) {
+            data.addProperty("distance", -1);
+            data.addProperty("within_owner_simulation_distance", false);
+            return;
+        }
+        ChunkPos maidChunk = new ChunkPos(maidPosition);
+        ChunkPos ownerChunk = new ChunkPos(owner.blockPosition());
+        int chunkDistance = Math.max(
+                Math.abs(maidChunk.x - ownerChunk.x),
+                Math.abs(maidChunk.z - ownerChunk.z));
+        int simulationDistance = server.getPlayerList().getSimulationDistance();
+        double dx = maidPosition.getX() + 0.5D - owner.getX();
+        double dy = maidPosition.getY() - owner.getY();
+        double dz = maidPosition.getZ() + 0.5D - owner.getZ();
+        data.addProperty("distance", Math.sqrt(dx * dx + dy * dy + dz * dz));
+        data.addProperty("owner_chunk_distance", chunkDistance);
+        data.addProperty("server_simulation_distance", simulationDistance);
+        data.addProperty("within_owner_simulation_distance",
+                chunkDistance <= simulationDistance);
     }
 
     private JsonObject collectNearbyEntitiesContext(EntityMaid maid) {

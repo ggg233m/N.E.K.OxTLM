@@ -14,6 +14,7 @@ import com.neko_tlm_bridge.tlm.agent.path.MaidTerrainStep;
 import com.neko_tlm_bridge.tlm.agent.path.MaidTerrainWorldEvaluator;
 import com.neko_tlm_bridge.tlm.agent.runtime.HandLease;
 import com.neko_tlm_bridge.tlm.agent.runtime.MaidActionStore;
+import com.neko_tlm_bridge.tlm.agent.runtime.RemoteRecallChunkLease;
 import com.neko_tlm_bridge.tlm.agent.world.MiningReturnRoutePlanner;
 import com.neko_tlm_bridge.tlm.agent.world.MiningWorldModelSavedData;
 import net.minecraft.core.BlockPos;
@@ -53,6 +54,7 @@ public final class ReturnToPositionAction implements MaidAction {
     private static final int SURFACE_FRONTIER_ALL_GOALS = 32;
     private static final int MAX_HORIZONTAL_SEARCH_RADIUS = 96;
     private static final int MAX_VERTICAL_SEARCH_RADIUS = 192;
+    private static final int REMOTE_PLAYER_FRONTIER_DISTANCE = 24;
     private static final int MAX_REPLANS = 3;
     private static final int SURFACE_INITIAL_SAMPLE_RADIUS = 16;
     private static final int SURFACE_MAX_SAMPLE_RADIUS = 32;
@@ -75,6 +77,7 @@ public final class ReturnToPositionAction implements MaidAction {
     private final RoutePolicy routePolicy;
     private final PlacementPolicy placementPolicy;
     private final int maxPlacements;
+    private final boolean handoffToFollow;
 
     private final List<BlockPos> waypoints = new ArrayList<>();
     private Stage stage = Stage.VALIDATING;
@@ -98,6 +101,7 @@ public final class ReturnToPositionAction implements MaidAction {
     private String lastReplanMessage;
     private JsonObject lastExecutionFailure;
     private HandLease handLease;
+    private RemoteRecallChunkLease remoteRecallLease;
     private MaidTerrainSearch terrainSearch;
     private MaidTerrainNavigator navigator;
     private boolean started;
@@ -106,14 +110,15 @@ public final class ReturnToPositionAction implements MaidAction {
                                   UUID operationId, RoutePolicy routePolicy,
                                   PlacementPolicy placementPolicy, int maxPlacements) {
         this(target, false, speed, stopDistance, operationId, routePolicy,
-                placementPolicy, maxPlacements, Destination.EXPLICIT);
+                placementPolicy, maxPlacements, Destination.EXPLICIT, false);
     }
 
     private ReturnToPositionAction(
             BlockPos target, boolean inferHorizontalTarget,
             double speed, double stopDistance, UUID operationId,
             RoutePolicy routePolicy, PlacementPolicy placementPolicy,
-            int maxPlacements, Destination destination) {
+            int maxPlacements, Destination destination,
+            boolean handoffToFollow) {
         this.target = Objects.requireNonNull(target, "target").immutable();
         this.inferHorizontalTarget = inferHorizontalTarget;
         this.destination = Objects.requireNonNull(destination, "destination");
@@ -127,12 +132,13 @@ public final class ReturnToPositionAction implements MaidAction {
             throw new IllegalArgumentException("max_placements must be between 0 and 4096");
         }
         this.maxPlacements = maxPlacements;
+        this.handoffToFollow = handoffToFollow;
     }
 
     public static ReturnToPositionAction fromArgs(JsonObject args) {
         Objects.requireNonNull(args, "args");
         Set<String> allowed = Set.of("destination", "target", "speed", "stop_distance", "operation_id",
-                "route_policy", "placement_policy", "max_placements");
+                "route_policy", "placement_policy", "max_placements", "handoff_to_follow");
         for (String name : args.keySet()) {
             if (!allowed.contains(name)) {
                 throw new IllegalArgumentException("Unsupported return_to_position field: " + name);
@@ -176,9 +182,14 @@ public final class ReturnToPositionAction implements MaidAction {
         PlacementPolicy placementPolicy = PlacementPolicy.fromWireName(
                 optionalString(args, "placement_policy", "safe_support_and_water_seal"));
         int maxPlacements = optionalInt(args, "max_placements", 0);
+        boolean handoffToFollow = optionalBoolean(args, "handoff_to_follow", false);
+        if (handoffToFollow && destination != Destination.PLAYER) {
+            throw new IllegalArgumentException(
+                    "handoff_to_follow requires destination=player");
+        }
         return new ReturnToPositionAction(position, hasTarget && !hasX,
                 speed, stopDistance, operationId, routePolicy,
-                placementPolicy, maxPlacements, destination);
+                placementPolicy, maxPlacements, destination, handoffToFollow);
     }
 
     @Override
@@ -196,8 +207,20 @@ public final class ReturnToPositionAction implements MaidAction {
     }
 
     @Override
+    public CompletionDisposition completionDisposition() {
+        // 显式远程召回仅在 Agent 真正到达后才交还给 TLM 跟随；若此处恢复
+        // Home 模式，下一次调度 tick 会将女仆传送回旧的工作或待命锚点。
+        return destination == Destination.PLAYER && handoffToFollow
+                ? CompletionDisposition.FOLLOW_OWNER
+                : CompletionDisposition.RESTORE_BODY;
+    }
+
+    @Override
     public void start(MaidActionContext context) {
         started = true;
+        if (isRemotePlayerRecall()) {
+            remoteRecallLease = RemoteRecallChunkLease.claim(context.maid());
+        }
         if (destination == Destination.EXPLICIT && inferHorizontalTarget) {
             BlockPos live = context.maid().blockPosition();
             target = new BlockPos(live.getX(), target.getY(), live.getZ());
@@ -209,6 +232,9 @@ public final class ReturnToPositionAction implements MaidAction {
     public MaidActionTickResult tick(MaidActionContext context) {
         if (!started) {
             start(context);
+        }
+        if (remoteRecallLease != null) {
+            remoteRecallLease.moveTo(context.maid().blockPosition());
         }
         return switch (stage) {
             case VALIDATING -> validateAndPrepare(context);
@@ -226,6 +252,10 @@ public final class ReturnToPositionAction implements MaidAction {
             navigator = null;
         }
         terrainSearch = null;
+        if (remoteRecallLease != null) {
+            remoteRecallLease.close();
+            remoteRecallLease = null;
+        }
         if (context != null && context.maid() != null) {
             context.maid().getNavigation().stop();
         }
@@ -542,6 +572,10 @@ public final class ReturnToPositionAction implements MaidAction {
     }
 
     private MaidActionTickResult planNextLeg(MaidActionContext context) {
+        MaidActionTickResult refreshFailure = refreshRemotePlayerTarget(context);
+        if (refreshFailure != null) {
+            return refreshFailure;
+        }
         BlockPos live = context.maid().blockPosition().immutable();
         while (waypointIndex < waypoints.size()
                 && distance(live, waypoints.get(waypointIndex))
@@ -572,6 +606,21 @@ public final class ReturnToPositionAction implements MaidAction {
         }
 
         BlockPos waypoint = waypoints.get(waypointIndex);
+        if (isRemotePlayerRecall()
+                && waypointIndex == waypoints.size() - 1
+                && horizontalDistance(live, waypoint) > REMOTE_PLAYER_FRONTIER_DISTANCE) {
+            Optional<BlockPos> frontier = remotePlayerFrontier(context, live, waypoint);
+            if (frontier.isEmpty()) {
+                report(context, Stage.PLANNING,
+                        detail("waiting_remote_recall_frontier_chunk"));
+                return MaidActionTickResult.running();
+            }
+            waypoints.add(waypointIndex, frontier.orElseThrow());
+            waypoint = waypoints.get(waypointIndex);
+            routeSource = routeSource.startsWith("recorded")
+                    ? "recorded_route_then_remote_frontiers"
+                    : "remote_player_frontiers";
+        }
         MaidTerrainPath exact = exactWaypointBatch(context, live);
         if (exact != null) {
             beginNavigation(context, exact, activeLegWaypointCount);
@@ -632,6 +681,76 @@ public final class ReturnToPositionAction implements MaidAction {
         return MaidActionTickResult.running();
     }
 
+    private boolean isRemotePlayerRecall() {
+        return destination == Destination.PLAYER && handoffToFollow;
+    }
+
+    private MaidActionTickResult refreshRemotePlayerTarget(MaidActionContext context) {
+        if (!isRemotePlayerRecall() || !targetResolved) {
+            return null;
+        }
+        LivingEntity owner = context.maid().getOwner();
+        if (owner == null || owner.level() != context.level()) {
+            return fail(context, ActionEndReason.VALIDATION_FAILED,
+                    "owner_not_available_in_maid_dimension");
+        }
+        BlockPos refreshed = owner.blockPosition().immutable();
+        if (refreshed.equals(target)) {
+            return null;
+        }
+        target = refreshed;
+        if (!waypoints.isEmpty()) {
+            waypoints.set(waypoints.size() - 1, target);
+        }
+        return null;
+    }
+
+    /**
+     * 在移动的区块票据范围内选择一个较近目标。地表召回沿高度图移动；
+     * 地下召回保持 Y 坐标，并可通过普通返程导航器清理安全的两格高通道。
+     */
+    private Optional<BlockPos> remotePlayerFrontier(
+            MaidActionContext context, BlockPos live, BlockPos playerTarget) {
+        BlockPos horizontalFrontier = remoteHorizontalFrontier(
+                live, playerTarget, REMOTE_PLAYER_FRONTIER_DISTANCE);
+        if (horizontalFrontier.equals(live)) {
+            return Optional.empty();
+        }
+        int x = horizontalFrontier.getX();
+        int z = horizontalFrontier.getZ();
+        BlockPos probe = new BlockPos(x, live.getY(), z);
+        if (!context.level().hasChunkAt(probe)) {
+            return Optional.empty();
+        }
+        int y = live.getY();
+        if (context.level().canSeeSky(live.above())) {
+            y = context.level().getHeight(
+                    Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x, z);
+        }
+        y = Math.max(context.level().getMinBuildHeight() + 1,
+                Math.min(context.level().getMaxBuildHeight() - 2, y));
+        BlockPos frontier = new BlockPos(x, y, z);
+        return frontier.equals(live) ? Optional.empty() : Optional.of(frontier);
+    }
+
+    static BlockPos remoteHorizontalFrontier(
+            BlockPos live, BlockPos playerTarget, int maxDistance) {
+        if (maxDistance <= 0) {
+            throw new IllegalArgumentException("maxDistance must be positive");
+        }
+        int dx = playerTarget.getX() - live.getX();
+        int dz = playerTarget.getZ() - live.getZ();
+        int horizontal = Math.max(Math.abs(dx), Math.abs(dz));
+        if (horizontal <= 0) {
+            return live;
+        }
+        double scale = Math.min(1.0D, maxDistance / (double) horizontal);
+        return new BlockPos(
+                live.getX() + (int) Math.round(dx * scale),
+                live.getY(),
+                live.getZ() + (int) Math.round(dz * scale));
+    }
+
     private MaidActionTickResult advanceSearch(MaidActionContext context) {
         if (terrainSearch == null) {
             return fail(context, ActionEndReason.INTERNAL_ERROR,
@@ -671,7 +790,8 @@ public final class ReturnToPositionAction implements MaidAction {
                     "return_search_produced_empty_path");
         }
         if (!routeSource.startsWith("recorded")
-                && !routeSource.startsWith("layered_surface_ascent")) {
+                && !routeSource.startsWith("layered_surface_ascent")
+                && !routeSource.startsWith("remote_player")) {
             routeSource = "terrain_replan";
         }
         beginNavigation(context, path, pendingSearchWaypointCount);
@@ -1100,6 +1220,22 @@ public final class ReturnToPositionAction implements MaidAction {
             return parent.get(name).getAsInt();
         } catch (RuntimeException invalid) {
             throw new IllegalArgumentException(name + " must be an integer", invalid);
+        }
+    }
+
+    private static boolean optionalBoolean(
+            JsonObject parent, String name, boolean fallback) {
+        if (!parent.has(name)) {
+            return fallback;
+        }
+        if (!parent.get(name).isJsonPrimitive()
+                || !parent.getAsJsonPrimitive(name).isBoolean()) {
+            throw new IllegalArgumentException(name + " must be a boolean");
+        }
+        try {
+            return parent.get(name).getAsBoolean();
+        } catch (RuntimeException invalid) {
+            throw new IllegalArgumentException(name + " must be a boolean", invalid);
         }
     }
 

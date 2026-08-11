@@ -18,6 +18,25 @@ class ActionRegistry:
         "return_to_position",
     })
 
+    @staticmethod
+    def is_ore_selector(selector: Any) -> bool:
+        """判断规范化选择器是否指向矿石方块或标签。"""
+        if not isinstance(selector, dict):
+            return False
+        selector_type = str(selector.get("type") or "").strip().lower()
+        selector_id = str(selector.get("id") or "").strip().lower()
+        selector_path = selector_id.split(":", 1)[-1]
+        return (
+            selector_type == "tag"
+            and (
+                selector_path.endswith("_ores")
+                or selector_path == "ores"
+                or selector_path.startswith("ores/")
+            )
+        ) or (
+            selector_type == "block" and selector_path.endswith("_ore")
+        )
+
     def normalize(self, kind: str, args: Dict[str, Any]) -> Dict[str, Any]:
         kind = str(kind or "").strip().lower()
         if kind not in self.SUPPORTED_KINDS:
@@ -47,6 +66,7 @@ class ActionRegistry:
             "route_policy",
             "placement_policy",
             "max_placements",
+            "handoff_to_follow",
         }
         unknown = sorted(set(args) - allowed)
         if unknown:
@@ -111,6 +131,17 @@ class ActionRegistry:
             normalized["target"] = self._return_position(
                 args.get("target"), "return_to_position.target"
             )
+        handoff_to_follow = args.get("handoff_to_follow", False)
+        if not isinstance(handoff_to_follow, bool):
+            raise ActionValidationError(
+                "return_to_position.handoff_to_follow must be a boolean"
+            )
+        if handoff_to_follow:
+            if destination != "player":
+                raise ActionValidationError(
+                    "return_to_position.handoff_to_follow requires destination=player"
+                )
+            normalized["handoff_to_follow"] = True
         operation_id = str(args.get("operation_id") or "").strip()
         if operation_id:
             try:
@@ -307,18 +338,7 @@ class ActionRegistry:
                     "selector.id must be a namespaced Minecraft resource id"
                 )
             normalized_selector = {"type": selector_type, "id": selector_id}
-            selector_path = selector_id.split(":", 1)[1]
-            ore_selector = (
-                (
-                    selector_type == "tag"
-                    and (
-                        selector_path.endswith("_ores")
-                        or selector_path == "ores"
-                        or selector_path.startswith("ores/")
-                    )
-                )
-                or (selector_type == "block" and selector_path.endswith("_ore"))
-            )
+            ore_selector = self.is_ore_selector(normalized_selector)
 
         if "vein_mining" in args:
             vein_mining = self._boolean(args.get("vein_mining"), "vein_mining")

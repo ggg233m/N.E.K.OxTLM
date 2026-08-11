@@ -40,8 +40,8 @@ Only after the plugin market review is approved, push a tag matching the
 `plugin.toml` version to create a GitHub Release asset:
 
 ```bash
-git tag v1.0.6
-git push origin v1.0.6
+git tag v1.0.7
+git push origin v1.0.7
 ```
 
 The generated `.github/workflows/release.yml` uploads `neko_tlm.neko-plugin`.

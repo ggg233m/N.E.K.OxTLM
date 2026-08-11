@@ -9,10 +9,14 @@ keywords = [
     "攻击", "打怪", "装备", "物品", "指令", "技能", "日程",
     "切换", "执行", "农耕", "甘蔗", "待机", "喂食", "剪羊毛", "插火把",
     "苦力怕", "僵尸", "骷髅",
+    "挖矿", "采矿", "找矿", "挖.*(煤|铁|金|钻石|红石|青金石|绿宝石|下界石英|远古残骸)",
+    "砍树", "砍.*(树|木|原木)", "树.*砍", "采集", "收集",
+    "过来", "到我", "跟我", "跟着", "寻路", "导航", "坐标", "地面", "矿道",
     "follow", "sit", "attack", "equip", "skill", "command", "task", "schedule",
-    "maid", "farm", "idle", "feed", "shear", "torch", "creeper", "zombie", "skeleton"
+    "maid", "farm", "idle", "feed", "shear", "torch", "creeper", "zombie", "skeleton",
+    "mine", "mining", "gather", "chop", "navigate", "pathfind", "come here", "follow me"
 ]
-version = "1.0.6"
+version = "1.0.7"
 entry = "plugin.plugins.neko_tlm:NekoMinecraftPlugin"
 
 [plugin.author]

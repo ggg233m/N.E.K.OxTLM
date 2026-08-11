@@ -1,5 +1,6 @@
 """Coordinates action transport, tracking, feedback and reconnect recovery."""
 
+import asyncio
 import uuid
 from typing import Any, Dict, Iterable, Optional
 
@@ -8,6 +9,8 @@ from .models import TERMINAL_STATUSES, ActionRecord, ActionTracker
 from .registry import ActionRegistry, ActionValidationError
 
 ACTION_EVENT_TYPES = frozenset({"maid_action_progress", "maid_action_finished"})
+REMOTE_LOAD_RETRY_COUNT = 5
+REMOTE_LOAD_RETRY_DELAY = 0.1
 
 
 class MaidActionService:
@@ -154,7 +157,14 @@ class MaidActionService:
         kind = str(kind or "").strip().lower()
         try:
             normalized_args = self.registry.normalize(kind, args or {})
-            if timeout_ms is None:
+            if (
+                kind == "harvest_blocks"
+                and self.registry.is_ore_selector(normalized_args.get("selector"))
+            ):
+                # 无论从公开还是内部入口启动，矿石勘探都必须持续进行；
+                # 调用方传入的有限超时不得静默限制搜索。
+                timeout_ms = 0
+            elif timeout_ms is None:
                 # Returning through a deep/branched mine is intentionally a
                 # long-running server-owned operation.  A generic one-minute
                 # default would terminate a healthy return midway, especially
@@ -186,7 +196,7 @@ class MaidActionService:
             },
         }
         try:
-            response = await self.plugin._send_request(request)
+            response = await self.send_start_request(request)
         except Exception as exc:
             self.release_action(action_id, owner_id)
             return self._error("REQUEST_FAILED", str(exc), action_id=action_id)
@@ -209,6 +219,22 @@ class MaidActionService:
             )
         snapshot = records[0].as_dict() if records else {}
         return {"success": True, "accepted": True, "action_id": action_id, **data, **snapshot}
+
+    async def send_start_request(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        """发送动作启动请求，并透明等待远程女仆的 NBT 加载。"""
+        response: Dict[str, Any] = {}
+        for attempt in range(REMOTE_LOAD_RETRY_COUNT):
+            response = await self.plugin._send_request(request)
+            if response.get("type") == "error":
+                return response
+            data = self._payload(response)
+            accepted = data.get("accepted", data.get("success", True))
+            error_code = str(data.get("error_code") or data.get("rejection_reason") or "")
+            if accepted or error_code != "MAID_LOAD_PENDING":
+                return response
+            if attempt + 1 < REMOTE_LOAD_RETRY_COUNT:
+                await asyncio.sleep(REMOTE_LOAD_RETRY_DELAY)
+        return response
 
     async def cancel_action(self, action_id: str, *, maid_id: str = "") -> Dict[str, Any]:
         if not getattr(self.plugin, "connected", False):

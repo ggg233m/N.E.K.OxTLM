@@ -182,6 +182,36 @@ class MaidActivityDirectorTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         await self.fx.director.close()
 
+    def test_same_action_kind_and_args_is_current_without_caller_id(self):
+        target = {
+            "type": "agent_action",
+            "kind": "navigate",
+            "args": {"target": {"x": 1.0, "y": 64.0, "z": 2.0}},
+        }
+        current = {
+            "active_actions": [{
+                "action_id": "server-generated",
+                "kind": "navigate",
+                "args": {"target": {"x": 1.0, "y": 64.0, "z": 2.0}},
+            }],
+        }
+        self.assertTrue(self.fx.director._target_is_current(target, current))
+
+    def test_different_action_args_are_not_current(self):
+        target = {
+            "type": "agent_action",
+            "kind": "navigate",
+            "args": {"target": {"x": 1.0, "y": 64.0, "z": 2.0}},
+        }
+        current = {
+            "active_actions": [{
+                "action_id": "server-generated",
+                "kind": "navigate",
+                "args": {"target": {"x": 9.0, "y": 64.0, "z": 2.0}},
+            }],
+        }
+        self.assertFalse(self.fx.director._target_is_current(target, current))
+
     async def test_cancel_then_switch_waits_for_action_terminal(self):
         self.fx.actions.records["a-1"] = {
             "action_id": "a-1", "maid_id": "maid-1",

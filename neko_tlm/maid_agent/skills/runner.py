@@ -101,10 +101,8 @@ class SkillRunner:
         maid_id = str(maid_id or "").strip()
         if not maid_id:
             raise ValueError("maid_id is required")
-        definition = self._definitions.get(name)
-        if definition is None:
-            raise ValueError(f"Unknown skill: {name or '<empty>'}")
-        normalized = definition.normalize_args(dict(args or {}))
+        normalized = self.normalize_args(name, args)
+        definition = self._definitions[name]
         canonical_id = self._canonical_skill_id(skill_id or str(uuid.uuid4()))
 
         lock = self._maid_locks[maid_id]
@@ -391,6 +389,14 @@ class SkillRunner:
     def registered_skills(self):
         """Return the public, immutable names accepted by ``start``."""
         return tuple(sorted(self._definitions))
+
+    def normalize_args(self, skill_name, args):
+        """返回与 ``start`` 使用相同的规范化参数。"""
+        name = str(skill_name or "").strip().lower()
+        definition = self._definitions.get(name)
+        if definition is None:
+            raise ValueError(f"Unknown skill: {name or '<empty>'}")
+        return definition.normalize_args(dict(args or {}))
 
     async def wait_terminal(self, skill_id, timeout=10.0):
         """Wait for one durable Skill terminal without polling checkpoints."""

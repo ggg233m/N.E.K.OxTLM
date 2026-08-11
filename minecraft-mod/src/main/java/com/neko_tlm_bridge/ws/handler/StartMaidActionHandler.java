@@ -5,6 +5,7 @@ import com.google.gson.JsonObject;
 import com.neko_tlm_bridge.config.ModConfig;
 import com.neko_tlm_bridge.tlm.agent.MaidActionKind;
 import com.neko_tlm_bridge.tlm.agent.runtime.MaidActionStore;
+import com.neko_tlm_bridge.tlm.agent.runtime.RemoteRecallChunkLease;
 import com.neko_tlm_bridge.ws.Protocol;
 import net.minecraft.server.MinecraftServer;
 import org.java_websocket.WebSocket;
@@ -30,7 +31,17 @@ public final class StartMaidActionHandler implements MessageHandlerInterface {
             UUID actionId = UUID.fromString(requiredString(data, "action_id"));
             String maidId = requiredString(data, "maid_id");
             MaidActionKind kind = MaidActionKind.fromWireName(requiredString(data, "kind"));
+            JsonObject args = data.has("args") && data.get("args").isJsonObject()
+                    ? data.getAsJsonObject("args") : new JsonObject();
             EntityMaid maid = MaidHelper.findMaidById(server, maidId);
+            if (maid == null && isRemotePlayerRecall(kind, args)) {
+                RemoteRecallChunkLease.Preparation preparation =
+                        RemoteRecallChunkLease.prepare(server, maidId);
+                maid = preparation.maid();
+                if (maid == null) {
+                    return result(requestId, false, preparation.errorCode(), null);
+                }
+            }
             if (maid == null) {
                 return result(requestId, false, "MAID_NOT_FOUND", null);
             }
@@ -39,8 +50,6 @@ public final class StartMaidActionHandler implements MessageHandlerInterface {
                 return result(requestId, false, "INVALID_TIMEOUT_MS", null);
             }
             boolean replace = !data.has("replace_existing") || data.get("replace_existing").getAsBoolean();
-            JsonObject args = data.has("args") && data.get("args").isJsonObject()
-                    ? data.getAsJsonObject("args") : new JsonObject();
             MaidActionStore.StartResult start = MaidActionStore.getInstance()
                     .start(actionId, maid, kind, args, timeout, replace);
             return result(requestId, start.accepted(), start.rejectionReason(), start.status());
@@ -62,6 +71,18 @@ public final class StartMaidActionHandler implements MessageHandlerInterface {
         copyActionFields(data, action);
         response.add("data", data);
         return response;
+    }
+
+    private static boolean isRemotePlayerRecall(MaidActionKind kind, JsonObject args) {
+        return kind == MaidActionKind.RETURN_TO_POSITION
+                && args.has("destination")
+                && args.get("destination").isJsonPrimitive()
+                && args.getAsJsonPrimitive("destination").isString()
+                && "player".equalsIgnoreCase(args.get("destination").getAsString())
+                && args.has("handoff_to_follow")
+                && args.get("handoff_to_follow").isJsonPrimitive()
+                && args.getAsJsonPrimitive("handoff_to_follow").isBoolean()
+                && args.get("handoff_to_follow").getAsBoolean();
     }
 
     private static void copyActionFields(JsonObject target, JsonObject action) {

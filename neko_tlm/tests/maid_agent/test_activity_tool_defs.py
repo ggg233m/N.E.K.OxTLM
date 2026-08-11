@@ -25,7 +25,7 @@ class ActivityToolDefinitionTests(unittest.TestCase):
         parameters = MC_SET_MAID_ACTIVITY["parameters"]
         self.assertEqual(["activity_type"], parameters["required"])
         self.assertEqual(
-            ["tlm_task", "agent_action", "skill", "idle"],
+            ["agent_action", "skill"],
             parameters["properties"]["activity_type"]["enum"],
         )
         self.assertEqual(
@@ -34,6 +34,10 @@ class ActivityToolDefinitionTests(unittest.TestCase):
         )
         self.assertNotIn("pause", parameters["properties"])
         self.assertNotIn("resume", parameters["properties"])
+
+    def test_activity_query_accepts_terminal_action_and_skill_ids(self):
+        properties = MC_GET_MAID_ACTIVITY["parameters"]["properties"]
+        self.assertEqual({"action_id", "skill_id"}, set(properties))
 
 
 if __name__ == "__main__":

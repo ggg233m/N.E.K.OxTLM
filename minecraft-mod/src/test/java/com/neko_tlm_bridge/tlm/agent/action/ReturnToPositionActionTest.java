@@ -3,6 +3,7 @@ package com.neko_tlm_bridge.tlm.agent.action;
 import com.google.gson.JsonObject;
 import com.neko_tlm_bridge.tlm.agent.ActionEndReason;
 import com.neko_tlm_bridge.tlm.agent.MaidActionKind;
+import com.neko_tlm_bridge.tlm.agent.MaidAction;
 import com.neko_tlm_bridge.tlm.agent.MaidActionResource;
 import net.minecraft.core.BlockPos;
 import org.junit.jupiter.api.Test;
@@ -93,6 +94,32 @@ class ReturnToPositionActionTest {
         unknown.addProperty("destination", "somewhere");
         assertThrows(IllegalArgumentException.class,
                 () -> ReturnToPositionAction.fromArgs(unknown));
+    }
+
+    @Test
+    void onlyExplicitRemoteRecallHandoffTransitionsToFollowing() {
+        JsonObject player = new JsonObject();
+        player.addProperty("destination", "player");
+        assertEquals(MaidAction.CompletionDisposition.RESTORE_BODY,
+                ReturnToPositionAction.fromArgs(player).completionDisposition());
+
+        player.addProperty("handoff_to_follow", true);
+        assertEquals(MaidAction.CompletionDisposition.FOLLOW_OWNER,
+                ReturnToPositionAction.fromArgs(player).completionDisposition());
+
+        JsonObject surface = new JsonObject();
+        surface.addProperty("destination", "surface");
+        assertEquals(MaidAction.CompletionDisposition.RESTORE_BODY,
+                ReturnToPositionAction.fromArgs(surface).completionDisposition());
+
+        assertEquals(MaidAction.CompletionDisposition.RESTORE_BODY,
+                ReturnToPositionAction.fromArgs(args()).completionDisposition());
+
+        JsonObject invalid = new JsonObject();
+        invalid.addProperty("destination", "surface");
+        invalid.addProperty("handoff_to_follow", true);
+        assertThrows(IllegalArgumentException.class,
+                () -> ReturnToPositionAction.fromArgs(invalid));
     }
 
     @Test
@@ -206,6 +233,30 @@ class ReturnToPositionActionTest {
         assertThrows(IllegalArgumentException.class,
                 () -> ReturnToPositionAction.surfaceAscentFrontierGoals(
                         start, BlockPos.ZERO, 0, 1));
+    }
+
+    @Test
+    void remoteRecallSplitsLongRoutesIntoBoundedHorizontalFrontiers() {
+        BlockPos start = new BlockPos(-934, 66, 169);
+        BlockPos player = new BlockPos(640, 72, -480);
+
+        BlockPos frontier = ReturnToPositionAction.remoteHorizontalFrontier(
+                start, player, 24);
+
+        assertEquals(start.getY(), frontier.getY());
+        assertEquals(24, Math.max(
+                Math.abs(frontier.getX() - start.getX()),
+                Math.abs(frontier.getZ() - start.getZ())));
+        assertTrue(horizontalDistance(frontier, player)
+                < horizontalDistance(start, player));
+        BlockPos finalHorizontal = ReturnToPositionAction.remoteHorizontalFrontier(
+                start, player, 4096);
+        assertEquals(player.getX(), finalHorizontal.getX());
+        assertEquals(player.getZ(), finalHorizontal.getZ());
+        assertEquals(start.getY(), finalHorizontal.getY());
+        assertThrows(IllegalArgumentException.class,
+                () -> ReturnToPositionAction.remoteHorizontalFrontier(
+                        start, player, 0));
     }
 
     private static int horizontalDistance(BlockPos first, BlockPos second) {

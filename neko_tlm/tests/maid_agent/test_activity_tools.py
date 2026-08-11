@@ -65,6 +65,14 @@ class FakePlugin:
         return maid_id or "maid-1"
 
     async def _send_request(self, request, timeout=5):
+        if (
+            request.get("type") == "get_game_context"
+            and request.get("data", {}).get("category") == "equipment"
+        ):
+            return {
+                "type": "game_context",
+                "data": {"main_hand": "minecraft:diamond_sword"},
+            }
         if request.get("type") == "get_maid_status":
             return {
                 "type": "maid_status",
@@ -81,7 +89,79 @@ class FakePlugin:
         return {"type": "command_result", "data": data}
 
 
+class FakeSkillRunner:
+    def get_status(self, skill_id):
+        if skill_id != "skill-done":
+            return None
+        return {
+            "skill_id": skill_id,
+            "skill_name": "mine_ore",
+            "status": "SUCCEEDED",
+        }
+
+
 class ActivityToolTests(unittest.IsolatedAsyncioTestCase):
+    async def test_follow_is_verified_from_authoritative_status(self):
+        plugin = FakePlugin()
+        requests = []
+
+        async def send_request(request, timeout=5):
+            requests.append(request)
+            if request.get("type") == "get_maid_status":
+                return {
+                    "type": "maid_status",
+                    "data": {"maids": [{
+                        "id": "maid-1",
+                        "is_following": True,
+                        "is_sitting": False,
+                    }]},
+                }
+            return {
+                "type": "command_result",
+                "data": {"success": True, "state": "following_stood_up"},
+            }
+
+        plugin._send_request = send_request
+        result = await tools.do_switch_follow(plugin, action="follow")
+
+        self.assertFalse(result["is_error"])
+        self.assertTrue(result["output"]["verified"])
+        self.assertTrue(result["output"]["is_following"])
+        self.assertFalse(result["output"]["is_sitting"])
+        self.assertTrue(result["output"]["stood_up"])
+        self.assertEqual("get_maid_status", requests[-1]["type"])
+
+    async def test_follow_does_not_claim_success_when_status_disagrees(self):
+        plugin = FakePlugin()
+
+        async def send_request(request, timeout=5):
+            if request.get("type") == "get_maid_status":
+                return {
+                    "type": "maid_status",
+                    "data": {"maids": [{
+                        "id": "maid-1",
+                        "is_following": True,
+                        "is_sitting": True,
+                    }]},
+                }
+            return {
+                "type": "command_result",
+                "data": {"success": True, "state": "following"},
+            }
+
+        plugin._send_request = send_request
+        result = await tools.do_switch_follow(plugin, action="follow")
+
+        self.assertTrue(result["is_error"])
+        self.assertEqual("FOLLOW_STATE_VERIFICATION_FAILED", result["error"])
+        self.assertFalse(result["output"]["verified"])
+
+    async def test_follow_rejects_unknown_action_before_command(self):
+        plugin = FakePlugin()
+        result = await tools.do_switch_follow(plugin, action="toggle")
+        self.assertTrue(result["is_error"])
+        self.assertEqual([], plugin._maid_activity_director.calls)
+
     async def test_query_tools_delegate_to_director(self):
         plugin = FakePlugin()
         activity = await tools.do_get_maid_activity(plugin)
@@ -93,6 +173,61 @@ class ActivityToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             "capabilities", plugin._maid_activity_director.calls[1][0]
         )
+
+    async def test_activity_query_can_recover_terminal_action_and_skill(self):
+        plugin = FakePlugin()
+        plugin._skill_runner = FakeSkillRunner()
+
+        async def send_request(request, timeout=5):
+            self.assertEqual("get_maid_action_status", request["type"])
+            return {
+                "type": "maid_action_status",
+                "data": {
+                    "found": True,
+                    "action_id": "action-done",
+                    "maid_id": "maid-1",
+                    "generation": 1,
+                    "sequence": 2,
+                    "kind": "navigate",
+                    "status": "SUCCEEDED",
+                },
+            }
+
+        plugin._send_request = send_request
+        result = await tools.do_get_maid_activity(
+            plugin, action_id="action-done", skill_id="skill-done"
+        )
+
+        self.assertFalse(result["is_error"])
+        output = result["output"]
+        self.assertEqual("SUCCEEDED", output["requested_action"]["status"])
+        self.assertEqual("SUCCEEDED", output["requested_skill"]["status"])
+
+    async def test_terminal_skill_query_survives_current_activity_failure(self):
+        plugin = FakePlugin()
+        plugin._skill_runner = FakeSkillRunner()
+
+        async def failed_activity(**kwargs):
+            return {
+                "success": False,
+                "error_code": "ACTION_QUERY_FAILED",
+                "action_query_error": {"error": "temporary failure"},
+            }
+
+        plugin._maid_activity_director.get_activity = failed_activity
+        result = await tools.do_get_maid_activity(
+            plugin, skill_id="skill-done"
+        )
+
+        self.assertFalse(result["is_error"])
+        output = result["output"]
+        self.assertTrue(output["partial"])
+        self.assertFalse(output["current_activity_available"])
+        self.assertEqual(
+            "ACTION_QUERY_FAILED",
+            output["current_activity_error"]["error_code"],
+        )
+        self.assertEqual("SUCCEEDED", output["requested_skill"]["status"])
 
     async def test_set_builds_one_normalized_activity_target(self):
         plugin = FakePlugin()
@@ -151,6 +286,23 @@ class ActivityToolTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual("cancel_then_switch", kwargs["switch_policy"])
         self.assertTrue(result["output"]["verified"])
+
+    async def test_combat_switch_is_rejected_without_matching_weapon(self):
+        plugin = FakePlugin()
+
+        async def send_request(request, timeout=5):
+            self.assertEqual("equipment", request["data"]["category"])
+            return {
+                "type": "game_context",
+                "data": {"main_hand": "minecraft:torch"},
+            }
+
+        plugin._send_request = send_request
+        result = await tools.do_switch_task(plugin, task="打怪")
+
+        self.assertTrue(result["is_error"])
+        self.assertIn("当前：minecraft:torch", str(result))
+        self.assertEqual([], plugin._maid_activity_director.calls)
 
     async def test_legacy_start_skill_uses_same_director_lock(self):
         plugin = FakePlugin()

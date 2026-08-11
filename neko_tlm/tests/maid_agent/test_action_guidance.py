@@ -99,13 +99,12 @@ class MaidActionGuidanceTests(unittest.TestCase):
         ):
             self.assertIn(value, tool_text)
             self.assertIn(value, _TLM_AI_INSTRUCTIONS)
-        self.assertIn("mc_start_skill", _TLM_AI_INSTRUCTIONS)
+        self.assertIn("mc_set_maid_activity", _TLM_AI_INSTRUCTIONS)
         self.assertIn("autonomous_mining", _TLM_AI_INSTRUCTIONS)
         self.assertIn("Java 自主完成", _TLM_AI_INSTRUCTIONS)
         self.assertIn("staircase_down", _TLM_AI_INSTRUCTIONS)
         self.assertIn("F8", _TLM_AI_INSTRUCTIONS)
-        self.assertIn("mc_cancel_skill", _TLM_AI_INSTRUCTIONS)
-        self.assertIn("mc_cancel_maid_action", _TLM_AI_INSTRUCTIONS)
+        self.assertIn("mc_stop_maid_activity", _TLM_AI_INSTRUCTIONS)
         self.assertIn("底层兼容能力", _TLM_AI_INSTRUCTIONS)
         self.assertIn("协议兼容能力", tool_text)
 

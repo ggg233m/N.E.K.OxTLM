@@ -1,5 +1,6 @@
 """LLM 工具业务逻辑 — 女仆状态、行为、聊天与 Agent 动作工具。"""
 
+import re
 import uuid
 
 from plugin.sdk.plugin import Err, Ok
@@ -16,12 +17,213 @@ _ITEM_ALIASES = {
     "soul_torch": "minecraft:soul_torch",
 }
 
+_ORE_SELECTOR_ALIASES = {
+    "煤": ("tag", "minecraft:coal_ores"),
+    "煤矿": ("tag", "minecraft:coal_ores"),
+    "coal": ("tag", "minecraft:coal_ores"),
+    "coal ore": ("tag", "minecraft:coal_ores"),
+    "铁": ("tag", "minecraft:iron_ores"),
+    "铁矿": ("tag", "minecraft:iron_ores"),
+    "iron": ("tag", "minecraft:iron_ores"),
+    "iron ore": ("tag", "minecraft:iron_ores"),
+    "铜": ("tag", "minecraft:copper_ores"),
+    "铜矿": ("tag", "minecraft:copper_ores"),
+    "copper": ("tag", "minecraft:copper_ores"),
+    "copper ore": ("tag", "minecraft:copper_ores"),
+    "金": ("tag", "minecraft:gold_ores"),
+    "金矿": ("tag", "minecraft:gold_ores"),
+    "gold": ("tag", "minecraft:gold_ores"),
+    "gold ore": ("tag", "minecraft:gold_ores"),
+    "红石": ("tag", "minecraft:redstone_ores"),
+    "红石矿": ("tag", "minecraft:redstone_ores"),
+    "redstone": ("tag", "minecraft:redstone_ores"),
+    "redstone ore": ("tag", "minecraft:redstone_ores"),
+    "青金石": ("tag", "minecraft:lapis_ores"),
+    "青金": ("tag", "minecraft:lapis_ores"),
+    "lapis": ("tag", "minecraft:lapis_ores"),
+    "lapis lazuli": ("tag", "minecraft:lapis_ores"),
+    "钻石": ("tag", "minecraft:diamond_ores"),
+    "钻石矿": ("tag", "minecraft:diamond_ores"),
+    "diamond": ("tag", "minecraft:diamond_ores"),
+    "diamond ore": ("tag", "minecraft:diamond_ores"),
+    "绿宝石": ("tag", "minecraft:emerald_ores"),
+    "绿宝石矿": ("tag", "minecraft:emerald_ores"),
+    "emerald": ("tag", "minecraft:emerald_ores"),
+    "emerald ore": ("tag", "minecraft:emerald_ores"),
+    "石英": ("block", "minecraft:nether_quartz_ore"),
+    "下界石英": ("block", "minecraft:nether_quartz_ore"),
+    "quartz": ("block", "minecraft:nether_quartz_ore"),
+    "远古残骸": ("block", "minecraft:ancient_debris"),
+    "ancient debris": ("block", "minecraft:ancient_debris"),
+}
+
+_GATHER_SELECTOR_ALIASES = {
+    "树": ("tag", "minecraft:logs"),
+    "树木": ("tag", "minecraft:logs"),
+    "木头": ("tag", "minecraft:logs"),
+    "原木": ("tag", "minecraft:logs"),
+    "log": ("tag", "minecraft:logs"),
+    "logs": ("tag", "minecraft:logs"),
+    "wood": ("tag", "minecraft:logs"),
+    "石头": ("block", "minecraft:stone"),
+    "stone": ("block", "minecraft:stone"),
+    "圆石": ("block", "minecraft:cobblestone"),
+    "cobblestone": ("block", "minecraft:cobblestone"),
+    "泥土": ("block", "minecraft:dirt"),
+    "dirt": ("block", "minecraft:dirt"),
+    "沙子": ("block", "minecraft:sand"),
+    "sand": ("block", "minecraft:sand"),
+    "沙砾": ("block", "minecraft:gravel"),
+    "gravel": ("block", "minecraft:gravel"),
+    "黏土": ("block", "minecraft:clay"),
+    "粘土": ("block", "minecraft:clay"),
+    "clay": ("block", "minecraft:clay"),
+}
+
+_RESOURCE_ID_PATTERN = re.compile(r"^[a-z0-9_.-]+:[a-z0-9_./-]+$")
+_PLAIN_RESOURCE_PATH_PATTERN = re.compile(r"^[a-z0-9_./-]+$")
+_COMMON_GATHER_TAG_PATHS = {
+    "logs", "leaves", "wool", "flowers", "saplings", "dirt", "sand",
+}
+
+
+def _normalize_target_count(value, *, default=1):
+    if value in (None, ""):
+        return int(default)
+    if isinstance(value, bool):
+        raise ValueError("target_count must be an integer between 1 and 4096")
+    try:
+        count = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "target_count must be an integer between 1 and 4096"
+        ) from exc
+    if isinstance(value, float) and not value.is_integer():
+        raise ValueError("target_count must be an integer between 1 and 4096")
+    if not 1 <= count <= 4096:
+        raise ValueError("target_count must be an integer between 1 and 4096")
+    return count
+
+
+def _normalize_selector_resource_id(value, *, default_namespace=True):
+    text = str(value or "").strip().lower()
+    if default_namespace and ":" not in text:
+        text = f"minecraft:{text}"
+    if not _RESOURCE_ID_PATTERN.fullmatch(text):
+        raise ValueError("resource must be a valid namespaced Minecraft resource ID")
+    return text
+
+
+def _resolve_ore_selector(ore):
+    text = " ".join(str(ore or "").strip().lower().split())
+    if not text:
+        raise ValueError("ore is required")
+    alias = _ORE_SELECTOR_ALIASES.get(text)
+    if alias is not None:
+        return {"type": alias[0], "id": alias[1]}
+    if text.startswith("#"):
+        return {
+            "type": "tag",
+            "id": _normalize_selector_resource_id(text[1:]),
+        }
+    if ":" in text:
+        resource_id = _normalize_selector_resource_id(text, default_namespace=False)
+        selector_type = "tag" if resource_id.split(":", 1)[1].endswith("_ores") else "block"
+        return {"type": selector_type, "id": resource_id}
+    if _PLAIN_RESOURCE_PATH_PATTERN.fullmatch(text) and text.endswith(("_ore", "_ores")):
+        selector_type = "tag" if text.endswith("_ores") else "block"
+        return {"type": selector_type, "id": f"minecraft:{text}"}
+    raise ValueError(
+        "unknown ore; use a common Chinese/English ore name or a namespaced block/tag ID"
+    )
+
+
+def _resolve_gather_selector(resource):
+    text = " ".join(str(resource or "").strip().lower().split())
+    if not text:
+        raise ValueError("resource is required")
+    alias = _GATHER_SELECTOR_ALIASES.get(text)
+    if alias is not None:
+        return {"type": alias[0], "id": alias[1]}
+    explicit_tag = text.startswith("#")
+    if explicit_tag:
+        text = text[1:]
+    if ":" in text:
+        resource_id = _normalize_selector_resource_id(text, default_namespace=False)
+    elif _PLAIN_RESOURCE_PATH_PATTERN.fullmatch(text):
+        resource_id = _normalize_selector_resource_id(text)
+    else:
+        raise ValueError(
+            "unknown resource; use a common resource name or a namespaced block/tag ID"
+        )
+    path = resource_id.split(":", 1)[1]
+    selector_type = (
+        "tag" if explicit_tag or path in _COMMON_GATHER_TAG_PATHS else "block"
+    )
+    return {"type": selector_type, "id": resource_id}
+
+_COMBAT_TASK_WEAPONS = {
+    "attack": (
+        "_sword", "_axe", ":trident", ":mace", "dagger", "spear",
+        "katana", "slashblade",
+    ),
+    "ranged_attack": (":bow",),
+    "crossbow_attack": (":crossbow",),
+    "danmaku_attack": ("gohei", "danmaku", "spell", "wand", "gun"),
+    "trident_attack": (":trident",),
+}
+
 
 def _normalize_item_id(item):
     text = str(item or "").strip()
     if not text:
         return ""
     return _ITEM_ALIASES.get(text.lower(), _ITEM_ALIASES.get(text, text))
+
+
+def _combat_task_id(task):
+    resolved = task_resolver.resolve_task_name(str(task or "").strip())
+    short_id = str(resolved or "").split(":")[-1].lower()
+    return short_id if short_id in _COMBAT_TASK_WEAPONS else ""
+
+
+def _weapon_matches_combat_task(task_id, item_id):
+    item = str(item_id or "").strip().lower()
+    if not item:
+        return False
+    return any(marker in item for marker in _COMBAT_TASK_WEAPONS[task_id])
+
+
+def _authoritative_combat_compatibility(equipment, task_id):
+    """Bridge 提供数据时，返回 TLM 自身的武器兼容判定。"""
+    compatibility = equipment.get("combat_task_compatibility")
+    if not isinstance(compatibility, dict):
+        return None
+    for task_uid, compatible in compatibility.items():
+        short_id = str(task_uid or "").split(":")[-1].lower()
+        if short_id == task_id and isinstance(compatible, bool):
+            return compatible
+    return None
+
+
+async def _guard_combat_task_equipment(plugin, task):
+    """只有最新装备查询确认主手是武器时，才允许切换到战斗工作。"""
+    task_id = _combat_task_id(task)
+    if not task_id:
+        return None
+    equipment = await do_game_context(plugin, category="equipment")
+    if equipment.get("is_error"):
+        return Err("无法确认女仆主手装备，已拒绝启动战斗工作")
+    main_hand = str(equipment.get("main_hand") or "")
+    compatible = _authoritative_combat_compatibility(equipment, task_id)
+    if compatible is None:
+        compatible = _weapon_matches_combat_task(task_id, main_hand)
+    if not compatible:
+        return Err(
+            f"女仆主手不是适合 {task_id} 的武器（当前：{main_hand or '空手'}），"
+            "已拒绝启动战斗工作"
+        )
+    return None
 
 
 async def do_maid_status(plugin):
@@ -117,7 +319,10 @@ async def do_switch_follow(plugin, *, action="follow"):
     maid_id = plugin._resolve_maid_id()
     if not maid_id:
         return Err("No maid assigned")
-    follow = action != "stay"
+    normalized_action = str(action or "").strip().lower()
+    if normalized_action not in {"follow", "stay"}:
+        return Err("action must be follow or stay")
+    follow = normalized_action == "follow"
     result = await _send_guarded_body_command(plugin, maid_id, {
         "type": "command_maid",
         "data": {"maid_id": maid_id, "command": "switch_follow", "args": {"follow": follow}},
@@ -127,21 +332,60 @@ async def do_switch_follow(plugin, *, action="follow"):
     result_data = result.get("data", {})
     if result_data.get("success") is False:
         return Err(result_data.get("error", "Command failed"))
-    state = result_data.get("state", "")
-    extra = {}
-    if follow and state == "already_following":
-        maid = plugin._maid_status_cache.get(maid_id, {})
-        if maid.get("is_sitting", False):
-            sit_result = await _send_guarded_body_command(plugin, maid_id, {
-                "type": "command_maid",
-                "data": {"maid_id": maid_id, "command": "switch_sit", "args": {"sit": False}},
-            }, "switch_sit")
-            if sit_result.get("type") != "error":
-                sit_data = sit_result.get("data", {})
-                if sit_data.get("success") is not False:
-                    extra["stood_up"] = True
-                    plugin.logger.info("[Entry] switch_follow: maid was sitting, auto stood up")
-    return Ok({"success": True, "action": action, **extra})
+    state = str(result_data.get("state") or "")
+    verification = await _verify_follow_state(plugin, maid_id, follow)
+    if not verification.get("verified"):
+        return {
+            "output": {
+                "success": False,
+                "recoverable": True,
+                "error": "Follow command returned success, but state verification failed",
+                "action": normalized_action,
+                "command_state": state,
+                **verification,
+            },
+            "is_error": True,
+            "error": "FOLLOW_STATE_VERIFICATION_FAILED",
+        }
+    stood_up = follow and state == "following_stood_up"
+    return Ok({
+        "success": True,
+        "action": normalized_action,
+        "command_state": state,
+        "stood_up": stood_up,
+        **verification,
+    })
+
+
+async def _verify_follow_state(plugin, maid_id, expected_follow):
+    status_result = await plugin._send_request({"type": "get_maid_status"}, timeout=5)
+    if status_result.get("type") == "error":
+        return {
+            "verified": False,
+            "verification_error": status_result.get("data", {}),
+            "expected_following": bool(expected_follow),
+        }
+    maids = status_result.get("data", {}).get("maids", [])
+    for maid in maids:
+        if maid.get("id") != maid_id:
+            continue
+        plugin._maid_status_cache[maid_id] = maid
+        is_following = bool(maid.get("is_following", False))
+        is_sitting = bool(maid.get("is_sitting", False))
+        return {
+            "verified": (
+                is_following == bool(expected_follow)
+                and (not expected_follow or not is_sitting)
+            ),
+            "expected_following": bool(expected_follow),
+            "is_following": is_following,
+            "is_sitting": is_sitting,
+        }
+    return {
+        "verified": False,
+        "verification_error": "Assigned maid was not present in status response",
+        "expected_following": bool(expected_follow),
+    }
 
 
 async def do_switch_sit(plugin, *, action="sit"):
@@ -173,6 +417,10 @@ async def do_switch_task(plugin, *, task=""):
         return Err("No maid assigned")
     if not task:
         return Err("请提供task参数")
+
+    combat_guard = await _guard_combat_task_equipment(plugin, task)
+    if combat_guard is not None:
+        return combat_guard
 
     director = getattr(plugin, "_maid_activity_director", None)
     if director is not None:
@@ -557,6 +805,31 @@ def _action_error(code, message, **details):
     }
 
 
+def _tool_result_is_error(result):
+    """同时读取 SDK Result 对象和旧版字典形测试适配器。"""
+    if isinstance(result, dict):
+        return bool(result.get("is_error"))
+    is_err = getattr(result, "is_err", None)
+    return bool(is_err()) if callable(is_err) else False
+
+
+def _tool_result_output(result):
+    """从两种工具结果表示中返回独立的映射副本。"""
+    if isinstance(result, dict):
+        output = result.get("output")
+    else:
+        value_or_none = getattr(result, "value_or_none", None)
+        output = (
+            value_or_none()
+            if callable(value_or_none)
+            else getattr(result, "value", None)
+        )
+        if output is None and _tool_result_is_error(result):
+            error = getattr(result, "error", None)
+            return dict(error) if isinstance(error, dict) else {"error": str(error)}
+    return dict(output) if isinstance(output, dict) else {}
+
+
 def _action_execution_confirmation(payload):
     """Make an accepted asynchronous action impossible to mistake for completion."""
     status = str((payload or {}).get("status") or "").strip().upper()
@@ -628,6 +901,7 @@ async def do_start_maid_action(
     action_id="",
     timeout_ms=None,
     replace_existing=True,
+    deduplicate_active=False,
     maid_id=None,
 ):
     """Validate and start a server-authoritative maid action."""
@@ -641,18 +915,9 @@ async def do_start_maid_action(
     service = _maid_action_service(plugin)
     try:
         normalized_args = service.registry.normalize(kind, args or {})
-        selector = normalized_args.get("selector")
-        selector_type = str((selector or {}).get("type") or "").lower()
-        selector_id = str((selector or {}).get("id") or "").lower()
-        selector_path = selector_id.split(":", 1)[-1]
-        ore_selector = (
-            selector_type == "tag"
-            and (
-                selector_path.endswith("_ores")
-                or selector_path == "ores"
-                or selector_path.startswith("ores/")
-            )
-        ) or (selector_type == "block" and selector_path.endswith("_ore"))
+        ore_selector = service.registry.is_ore_selector(
+            normalized_args.get("selector")
+        )
         if str(kind or "").strip().lower() == "harvest_blocks" and ore_selector:
             # Ore prospecting is explicitly continuous. Do not let an LLM-
             # invented finite timeout silently reintroduce a mining cap.
@@ -670,28 +935,32 @@ async def do_start_maid_action(
             "INVALID_ACTION_ARGUMENTS",
             "timeout_ms must be 0 (no deadline) or between 1000 and 120000",
         )
-    action_id = str(action_id or uuid.uuid4())
+    canonical_action_id = str(action_id or uuid.uuid4())
     logger = getattr(plugin, "logger", None)
     if logger is not None:
         logger.info(
             "[MaidAgent] start action_id=%s maid_id=%s kind=%s args=%s",
-            action_id, resolved_id, str(kind).strip().lower(), normalized_args,
+            canonical_action_id, resolved_id, str(kind).strip().lower(), normalized_args,
         )
     director = getattr(plugin, "_maid_activity_director", None)
     if director is not None:
+        target = {
+            "type": "agent_action",
+            "kind": str(kind).strip().lower(),
+            "args": normalized_args,
+            "timeout_ms": timeout_ms,
+        }
+        # 对话 LLM 和主动 Agent 可能分别解析出相同的移动请求。调用方未提供 id 时，
+        # 由调度器在启动新动作前比较动作类型和规范化参数。
+        if action_id or not deduplicate_active:
+            target["action_id"] = canonical_action_id
         transition = await director.set_activity(
-            {
-                "type": "agent_action",
-                "action_id": action_id,
-                "kind": str(kind).strip().lower(),
-                "args": normalized_args,
-                "timeout_ms": timeout_ms,
-            },
+            target,
             maid_id=resolved_id,
             switch_policy=(
                 "cancel_then_switch" if replace_existing else "reject_if_busy"
             ),
-            request_id=action_id,
+            request_id=canonical_action_id,
         )
         if not transition.get("success"):
             return _activity_tool_result(transition)
@@ -700,9 +969,21 @@ async def do_start_maid_action(
             or transition.get("terminal_activity")
             or {}
         )
+        if not started and transition.get("status") == "ALREADY_ACTIVE":
+            final_activity = transition.get("final_activity") or {}
+            for item in final_activity.get("active_actions", []):
+                if (
+                    str(item.get("kind") or "") == target["kind"]
+                    and dict(item.get("args") or {}) == target["args"]
+                ):
+                    started = dict(item)
+                    break
+        returned_action_id = str(
+            started.get("action_id") or action_id or canonical_action_id
+        )
         response = {
             "accepted": True,
-            "action_id": action_id,
+            "action_id": returned_action_id,
             **started,
             "activity_transition": transition,
         }
@@ -711,7 +992,7 @@ async def do_start_maid_action(
     request = {
         "type": "start_maid_action",
         "data": {
-            "action_id": action_id,
+            "action_id": canonical_action_id,
             "maid_id": resolved_id,
             "kind": str(kind).strip().lower(),
             "timeout_ms": timeout_ms,
@@ -719,9 +1000,12 @@ async def do_start_maid_action(
             "args": normalized_args,
         },
     }
-    result = await plugin._send_request(request)
+    result = await service.send_start_request(request)
     if result.get("type") == "error":
-        return _action_error("REQUEST_FAILED", str(result.get("data", {})), action_id=action_id)
+        return _action_error(
+            "REQUEST_FAILED", str(result.get("data", {})),
+            action_id=canonical_action_id,
+        )
     records = service.observe_response(result)
     result_data = dict(result.get("data", {}) or {})
     accepted = result_data.get("accepted", result_data.get("success", True))
@@ -730,11 +1014,16 @@ async def do_start_maid_action(
             str(result_data.get("error_code") or "ACTION_REJECTED"),
             str(result_data.get("error") or result_data.get("message")
                 or result_data.get("rejection_reason") or "Action rejected"),
-            action_id=action_id,
+            action_id=canonical_action_id,
             response=result_data,
         )
     record = records[0].as_dict() if records else {}
-    response = {"accepted": True, "action_id": action_id, **result_data, **record}
+    response = {
+        "accepted": True,
+        "action_id": canonical_action_id,
+        **result_data,
+        **record,
+    }
     response.update(_action_execution_confirmation(response))
     return Ok(response)
 
@@ -747,12 +1036,73 @@ async def do_move_maid_to(plugin, *, destination=""):
             "INVALID_ACTION_ARGUMENTS",
             "destination must be player, surface or mine_entry",
         )
-    return await do_start_maid_action(
+    if normalized == "player":
+        position = await do_game_context(plugin, category="position")
+        if position.get("is_error") or position.get("error"):
+            return _action_error(
+                "MAID_POSITION_UNAVAILABLE",
+                str(position.get("error") or "Unable to resolve maid position"),
+            )
+        maid_dimension = str(position.get("maid_dimension") or "")
+        owner_dimension = str(position.get("owner_dimension") or "")
+        same_dimension = bool(
+            maid_dimension and owner_dimension and maid_dimension == owner_dimension
+        )
+        if maid_dimension and owner_dimension and not same_dimension:
+            return _action_error(
+                "OWNER_NOT_IN_MAID_DIMENSION",
+                "Remote path recall requires the maid and owner to be in the same dimension",
+                maid_dimension=maid_dimension,
+                owner_dimension=owner_dimension,
+            )
+        outside_native_range = (
+            position.get("within_owner_simulation_distance") is False
+            and same_dimension
+        )
+        if not outside_native_range:
+            native = await do_switch_follow(plugin, action="follow")
+            if _tool_result_is_error(native):
+                return native
+            native_output = _tool_result_output(native)
+            return Ok({
+                **native_output,
+                "accepted": True,
+                "recall_mode": "native_follow",
+                "execution_pending": True,
+                "completion_confirmed": False,
+                "terminal_event_required": False,
+            })
+    args = {"destination": normalized}
+    if normalized == "player":
+        args["handoff_to_follow"] = True
+    result = await do_start_maid_action(
         plugin,
         kind="return_to_position",
-        args={"destination": normalized},
+        args=args,
         timeout_ms=0,
         replace_existing=True,
+        deduplicate_active=True,
+    )
+    if _tool_result_is_error(result):
+        return result
+    output = _tool_result_output(result)
+    output["recall_mode"] = "agent_path"
+    return Ok(output)
+
+
+async def do_navigate_maid_to(plugin, *, x=None, y=None, z=None):
+    """启动由服务端权威执行且不会破坏方块的坐标寻路。"""
+    if any(value is None or isinstance(value, bool) for value in (x, y, z)):
+        return _action_error(
+            "INVALID_ACTION_ARGUMENTS",
+            "x, y and z must all be numeric coordinates",
+        )
+    return await do_start_maid_action(
+        plugin,
+        kind="navigate",
+        args={"target": {"x": x, "y": y, "z": z}},
+        replace_existing=True,
+        deduplicate_active=True,
     )
 
 
@@ -786,25 +1136,67 @@ async def do_cancel_maid_action(plugin, *, action_id="", maid_id=None):
     return Ok({"accepted": True, "action_id": str(action_id), **result_data})
 
 
+def _cached_terminal_action_result(service, action_id, **metadata):
+    record = service.tracker.get(action_id)
+    if record is None or not record.terminal:
+        return None
+    return Ok({
+        **record.as_dict(),
+        "found": True,
+        "source": "local_terminal_cache",
+        **metadata,
+    })
+
+
 async def do_get_maid_action_status(plugin, *, action_id=""):
-    if not plugin.connected:
-        return _action_error("NOT_CONNECTED", "Not connected to Minecraft")
-    if not str(action_id or "").strip():
+    action_id = str(action_id or "").strip()
+    if not action_id:
         return _action_error("INVALID_ACTION_ARGUMENTS", "action_id is required")
     service = _maid_action_service(plugin)
+    if not plugin.connected:
+        cached = _cached_terminal_action_result(
+            service, action_id, server_query_error="NOT_CONNECTED"
+        )
+        if cached is not None:
+            return cached
+        return _action_error("NOT_CONNECTED", "Not connected to Minecraft")
     result = await plugin._send_request({
         "type": "get_maid_action_status",
-        "data": {"action_id": str(action_id)},
+        "data": {"action_id": action_id},
     })
     if result.get("type") == "error":
-        return _action_error("REQUEST_FAILED", str(result.get("data", {})), action_id=action_id)
+        cached = _cached_terminal_action_result(
+            service,
+            action_id,
+            server_query_error=str(result.get("data", {})),
+        )
+        if cached is not None:
+            return cached
+        return _action_error(
+            "REQUEST_FAILED", str(result.get("data", {})), action_id=action_id
+        )
     records = service.observe_response(result)
     result_data = dict(result.get("data", {}) or {})
     if result_data.get("found") is False or result_data.get("error"):
+        cache_metadata = {}
+        if result_data.get("found") is False:
+            cache_metadata["server_found"] = False
+        if result_data.get("error"):
+            cache_metadata["server_query_error"] = str(result_data["error"])
+        cached = _cached_terminal_action_result(
+            service,
+            action_id,
+            server_error_code=str(
+                result_data.get("error_code") or "ACTION_NOT_FOUND"
+            ),
+            **cache_metadata,
+        )
+        if cached is not None:
+            return cached
         return _action_error(
             str(result_data.get("error_code") or "ACTION_NOT_FOUND"),
             str(result_data.get("error") or "Maid action was not found"),
-            action_id=str(action_id), response=result_data,
+            action_id=action_id, response=result_data,
         )
     record_data = records[0].as_dict() if records else {}
     return Ok({**result_data, **record_data})
@@ -851,6 +1243,7 @@ async def do_start_skill(
     args=None,
     skill_id="",
     replace_existing=True,
+    deduplicate_active=False,
     maid_id=None,
 ):
     """Start a checkpointed high-level skill through SkillRunner only."""
@@ -869,13 +1262,26 @@ async def do_start_skill(
         if not isinstance(args, (dict, type(None))):
             return _action_error("INVALID_SKILL_ARGUMENTS", "args must be an object")
         canonical_skill_id = str(skill_id or uuid.uuid4()).strip()
+        skill_name = str(skill or "").strip().lower()
+        target_args = dict(args or {})
+        normalizer = getattr(runner, "normalize_args", None)
+        if deduplicate_active and callable(normalizer):
+            try:
+                target_args = dict(normalizer(skill_name, target_args))
+            except (TypeError, ValueError) as exc:
+                return _action_error("INVALID_SKILL_ARGUMENTS", str(exc))
+        target = {
+            "type": "skill",
+            "skill": skill_name,
+            "args": target_args,
+        }
+        # 直连对话工具和主动 Agent 可能分别解析出同一句请求。不生成 skill_id，
+        # 让每个女仆的锁比较 Skill 与规范化参数；若同一 Skill 正在运行则返回
+        # ALREADY_ACTIVE，而不是取消并重启。
+        if skill_id or not deduplicate_active:
+            target["skill_id"] = canonical_skill_id
         transition = await director.set_activity(
-            {
-                "type": "skill",
-                "skill": str(skill or "").strip().lower(),
-                "skill_id": canonical_skill_id,
-                "args": dict(args or {}),
-            },
+            target,
             maid_id=resolved_id,
             switch_policy=(
                 "cancel_then_switch" if replace_existing else "reject_if_busy"
@@ -889,9 +1295,21 @@ async def do_start_skill(
             or transition.get("terminal_activity")
             or {}
         )
+        if not started and transition.get("status") == "ALREADY_ACTIVE":
+            final_activity = transition.get("final_activity") or {}
+            for item in final_activity.get("active_skills", []):
+                if (
+                    str(item.get("skill_name") or "") == target["skill"]
+                    and dict(item.get("args") or {}) == target["args"]
+                ):
+                    started = dict(item)
+                    break
+        returned_skill_id = str(
+            started.get("skill_id") or skill_id or canonical_skill_id
+        )
         return Ok({
             "accepted": True,
-            "skill_id": canonical_skill_id,
+            "skill_id": returned_skill_id,
             **started,
             "activity_transition": transition,
             **_skill_execution_confirmation(started),
@@ -915,6 +1333,54 @@ async def do_start_skill(
         **snapshot,
         **_skill_execution_confirmation(snapshot),
     })
+
+
+async def do_mine_ore(plugin, *, ore="", target_count=1, maid_id=None):
+    """将面向用户的简短矿石请求解析为 mine_ore Skill。"""
+    try:
+        selector = _resolve_ore_selector(ore)
+        count = _normalize_target_count(target_count)
+    except ValueError as exc:
+        return _action_error("INVALID_MINING_REQUEST", str(exc))
+    return await do_start_skill(
+        plugin,
+        skill="mine_ore",
+        args={
+            "selector": selector,
+            "target_count": count,
+            "target_metric": "blocks_harvested",
+            "execution_mode": "autonomous",
+        },
+        replace_existing=True,
+        deduplicate_active=True,
+        maid_id=maid_id,
+    )
+
+
+async def do_gather_blocks(
+    plugin, *, resource="", target_count=1, maid_id=None
+):
+    """将附近资源的简短请求解析为 gather_blocks Skill。"""
+    try:
+        selector = _resolve_gather_selector(resource)
+        count = _normalize_target_count(target_count)
+    except ValueError as exc:
+        return _action_error("INVALID_GATHER_REQUEST", str(exc))
+    return await do_start_skill(
+        plugin,
+        skill="gather_blocks",
+        args={
+            "selector": selector,
+            "target_count": count,
+            "target_metric": "blocks_harvested",
+            "search_radius": 12,
+            "vein_mining": True,
+            "tool_policy": "require_correct",
+        },
+        replace_existing=True,
+        deduplicate_active=True,
+        maid_id=maid_id,
+    )
 
 
 async def do_cancel_skill(plugin, *, skill_id="", maid_id=None):
@@ -983,11 +1449,64 @@ def _activity_tool_result(result):
     }
 
 
-async def do_get_maid_activity(plugin, *, maid_id=None):
+async def do_get_maid_activity(
+    plugin, *, action_id="", skill_id="", maid_id=None
+):
     resolved_id = plugin._resolve_maid_id(maid_id)
     result = await _maid_activity_director(plugin).get_activity(
         maid_id=str(resolved_id or "")
     )
+    current_activity_available = bool(result.get("success"))
+    requested_errors = {}
+    requested_count = 0
+
+    action_id = str(action_id or "").strip()
+    if action_id:
+        requested_count += 1
+        action_result = await do_get_maid_action_status(
+            plugin, action_id=action_id
+        )
+        if _tool_result_is_error(action_result):
+            requested_errors["action"] = _tool_result_output(action_result)
+        else:
+            result["requested_action"] = _tool_result_output(action_result)
+
+    skill_id = str(skill_id or "").strip()
+    if skill_id:
+        requested_count += 1
+        skill_result = await do_get_skill_status(plugin, skill_id=skill_id)
+        if _tool_result_is_error(skill_result):
+            requested_errors["skill"] = _tool_result_output(skill_result)
+        else:
+            result["requested_skill"] = _tool_result_output(skill_result)
+
+    if requested_errors:
+        result["requested_errors"] = requested_errors
+        result["success"] = False
+        result["partial"] = bool(
+            current_activity_available
+            or result.get("requested_action")
+            or result.get("requested_skill")
+        )
+        result["error_code"] = "REQUESTED_ACTIVITY_NOT_FOUND"
+        return _activity_tool_result(result)
+
+    if requested_count and not current_activity_available:
+        current_error = {
+            key: result[key]
+            for key in (
+                "error_code", "error", "status_error", "action_query_error"
+            )
+            if key in result
+        }
+        result.pop("error_code", None)
+        result.pop("error", None)
+        result["success"] = True
+        result["partial"] = True
+        result["current_activity_available"] = False
+        if current_error:
+            result["current_activity_error"] = current_error
+
     return _activity_tool_result(result)
 
 

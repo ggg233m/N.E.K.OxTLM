@@ -1,5 +1,6 @@
 import importlib
 import unittest
+from unittest.mock import patch
 
 from ._bootstrap import bootstrap_sdk
 
@@ -8,20 +9,43 @@ bootstrap_sdk()
 tools = importlib.import_module("neko_tlm.tools")
 
 
+class RuntimeOk:
+    """模拟真实 N.E.K.O 运行时中 plugin.sdk.plugin.Ok 的最小结构。"""
+
+    def __init__(self, value):
+        self.value = value
+
+    def is_err(self):
+        return False
+
+    def value_or_none(self):
+        return self.value
+
+
 class FakePlugin:
     connected = True
+
+    class Logger:
+        def info(self, *_args, **_kwargs):
+            pass
+
+        def warning(self, *_args, **_kwargs):
+            pass
+
+    logger = Logger()
 
     def __init__(self, response):
         self.response = response
         self.requests = []
         self._maid_action_service = None
+        self._maid_status_cache = {}
 
     def _resolve_maid_id(self, maid_id=None):
         return maid_id or "maid-1"
 
     async def _send_request(self, request, timeout=30):
         self.requests.append(request)
-        return self.response
+        return self.response(request) if callable(self.response) else self.response
 
     async def _push_minecraft_context(self, *args, **kwargs):
         pass
@@ -38,6 +62,44 @@ class FakeDirector:
 
 
 class MaidActionToolTests(unittest.IsolatedAsyncioTestCase):
+    async def test_combat_guard_uses_tlm_authoritative_mod_weapon_verdict(self):
+        plugin = FakePlugin({
+            "type": "game_context",
+            "data": {
+                "main_hand": "example_mod:unfamiliar_weapon",
+                "combat_task_compatibility": {
+                    "touhou_little_maid:attack": True,
+                },
+            },
+        })
+
+        result = await tools._guard_combat_task_equipment(plugin, "打怪")
+
+        self.assertIsNone(result)
+        self.assertEqual("equipment", plugin.requests[0]["data"]["category"])
+
+    async def test_combat_guard_rejects_authoritative_incompatible_item(self):
+        plugin = FakePlugin({
+            "type": "game_context",
+            "data": {
+                "main_hand": "example_mod:decorative_blade",
+                "combat_task_compatibility": {
+                    "touhou_little_maid:attack": False,
+                },
+            },
+        })
+
+        result = await tools._guard_combat_task_equipment(plugin, "打怪")
+
+        self.assertTrue(result["is_error"])
+
+    def test_legacy_bridge_fallback_recognizes_slashblade(self):
+        self.assertTrue(
+            tools._weapon_matches_combat_task(
+                "attack", "slashblade:slashblade"
+            )
+        )
+
     async def test_start_builds_normalized_protocol_request(self):
         plugin = FakePlugin({
             "type": "maid_action_start_result",
@@ -193,17 +255,31 @@ class MaidActionToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["output"]["completion_confirmed"])
         self.assertTrue(result["output"]["terminal_event_required"])
 
-    async def test_simple_move_tool_starts_safe_return_to_player(self):
-        plugin = FakePlugin({
-            "type": "maid_action_start_result",
-            "data": {
-                "accepted": True, "action_id": "move", "generation": 1,
-                "status": "RUNNING", "kind": "return_to_position",
-            },
-        })
+    async def test_player_move_outside_simulation_range_starts_agent_recall(self):
+        def response(request):
+            if request["type"] == "get_game_context":
+                return {
+                    "type": "game_context",
+                    "data": {
+                        "maid_dimension": "minecraft:overworld",
+                        "owner_dimension": "minecraft:overworld",
+                        "within_owner_simulation_distance": False,
+                    },
+                }
+            return {
+                "type": "maid_action_start_result",
+                "data": {
+                    "accepted": True, "action_id": "move", "generation": 1,
+                    "status": "RUNNING", "kind": "return_to_position",
+                },
+            }
+
+        plugin = FakePlugin(response)
         result = await tools.do_move_maid_to(plugin, destination="player")
         self.assertFalse(result["is_error"])
-        payload = plugin.requests[0]["data"]
+        self.assertEqual("agent_path", result["output"]["recall_mode"])
+        self.assertEqual("get_game_context", plugin.requests[0]["type"])
+        payload = plugin.requests[1]["data"]
         self.assertEqual("return_to_position", payload["kind"])
         self.assertEqual({
             "destination": "player",
@@ -212,10 +288,133 @@ class MaidActionToolTests(unittest.IsolatedAsyncioTestCase):
             "route_policy": "recorded_tunnels_first",
             "placement_policy": "safe_support_and_water_seal",
             "max_placements": 0,
+            "handoff_to_follow": True,
         }, payload["args"])
         self.assertEqual(0, payload["timeout_ms"])
         self.assertTrue(payload["replace_existing"])
         self.assertFalse(result["output"]["completion_confirmed"])
+
+    async def test_player_move_inside_simulation_range_uses_native_follow(self):
+        def response(request):
+            if request["type"] == "get_game_context":
+                return {
+                    "type": "game_context",
+                    "data": {
+                        "maid_dimension": "minecraft:overworld",
+                        "owner_dimension": "minecraft:overworld",
+                        "within_owner_simulation_distance": True,
+                    },
+                }
+            if request["type"] == "command_maid":
+                return {
+                    "type": "command_result",
+                    "data": {"success": True, "state": "following"},
+                }
+            return {
+                "type": "maid_status",
+                "data": {"maids": [{
+                    "id": "maid-1", "is_following": True,
+                    "is_sitting": False,
+                }]},
+            }
+
+        plugin = FakePlugin(response)
+        result = await tools.do_move_maid_to(plugin, destination="player")
+
+        self.assertFalse(result["is_error"])
+        self.assertEqual("native_follow", result["output"]["recall_mode"])
+        self.assertTrue(result["output"]["verified"])
+        self.assertEqual(
+            ["get_game_context", "command_maid", "get_maid_status"],
+            [request["type"] for request in plugin.requests],
+        )
+        self.assertFalse(any(
+            request["type"] == "start_maid_action"
+            for request in plugin.requests
+        ))
+
+    async def test_native_recall_accepts_real_sdk_result_objects(self):
+        def response(request):
+            if request["type"] == "get_game_context":
+                return {
+                    "type": "game_context",
+                    "data": {
+                        "maid_dimension": "minecraft:overworld",
+                        "owner_dimension": "minecraft:overworld",
+                        "within_owner_simulation_distance": True,
+                    },
+                }
+            if request["type"] == "command_maid":
+                return {
+                    "type": "command_result",
+                    "data": {"success": True, "state": "following"},
+                }
+            return {
+                "type": "maid_status",
+                "data": {"maids": [{
+                    "id": "maid-1",
+                    "is_following": True,
+                    "is_sitting": False,
+                }]},
+            }
+
+        with patch.object(tools, "Ok", RuntimeOk):
+            result = await tools.do_move_maid_to(
+                FakePlugin(response), destination="player"
+            )
+
+        self.assertIsInstance(result, RuntimeOk)
+        self.assertEqual("native_follow", result.value["recall_mode"])
+        self.assertTrue(result.value["verified"])
+
+    async def test_agent_recall_accepts_real_sdk_result_objects(self):
+        def response(request):
+            if request["type"] == "get_game_context":
+                return {
+                    "type": "game_context",
+                    "data": {
+                        "maid_dimension": "minecraft:overworld",
+                        "owner_dimension": "minecraft:overworld",
+                        "within_owner_simulation_distance": False,
+                    },
+                }
+            return {
+                "type": "maid_action_start_result",
+                "data": {
+                    "accepted": True,
+                    "action_id": "runtime-result-move",
+                    "generation": 1,
+                    "status": "RUNNING",
+                    "kind": "return_to_position",
+                },
+            }
+
+        with patch.object(tools, "Ok", RuntimeOk):
+            result = await tools.do_move_maid_to(
+                FakePlugin(response), destination="player"
+            )
+
+        self.assertIsInstance(result, RuntimeOk)
+        self.assertEqual("agent_path", result.value["recall_mode"])
+        self.assertEqual("runtime-result-move", result.value["action_id"])
+
+    async def test_player_move_across_dimensions_does_not_enable_native_follow(self):
+        plugin = FakePlugin({
+            "type": "game_context",
+            "data": {
+                "maid_dimension": "minecraft:the_nether",
+                "owner_dimension": "minecraft:overworld",
+                "within_owner_simulation_distance": False,
+            },
+        })
+
+        result = await tools.do_move_maid_to(plugin, destination="player")
+
+        self.assertTrue(result["is_error"])
+        self.assertEqual("OWNER_NOT_IN_MAID_DIMENSION", result["error"])
+        self.assertEqual(["get_game_context"], [
+            request["type"] for request in plugin.requests
+        ])
 
     async def test_simple_move_tool_rejects_unknown_destination_without_request(self):
         plugin = FakePlugin({})
@@ -241,6 +440,73 @@ class MaidActionToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([], plugin.requests)
         self.assertEqual("return_to_position",
                          plugin._maid_activity_director.calls[0][0]["kind"])
+
+    async def test_coordinate_navigation_uses_non_destructive_navigate_action(self):
+        plugin = FakePlugin({
+            "type": "maid_action_start_result",
+            "data": {
+                "accepted": True, "action_id": "nav", "generation": 1,
+                "status": "RUNNING", "kind": "navigate",
+            },
+        })
+
+        result = await tools.do_navigate_maid_to(plugin, x=12, y=70, z=-4)
+
+        self.assertFalse(result["is_error"])
+        payload = plugin.requests[0]["data"]
+        self.assertEqual("navigate", payload["kind"])
+        self.assertEqual(
+            {"x": 12.0, "y": 70.0, "z": -4.0},
+            payload["args"]["target"],
+        )
+        self.assertEqual(60000, payload["timeout_ms"])
+
+    async def test_coordinate_navigation_requires_all_numeric_coordinates(self):
+        plugin = FakePlugin({})
+        result = await tools.do_navigate_maid_to(
+            plugin, x=12, y=None, z=-4
+        )
+        self.assertTrue(result["is_error"])
+        self.assertEqual("INVALID_ACTION_ARGUMENTS", result["error"])
+        self.assertEqual([], plugin.requests)
+
+    async def test_duplicate_semantic_move_reuses_active_action(self):
+        plugin = FakePlugin(lambda _request: {
+            "type": "game_context",
+            "data": {
+                "maid_dimension": "minecraft:overworld",
+                "owner_dimension": "minecraft:overworld",
+                "within_owner_simulation_distance": False,
+            },
+        })
+        plugin._maid_activity_director = FakeDirector({
+            "success": True,
+            "status": "ALREADY_ACTIVE",
+            "final_activity": {
+                "active_actions": [{
+                    "action_id": "existing-move",
+                    "kind": "return_to_position",
+                    "args": {
+                        "destination": "player",
+                        "speed": 0.7,
+                        "stop_distance": 1.5,
+                        "route_policy": "recorded_tunnels_first",
+                        "placement_policy": "safe_support_and_water_seal",
+                        "max_placements": 0,
+                        "handoff_to_follow": True,
+                    },
+                    "status": "RUNNING",
+                }],
+            },
+        })
+
+        result = await tools.do_move_maid_to(plugin, destination="player")
+
+        self.assertFalse(result["is_error"])
+        self.assertEqual("existing-move", result["output"]["action_id"])
+        self.assertEqual("get_game_context", plugin.requests[0]["type"])
+        target = plugin._maid_activity_director.calls[0][0]
+        self.assertNotIn("action_id", target)
 
     async def test_completion_confirmation_requires_completed_and_arrived(self):
         base = {
@@ -378,6 +644,27 @@ class MaidActionToolTests(unittest.IsolatedAsyncioTestCase):
         result = await tools.do_get_maid_action_status(plugin, action_id="missing")
         self.assertTrue(result["is_error"])
         self.assertEqual("ACTION_NOT_FOUND", result["error"])
+
+    async def test_status_not_found_uses_observed_terminal_cache(self):
+        plugin = FakePlugin({
+            "type": "maid_action_status",
+            "data": {"found": False, "error_code": "ACTION_NOT_FOUND"},
+        })
+        service = tools._maid_action_service(plugin)
+        service.tracker.apply({
+            "action_id": "expired", "maid_id": "maid-1", "generation": 1,
+            "sequence": 4, "kind": "navigate", "status": "SUCCEEDED",
+            "stage": "ARRIVED", "end_reason": "COMPLETED",
+        })
+
+        result = await tools.do_get_maid_action_status(
+            plugin, action_id="expired"
+        )
+
+        self.assertFalse(result["is_error"])
+        self.assertEqual("SUCCEEDED", result["output"]["status"])
+        self.assertEqual("local_terminal_cache", result["output"]["source"])
+        self.assertFalse(result["output"]["server_found"])
 
     async def test_list_embedded_error_is_not_hidden_as_empty(self):
         plugin = FakePlugin({

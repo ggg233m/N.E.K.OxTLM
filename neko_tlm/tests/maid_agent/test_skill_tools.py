@@ -10,6 +10,8 @@ _tool_defs = importlib.import_module("neko_tlm.tool_defs")
 MC_CANCEL_SKILL = _tool_defs.MC_CANCEL_SKILL
 MC_GET_SKILL_STATUS = _tool_defs.MC_GET_SKILL_STATUS
 MC_LIST_SKILLS = _tool_defs.MC_LIST_SKILLS
+MC_MINE_ORE = _tool_defs.MC_MINE_ORE
+MC_GATHER_BLOCKS = _tool_defs.MC_GATHER_BLOCKS
 MC_START_SKILL = _tool_defs.MC_START_SKILL
 
 
@@ -51,6 +53,26 @@ class FakePlugin:
         return maid_id or "maid-1"
 
 
+class AlreadyActiveDirector:
+    def __init__(self):
+        self.calls = []
+
+    async def set_activity(self, target, **kwargs):
+        self.calls.append((target, kwargs))
+        active = {
+            "skill_id": "existing-skill",
+            "maid_id": "maid-1",
+            "skill_name": target["skill"],
+            "status": "RUNNING",
+            "args": dict(target["args"]),
+        }
+        return {
+            "success": True,
+            "status": "ALREADY_ACTIVE",
+            "final_activity": {"active_skills": [active]},
+        }
+
+
 class SkillToolTests(unittest.IsolatedAsyncioTestCase):
     async def test_start_calls_runner_directly_with_frozen_skill_wire_key(self):
         plugin = FakePlugin()
@@ -80,7 +102,69 @@ class SkillToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(listed["is_error"])
         self.assertEqual(False, plugin._skill_runner.calls[-1][1]["include_terminal"])
 
+    async def test_compact_mining_tool_resolves_alias_and_starts_autonomous_skill(self):
+        plugin = FakePlugin()
+        result = await tools.do_mine_ore(
+            plugin, ore="钻石", target_count=8
+        )
+        self.assertFalse(result["is_error"])
+        name, call = plugin._skill_runner.calls[0]
+        self.assertEqual("start", name)
+        self.assertEqual("mine_ore", call["skill_name"])
+        self.assertEqual(
+            {
+                "selector": {"type": "tag", "id": "minecraft:diamond_ores"},
+                "target_count": 8,
+                "target_metric": "blocks_harvested",
+                "execution_mode": "autonomous",
+            },
+            call["args"],
+        )
+
+    async def test_compact_gather_tool_resolves_tag_and_uses_safe_defaults(self):
+        plugin = FakePlugin()
+        result = await tools.do_gather_blocks(
+            plugin, resource="#minecraft:logs", target_count=64
+        )
+        self.assertFalse(result["is_error"])
+        _, call = plugin._skill_runner.calls[0]
+        self.assertEqual("gather_blocks", call["skill_name"])
+        self.assertEqual(
+            {"type": "tag", "id": "minecraft:logs"},
+            call["args"]["selector"],
+        )
+        self.assertEqual(64, call["args"]["target_count"])
+        self.assertEqual(12, call["args"]["search_radius"])
+        self.assertTrue(call["args"]["vein_mining"])
+        self.assertEqual("require_correct", call["args"]["tool_policy"])
+
+    async def test_compact_skill_tools_reject_ambiguous_or_invalid_inputs(self):
+        plugin = FakePlugin()
+        missing = await tools.do_mine_ore(plugin, ore="")
+        unknown = await tools.do_mine_ore(plugin, ore="随便挖点")
+        invalid_count = await tools.do_gather_blocks(
+            plugin, resource="原木", target_count=True
+        )
+        self.assertEqual("INVALID_MINING_REQUEST", missing["error"])
+        self.assertEqual("INVALID_MINING_REQUEST", unknown["error"])
+        self.assertEqual("INVALID_GATHER_REQUEST", invalid_count["error"])
+        self.assertEqual([], plugin._skill_runner.calls)
+
+    async def test_direct_and_agent_routes_do_not_restart_same_active_skill(self):
+        plugin = FakePlugin()
+        plugin._maid_activity_director = AlreadyActiveDirector()
+        result = await tools.do_mine_ore(plugin, ore="diamond", target_count=1)
+        self.assertFalse(result["is_error"])
+        self.assertEqual("existing-skill", result["output"]["skill_id"])
+        self.assertEqual("RUNNING", result["output"]["status"])
+        target, kwargs = plugin._maid_activity_director.calls[0]
+        self.assertNotIn("skill_id", target)
+        self.assertTrue(kwargs["request_id"])
+        self.assertEqual([], plugin._skill_runner.calls)
+
     def test_public_tool_names_and_mine_ore_schema_are_frozen(self):
+        self.assertEqual("mc_mine_ore", MC_MINE_ORE["name"])
+        self.assertEqual("mc_gather_blocks", MC_GATHER_BLOCKS["name"])
         self.assertEqual("mc_start_skill", MC_START_SKILL["name"])
         self.assertEqual("mc_cancel_skill", MC_CANCEL_SKILL["name"])
         self.assertEqual("mc_get_skill_status", MC_GET_SKILL_STATUS["name"])

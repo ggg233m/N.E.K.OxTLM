@@ -18,6 +18,7 @@ import com.neko_tlm_bridge.tlm.agent.action.LegacyAttackAction;
 import com.neko_tlm_bridge.tlm.agent.action.NavigateAction;
 import com.neko_tlm_bridge.tlm.agent.action.ReturnToPositionAction;
 import com.neko_tlm_bridge.tlm.agent.runtime.MaidActionStore;
+import com.neko_tlm_bridge.tlm.agent.runtime.RemoteRecallChunkLease;
 import com.neko_tlm_bridge.tlm.agent.world.AutonomousMiningRecovery;
 import com.neko_tlm_bridge.ws.NekoCommand;
 import com.neko_tlm_bridge.ws.NekoWebSocketServer;
@@ -138,6 +139,7 @@ public class NekoTlmBridge {
 
     private static void onServerStopping(ServerStoppingEvent event) {
         MaidActionStore.getInstance().shutdown();
+        RemoteRecallChunkLease.shutdownPrepared();
         MaidPathDebugService.reset();
         MiningHudSyncService.reset();
         if (webSocketServer != null) {
@@ -164,6 +166,7 @@ public class NekoTlmBridge {
             webSocketServer.tickPendingCommands();
         }
         MaidActionStore.getInstance().tick(event.getServer());
+        RemoteRecallChunkLease.tickPrepared();
         MiningHudSyncService.onServerTick(event);
         GameEventHandler.onServerTick(event);
     }

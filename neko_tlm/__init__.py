@@ -24,7 +24,7 @@ from . import plan as _plan
 from . import tools as _tools
 from .awareness import AwarenessManager
 from .bridge import WSBridge
-from .instructions import _TLM_AI_INSTRUCTIONS
+from .instructions import _TLM_DIALOG_INSTRUCTIONS
 from .maid_activity import MaidActivityDirector
 from .maid_agent import MaidActionService
 from .maid_agent.skill_feedback import SkillFeedbackHandler
@@ -34,30 +34,27 @@ from .maid_agent.skills.mine_ore import MineOreSkill
 from .playmate import MinecraftPushRouter, PlaymateContextManager
 from .playmate.debug_log import PlaymateDebugLogger
 from .tool_defs import (
-    MC_CANCEL_MAID_ACTION,
-    MC_CANCEL_SKILL,
+    AGENT_NAVIGATE_MAID_TO_COORDINATES,
     MC_EQUIP_ITEM,
-    MC_EXECUTE_COMMAND,
     MC_GAME_CONTEXT,
-    MC_GET_MAID_ACTION_STATUS,
-    MC_GET_MAID_ACTIVITY,
-    MC_GET_MAID_CAPABILITIES,
-    MC_GET_SKILL_STATUS,
-    MC_LIST_ACTIVE_MAID_ACTIONS,
-    MC_LIST_SKILLS,
+    MC_GATHER_BLOCKS,
     MC_MAID_STATUS,
+    MC_MINE_ORE,
     MC_MOVE_MAID_TO,
-    MC_SEND_CHAT,
-    MC_SET_MAID_ACTIVITY,
-    MC_SET_PLAN,
-    MC_START_MAID_ACTION,
-    MC_START_SKILL,
     MC_STOP_MAID_ACTIVITY,
     MC_SWITCH_FOLLOW,
     MC_SWITCH_SCHEDULE,
     MC_SWITCH_SIT,
     MC_SWITCH_TASK,
-    MC_USE_SKILL,
+)
+
+_AGENT_FALLBACK_ENTRY_IDS = (
+    "switch_maid_work",
+    "mine_ore_autonomously",
+    "gather_nearby_blocks",
+    "switch_maid_follow",
+    "move_maid_to_destination",
+    "navigate_maid_to_coordinates",
 )
 
 # respond 事件的 coalesce_key 映射：相同 key 的新推送覆盖旧的未消费推送
@@ -270,6 +267,7 @@ class NekoMinecraftPlugin(NekoPluginBase):
         self._bridge.start()
         self._poll_task = asyncio.create_task(self._poll_messages())
         self._instructions_injected = False
+        self._re_register_agent_entries()
         self._re_register_llm_tools()
         asyncio.create_task(self._delayed_re_register_llm_tools(5))
         self.logger.info(f"[Startup] Bridge started, maid_id={self._assigned_maid_id}")
@@ -290,10 +288,34 @@ class NekoMinecraftPlugin(NekoPluginBase):
             self._notify_llm_tool_registered(meta)
         self.logger.info(f"[Startup] Re-emitted {len(self._llm_tools)} LLM tool registrations")
 
+    def _re_register_agent_entries(self):
+        """重新发布 Agent 入口，使热更新后的插件刷新宿主目录。
+
+        SDK 能在插件进程内正确收集这些静态入口，但已运行的宿主可能仍保留
+        升级前的入口预览。ENTRY_UPDATE 是 SDK 支持的运行时目录消息；重放
+        现有元数据即可让新入口立即可发现，无需修改宿主或重启应用。
+        """
+        collected = self.collect_entries(wrap_with_hooks=False)
+        emitted = 0
+        for entry_id in _AGENT_FALLBACK_ENTRY_IDS:
+            event_handler = collected.get(entry_id)
+            meta = getattr(event_handler, "meta", None)
+            if meta is None:
+                self.logger.warning(
+                    "[Startup] Agent fallback entry is missing: %s", entry_id
+                )
+                continue
+            self._notify_dynamic_entry_registered(entry_id, meta, enabled=True)
+            emitted += 1
+        self.logger.info(
+            "[Startup] Re-emitted %s Agent fallback entry registrations", emitted
+        )
+
     async def _delayed_re_register_llm_tools(self, delay=5):
         """延迟后再次重发注册，兜底 startup 阶段 main_server 仍未就绪的边界情况。"""
         try:
             await asyncio.sleep(delay)
+            self._re_register_agent_entries()
             self._re_register_llm_tools()
         except asyncio.CancelledError:
             pass
@@ -476,7 +498,7 @@ class NekoMinecraftPlugin(NekoPluginBase):
                 "type": "set_plan",
                 "data": {"plan": self._current_plan_text},
             })
-        instructions = _TLM_AI_INSTRUCTIONS
+        instructions = _TLM_DIALOG_INSTRUCTIONS
         if self._assigned_maid_id and self._assigned_maid_name:
             instructions += (
                 f"\n\n## 当前配置\n你已被指定为女仆「{self._assigned_maid_name}」"
@@ -932,6 +954,115 @@ class NekoMinecraftPlugin(NekoPluginBase):
             clear=bool(clear_flag),
         )
 
+    @plugin_entry(
+        id="switch_maid_work",
+        name="切换 Minecraft 女仆工作",
+        description=(
+            "当用户明确要求 Minecraft 女仆收田、收菜、种田、收甘蔗、"
+            "打草、剪羊毛、挤奶、喂动物、打怪、攻击、休息、待机、下棋"
+            "或切换其它 TLM 工作模式时，执行这个入口，不要只回复文字。"
+            "把用户说的工作原话放进 task；插件会动态匹配当前整合包的真实"
+            "任务并验证结果。重复切换到已生效的同一模式是安全且幂等的。"
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "task": {
+                    "type": "string",
+                    "description": "用户要求的工作原话，例如：收田、打草、打怪、休息、下棋。",
+                },
+            },
+            "required": ["task"],
+            "additionalProperties": False,
+        },
+        llm_result_fields=[
+            "success", "verified", "current_task", "current_task_name",
+            "requested_task", "matched_task_id",
+        ],
+    )
+    async def switch_maid_work(self, *, task="", **_):
+        """供对话模型只回复文本时使用的 Agent 可见回退入口。"""
+        return await _tools.do_switch_task(self, task=task)
+
+    @plugin_entry(
+        id="mine_ore_autonomously",
+        name="让 Minecraft 女仆自动找矿",
+        description=MC_MINE_ORE["description"],
+        input_schema=MC_MINE_ORE["parameters"],
+        llm_result_fields=[
+            "accepted", "skill_id", "status", "execution_pending",
+            "completion_confirmed", "terminal_event_required",
+        ],
+    )
+    async def mine_ore_autonomously(
+        self, *, ore="", target_count=1, **_
+    ):
+        """Agent 可见的自主采矿回退入口。"""
+        return await _tools.do_mine_ore(
+            self, ore=ore, target_count=target_count
+        )
+
+    @plugin_entry(
+        id="gather_nearby_blocks",
+        name="让 Minecraft 女仆砍树或采集附近资源",
+        description=MC_GATHER_BLOCKS["description"],
+        input_schema=MC_GATHER_BLOCKS["parameters"],
+        llm_result_fields=[
+            "accepted", "skill_id", "status", "execution_pending",
+            "completion_confirmed", "terminal_event_required",
+        ],
+    )
+    async def gather_nearby_blocks(
+        self, *, resource="", target_count=1, **_
+    ):
+        """Agent 可见的附近资源采集回退入口。"""
+        return await _tools.do_gather_blocks(
+            self, resource=resource, target_count=target_count
+        )
+
+    @plugin_entry(
+        id="switch_maid_follow",
+        name="切换 Minecraft 女仆跟随或驻守",
+        description=MC_SWITCH_FOLLOW["description"],
+        input_schema=MC_SWITCH_FOLLOW["parameters"],
+        llm_result_fields=[
+            "success", "verified", "action", "is_following", "is_sitting",
+            "stood_up", "command_state",
+        ],
+    )
+    async def switch_maid_follow(self, *, action="follow", **_):
+        """供明确跟随或驻守请求使用的 Agent 可见回退入口。"""
+        return await _tools.do_switch_follow(self, action=action)
+
+    @plugin_entry(
+        id="move_maid_to_destination",
+        name="让 Minecraft 女仆前往常用目的地",
+        description=MC_MOVE_MAID_TO["description"],
+        input_schema=MC_MOVE_MAID_TO["parameters"],
+        llm_result_fields=[
+            "accepted", "action_id", "kind", "status", "execution_pending",
+            "completion_confirmed", "terminal_event_required", "recall_mode",
+            "verified", "is_following",
+        ],
+    )
+    async def move_maid_to_destination(self, *, destination="", **_):
+        """Agent 可见的语义移动回退入口。"""
+        return await _tools.do_move_maid_to(self, destination=destination)
+
+    @plugin_entry(
+        id="navigate_maid_to_coordinates",
+        name="让 Minecraft 女仆自主寻路到坐标",
+        description=AGENT_NAVIGATE_MAID_TO_COORDINATES["description"],
+        input_schema=AGENT_NAVIGATE_MAID_TO_COORDINATES["parameters"],
+        llm_result_fields=[
+            "accepted", "action_id", "kind", "status", "execution_pending",
+            "completion_confirmed", "terminal_event_required",
+        ],
+    )
+    async def navigate_maid_to_coordinates(self, *, x=None, y=None, z=None, **_):
+        """Agent 可见的坐标寻路回退入口。"""
+        return await _tools.do_navigate_maid_to(self, x=x, y=y, z=z)
+
     # ── LLM 工具 ──
 
     @llm_tool(**MC_MAID_STATUS)
@@ -958,8 +1089,20 @@ class NekoMinecraftPlugin(NekoPluginBase):
     async def equip_item(self, *, item="", slot=None, **_):
         return await _tools.do_equip_item(self, item=item, slot=slot)
 
-    @llm_tool(**MC_SEND_CHAT)
+    @llm_tool(**MC_MINE_ORE)
+    async def mc_mine_ore(self, *, ore="", target_count=1, **_):
+        return await _tools.do_mine_ore(
+            self, ore=ore, target_count=target_count
+        )
+
+    @llm_tool(**MC_GATHER_BLOCKS)
+    async def mc_gather_blocks(self, *, resource="", target_count=1, **_):
+        return await _tools.do_gather_blocks(
+            self, resource=resource, target_count=target_count
+        )
+
     async def mc_send_chat(self, *, message, maid_id=None, **_):
+        """内部兼容入口；普通对话文本已经会进入游戏 UI。"""
         return await _tools.do_send_chat(self, message=message, maid_id=maid_id)
 
     @llm_tool(**MC_GAME_CONTEXT)
@@ -970,9 +1113,9 @@ class NekoMinecraftPlugin(NekoPluginBase):
     async def mc_move_maid_to(self, *, destination="", **_):
         return await _tools.do_move_maid_to(self, destination=destination)
 
-    @llm_tool(**MC_START_MAID_ACTION)
     async def mc_start_maid_action(self, *, kind="", args=None, action_id="",
                                    timeout_ms=None, replace_existing=True, **_):
+        """内部兼容入口；LLM 使用 mc_set_maid_activity。"""
         return await _tools.do_start_maid_action(
             self,
             kind=kind,
@@ -982,21 +1125,21 @@ class NekoMinecraftPlugin(NekoPluginBase):
             replace_existing=replace_existing,
         )
 
-    @llm_tool(**MC_CANCEL_MAID_ACTION)
     async def mc_cancel_maid_action(self, *, action_id="", **_):
+        """内部兼容入口；LLM 使用 mc_stop_maid_activity。"""
         return await _tools.do_cancel_maid_action(self, action_id=action_id)
 
-    @llm_tool(**MC_GET_MAID_ACTION_STATUS)
     async def mc_get_maid_action_status(self, *, action_id="", **_):
+        """内部兼容入口；LLM 使用 mc_get_maid_activity。"""
         return await _tools.do_get_maid_action_status(self, action_id=action_id)
 
-    @llm_tool(**MC_LIST_ACTIVE_MAID_ACTIONS)
     async def mc_list_active_maid_actions(self, **_):
+        """内部兼容入口；LLM 使用 mc_get_maid_activity。"""
         return await _tools.do_list_active_maid_actions(self)
 
-    @llm_tool(**MC_START_SKILL)
     async def mc_start_skill(self, *, skill="", args=None, skill_id="",
                              replace_existing=True, **_):
+        """内部兼容入口；LLM 使用 mc_set_maid_activity。"""
         return await _tools.do_start_skill(
             self,
             skill=skill,
@@ -1005,33 +1148,37 @@ class NekoMinecraftPlugin(NekoPluginBase):
             replace_existing=replace_existing,
         )
 
-    @llm_tool(**MC_CANCEL_SKILL)
     async def mc_cancel_skill(self, *, skill_id="", **_):
+        """内部兼容入口；LLM 使用 mc_stop_maid_activity。"""
         return await _tools.do_cancel_skill(self, skill_id=skill_id)
 
-    @llm_tool(**MC_GET_SKILL_STATUS)
     async def mc_get_skill_status(self, *, skill_id="", **_):
+        """内部兼容入口；LLM 使用 mc_get_maid_activity。"""
         return await _tools.do_get_skill_status(self, skill_id=skill_id)
 
-    @llm_tool(**MC_LIST_SKILLS)
     async def mc_list_skills(self, *, include_terminal=True, **_):
+        """内部兼容入口；LLM 使用 mc_get_maid_activity。"""
         return await _tools.do_list_skills(
             self, include_terminal=include_terminal
         )
 
-    @llm_tool(**MC_GET_MAID_ACTIVITY)
-    async def mc_get_maid_activity(self, **_):
-        return await _tools.do_get_maid_activity(self)
+    async def mc_get_maid_activity(
+        self, *, action_id="", skill_id="", **_
+    ):
+        """内部兼容入口，供高级活动诊断使用。"""
+        return await _tools.do_get_maid_activity(
+            self, action_id=action_id, skill_id=skill_id
+        )
 
-    @llm_tool(**MC_GET_MAID_CAPABILITIES)
     async def mc_get_maid_capabilities(self, **_):
+        """内部兼容入口，供高级能力发现使用。"""
         return await _tools.do_get_maid_capabilities(self)
 
-    @llm_tool(**MC_SET_MAID_ACTIVITY)
     async def mc_set_maid_activity(
         self, *, activity_type="", task="", kind="", skill="", args=None,
         switch_policy="cancel_then_switch", request_id="", **_
     ):
+        """内部兼容入口，供高级 Agent/Skill 活动使用。"""
         return await _tools.do_set_maid_activity(
             self,
             activity_type=activity_type,
@@ -1053,17 +1200,17 @@ class NekoMinecraftPlugin(NekoPluginBase):
             request_id=request_id,
         )
 
-    @llm_tool(**MC_USE_SKILL)
     async def use_skill(self, *, skill_name="", **_):
+        """内部兼容入口，供提示词或 RAG Skill 使用。"""
         return await _tools.do_use_skill(self, skill_name=skill_name)
 
-    @llm_tool(**MC_EXECUTE_COMMAND)
     async def execute_command(self, *, command="", **_):
+        """内部入口；普通对话轮次不会暴露命令执行能力。"""
         return await _tools.do_execute_command(self, command=command)
 
-    @llm_tool(**MC_SET_PLAN)
     async def set_plan(self, *, plan=None, title=None, steps=None, completed_steps=None,
                        uncompleted_steps=None, append_steps=None, clear=False, **_):
+        """内部兼容入口；UI/Agent 使用 set_plan_board。"""
         return await _tools.do_set_plan(
             self,
             plan=plan,

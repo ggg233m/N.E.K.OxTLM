@@ -1023,7 +1023,13 @@ class MaidActivityDirector:
                     str(item.get("action_id") or "") == expected_id
                     for item in current.get("active_actions", [])
                 )
-            return False
+            expected_kind = str(target.get("kind") or "")
+            expected_args = dict(target.get("args") or {})
+            return any(
+                str(item.get("kind") or "") == expected_kind
+                and dict(item.get("args") or {}) == expected_args
+                for item in current.get("active_actions", [])
+            )
         expected_id = str(
             (start_result or {}).get("skill_id") or target.get("skill_id") or ""
         )

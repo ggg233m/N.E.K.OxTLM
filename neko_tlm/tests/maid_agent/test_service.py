@@ -54,6 +54,39 @@ class RejectingSkillConsumer(FakeSkillConsumer):
 
 
 class MaidActionServiceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_remote_recall_retries_while_unloaded_maid_joins(self):
+        pending = {
+            "type": "maid_action_start_result",
+            "data": {
+                "accepted": False,
+                "error_code": "MAID_LOAD_PENDING",
+                "rejection_reason": "MAID_LOAD_PENDING",
+            },
+        }
+        accepted = {
+            "type": "maid_action_start_result",
+            "data": {
+                "accepted": True, "action_id": "recall", "maid_id": "m",
+                "generation": 1, "sequence": 1,
+                "kind": "return_to_position", "status": "RUNNING",
+            },
+        }
+        plugin = FakePlugin([pending, pending, accepted])
+        plugin.connected = True
+        service = MaidActionService(plugin)
+
+        result = await service.start_action(
+            action_id="recall", maid_id="m", kind="return_to_position",
+            args={"destination": "player", "handoff_to_follow": True},
+        )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(3, len(plugin.requests))
+        self.assertTrue(all(
+            request[0]["data"]["action_id"] == "recall"
+            for request in plugin.requests
+        ))
+
     async def test_return_to_position_service_default_has_no_deadline(self):
         plugin = FakePlugin([{
             "type": "maid_action_start_result",
@@ -70,6 +103,32 @@ class MaidActionServiceTests(unittest.IsolatedAsyncioTestCase):
             maid_id="m",
             kind="return_to_position",
             args={"target": {"x": 0, "y": 70, "z": 0}},
+        )
+        self.assertTrue(result["success"])
+        request, _ = plugin.requests[0]
+        self.assertEqual(0, request["data"]["timeout_ms"])
+
+    async def test_ore_selector_service_forces_no_deadline(self):
+        plugin = FakePlugin([{
+            "type": "maid_action_start_result",
+            "data": {
+                "accepted": True, "action_id": "ore", "maid_id": "m",
+                "generation": 1, "sequence": 1,
+                "kind": "harvest_blocks", "status": "RUNNING",
+            },
+        }])
+        plugin.connected = True
+        service = MaidActionService(plugin)
+        result = await service.start_action(
+            action_id="ore",
+            maid_id="m",
+            kind="harvest_blocks",
+            args={
+                "selector": {
+                    "type": "tag", "id": "minecraft:diamond_ores",
+                },
+            },
+            timeout_ms=60000,
         )
         self.assertTrue(result["success"])
         request, _ = plugin.requests[0]
